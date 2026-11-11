@@ -131,7 +131,9 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
 
             // ---- pick request on click (and a cheap hover pick each frame
             // so the status bar + context menu know what's under the cursor)
-            if resp.clicked() || (resp.drag_started() && app.mode == Mode::Move) {
+            if resp.clicked()
+                || (resp.drag_started_by(egui::PointerButton::Primary) && app.mode == Mode::Move)
+            {
                 if let Some(mv) = mouse_vp {
                     let px = (mv.x * w_px as f32).min(w_px as f32 - 1.0) as u32;
                     let py = (mv.y * h_px as f32).min(h_px as f32 - 1.0) as u32;
@@ -363,31 +365,33 @@ fn on_pick(
 ) {
     match app.mode {
         Mode::Connect => {
+            // Only a hit on a neuron changes state: a missed click keeps the
+            // pending source (dense scenes make small cubes easy to miss),
+            // so Esc is the only way to abort a pending connection.
             if let Some(inst) = res {
-                if let Some(g) = &app.geo {
-                    match entity_of(g, inst) {
-                        Some(Entity::Neuron(n)) => {
-                            if let Some(from_inst) = app.connect_from {
-                                // finish: create synapse
-                                if let (Some(Entity::Neuron(a)), Some(Entity::Neuron(b))) =
-                                    (entity_of(g, from_inst), entity_of(g, inst))
-                                {
-                                    app.connect_neurons(a, b);
-                                }
-                                app.connect_from = None;
-                            } else {
-                                let _ = n;
-                                app.connect_from = Some(inst);
-                                app.status = "connect: pick target".into();
-                            }
-                        }
-                        _ => {
-                            app.connect_from = None;
+                match app.geo.as_ref().and_then(|g| entity_of(g, inst)) {
+                    Some(Entity::Neuron(n)) => {
+                        let a = app
+                            .connect_from
+                            .take()
+                            .and_then(|fi| app.geo.as_ref().and_then(|g| entity_of(g, fi)))
+                            .and_then(|e| match e {
+                                Entity::Neuron(a) => Some(a),
+                                _ => None,
+                            });
+                        if let Some(a) = a {
+                            app.connect_neurons(a, n);
+                        } else {
+                            app.connect_from = Some(inst);
+                            app.status = "connect: pick target".into();
                         }
                     }
+                    _ => {
+                        app.status = "connect: that's not a neuron".into();
+                    }
                 }
-            } else {
-                app.connect_from = None;
+            } else if app.connect_from.is_some() {
+                app.status = "connect: missed — click a target neuron".into();
             }
         }
         Mode::Move => {
@@ -451,7 +455,7 @@ fn mode_input(
             }
         }
         Mode::Move => {
-            if resp.dragged() {
+            if resp.dragged_by(egui::PointerButton::Primary) {
                 if let (Some(mv), Some(md)) = (mouse_vp, app.move_drag.clone()) {
                     let (ro, rd) = ray(&app.camera, aspect, mv.x, mv.y);
                     if let Some(hit) = plane_hit(app.plane, app.camera.target, ro, rd) {
@@ -462,7 +466,7 @@ fn mode_input(
                     }
                 }
             }
-            if resp.drag_stopped() {
+            if resp.drag_stopped_by(egui::PointerButton::Primary) {
                 if let (Some(md), Some(d)) = (app.move_drag.take(), app.preview_delta.take()) {
                     app.apply_move(&md, d);
                     app.status.clear();
@@ -470,19 +474,20 @@ fn mode_input(
             }
         }
         Mode::Navigate => {
-            if resp.drag_started() {
+            if resp.drag_started_by(egui::PointerButton::Primary) {
                 if let Some(p) = resp.interact_pointer_pos() {
                     app.box_sel = Some((p, p));
                 }
             }
-            if resp.dragged() {
+            if resp.dragged_by(egui::PointerButton::Primary) {
                 if let (Some((a, _)), Some(cur)) = (app.box_sel, resp.interact_pointer_pos()) {
                     app.box_sel = Some((a, cur));
                 }
             }
-            if resp.drag_stopped() {
+            if resp.drag_stopped_by(egui::PointerButton::Primary) {
                 if let Some((a, b)) = app.box_sel.take() {
-                    box_select(app, rect, a, b, aspect);
+                    let shift = resp.ctx.input(|i| i.modifiers.shift);
+                    box_select(app, rect, a, b, aspect, shift);
                 }
             }
             // double-click focus: CPU nearest on ray
@@ -527,10 +532,19 @@ fn nearest_on_ray(g: &GeoSnap, ro: Vec3, rd: Vec3, max_t: f32) -> Option<u32> {
     best
 }
 
-fn box_select(app: &mut EditorApp, rect: egui::Rect, a: egui::Pos2, b: egui::Pos2, aspect: f32) {
+fn box_select(
+    app: &mut EditorApp,
+    rect: egui::Rect,
+    a: egui::Pos2,
+    b: egui::Pos2,
+    aspect: f32,
+    additive: bool,
+) {
     let Some(g) = app.geo.clone() else { return };
     let (min, max) = (a.min(b), a.max(b));
-    app.selection.clear();
+    if !additive {
+        app.selection.clear();
+    }
     let rw = rect.width();
     let rh = rect.height();
     let total = g.pos.len() + g.inputs.len() + g.readouts.len();
