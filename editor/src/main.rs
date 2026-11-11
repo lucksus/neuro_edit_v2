@@ -36,6 +36,9 @@ struct Cli {
     /// Hide synapse lines in the screenshot.
     #[arg(long)]
     no_synapses: bool,
+    /// CUDA: fixed-point synaptic ring → bitwise reproducible runs.
+    #[arg(long)]
+    int_weights: bool,
     #[arg(long, default_value_t = 1)]
     seed: u64,
 }
@@ -63,6 +66,7 @@ fn main() -> anyhow::Result<()> {
             backend,
             seed: cli.seed,
             show_syn: !cli.no_synapses,
+            int_weights: cli.int_weights,
         };
         return pollster::block_on(editor::shot::render_headless(opts));
     }
@@ -75,7 +79,15 @@ fn main() -> anyhow::Result<()> {
         }),
         None => net_format::Network::new(),
     };
-    let ctl = editor::simctl::SimCtl::start(net, backend, cli.seed);
+    let ctl = editor::simctl::SimCtl::start_cfg(
+        net,
+        backend,
+        cli.seed,
+        sim::SimConfig {
+            int_weights: cli.int_weights,
+            ..Default::default()
+        },
+    );
     if let Some(s) = &cli.script {
         let code = std::fs::read_to_string(s)?;
         ctl.send(editor::simctl::Cmd::Eval(code));

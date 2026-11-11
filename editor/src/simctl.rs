@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use net_format::Network;
 use sim::script::{Env, ProgressFn};
-use sim::{BackendKind, Sim};
+use sim::{BackendKind, Sim, SimConfig};
 
 use crate::snap::{GeoSnap, InputSnap, Shared, SharedRef, Snap};
 
@@ -82,6 +82,12 @@ struct Pub {
 
 impl SimCtl {
     pub fn start(net: Network, backend: BackendKind, seed: u64) -> SimCtl {
+        Self::start_cfg(net, backend, seed, SimConfig::default())
+    }
+
+    /// Like `start` but lets the caller set extra `SimConfig` fields
+    /// (e.g. `int_weights`); `seed` still overrides the config's.
+    pub fn start_cfg(net: Network, backend: BackendKind, seed: u64, cfg: SimConfig) -> SimCtl {
         let shared: SharedRef = Arc::new(RwLock::new(Shared::default()));
         let abort = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel::<Cmd>();
@@ -89,7 +95,7 @@ impl SimCtl {
         let ab2 = abort.clone();
         let handle = std::thread::Builder::new()
             .name("sim-worker".into())
-            .spawn(move || worker(net, backend, seed, rx, sh2, ab2))
+            .spawn(move || worker(net, backend, seed, cfg, rx, sh2, ab2))
             .expect("spawn sim worker");
         SimCtl {
             tx,
@@ -117,6 +123,7 @@ fn worker(
     net: Network,
     backend: BackendKind,
     seed: u64,
+    cfg: SimConfig,
     rx: mpsc::Receiver<Cmd>,
     shared: SharedRef,
     abort: Arc<AtomicBool>,
@@ -128,6 +135,7 @@ fn worker(
         }
     });
     let mut env = Env::with_print(net, backend, seed, print);
+    *env.cfg.borrow_mut() = SimConfig { seed, ..cfg };
 
     let pub_rc = Rc::new(std::cell::RefCell::new(Pub {
         watch: Watch {

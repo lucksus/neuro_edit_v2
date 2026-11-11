@@ -21,6 +21,7 @@ pub struct ShotOpts {
     pub backend: BackendKind,
     pub seed: u64,
     pub show_syn: bool,
+    pub int_weights: bool,
 }
 
 pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
@@ -48,6 +49,7 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
         SimConfig {
             seed: o.seed,
             record_spikes: true,
+            int_weights: o.int_weights,
             ..Default::default()
         },
         o.backend,
