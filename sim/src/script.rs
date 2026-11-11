@@ -24,6 +24,10 @@ pub type CfgHandle = Rc<RefCell<SimConfig>>;
 /// Where `print` goes. Headless: stdout; editor: the console pane.
 pub type PrintFn = Rc<dyn Fn(&str)>;
 
+/// Called between run chunks (editor only): publish snapshots, check pause.
+/// Return `false` to abort the rest of a chunked run (pause pressed).
+pub type ProgressFn = Rc<RefCell<dyn FnMut(&Sim) -> bool>>;
+
 /// Scripting environment: engine + shared handles.
 pub struct Env {
     pub engine: Engine,
@@ -33,6 +37,12 @@ pub struct Env {
     pub cfg: CfgHandle,
     sim: SimSlot,
     pub on_print: PrintFn,
+    /// Bumped on every net mutation (any fn that invalidates the sim).
+    pub net_version: Rc<std::cell::Cell<u64>>,
+    /// Between-chunks callback; `None` in headless use.
+    pub progress: Rc<RefCell<Option<ProgressFn>>>,
+    /// Chunk length for progress callbacks, in steps.
+    pub progress_chunk: Rc<std::cell::Cell<usize>>,
 }
 
 impl Env {
@@ -55,6 +65,9 @@ impl Env {
             let p = on_print.clone();
             engine.on_print(move |s| p(s));
         }
+        let net_version = Rc::new(std::cell::Cell::new(1u64));
+        let progress: Rc<RefCell<Option<ProgressFn>>> = Rc::new(RefCell::new(None));
+        let progress_chunk = Rc::new(std::cell::Cell::new(200usize));
         register_api(
             &mut engine,
             net.clone(),
@@ -62,6 +75,9 @@ impl Env {
             rng.clone(),
             cfg.clone(),
             backend,
+            net_version.clone(),
+            progress.clone(),
+            progress_chunk.clone(),
         );
         Env {
             engine,
@@ -71,7 +87,16 @@ impl Env {
             cfg,
             sim,
             on_print,
+            net_version,
+            progress,
+            progress_chunk,
         }
+    }
+
+    /// Editor mode: `cb` runs between run chunks so the UI can stream state.
+    pub fn set_progress(&mut self, chunk_steps: usize, cb: ProgressFn) {
+        self.progress_chunk.set(chunk_steps);
+        *self.progress.borrow_mut() = Some(cb);
     }
 
     /// Build (or rebuild) the simulator from the current network + config.
@@ -180,7 +205,38 @@ fn ensure_sim(
     Ok(h)
 }
 
+/// Net mutated: drop the stale sim and bump the version (editor republish).
+fn invalidate(s: &SimSlot, ver: &Rc<std::cell::Cell<u64>>) {
+    *s.borrow_mut() = None;
+    ver.set(ver.get() + 1);
+}
+
+/// Step `h` `steps` times, calling `progress` between chunks when set.
+fn run_chunked(
+    h: &Rc<RefCell<Sim>>,
+    mut steps: usize,
+    progress: &Rc<RefCell<Option<ProgressFn>>>,
+    chunk: &Rc<std::cell::Cell<usize>>,
+) {
+    let mut p = progress.borrow_mut();
+    match p.as_mut() {
+        Some(cb) => {
+            let n_chunk = chunk.get().max(1);
+            while steps > 0 {
+                let n = steps.min(n_chunk);
+                h.borrow_mut().run_steps(n);
+                steps -= n;
+                if !(*cb.borrow_mut())(&h.borrow()) {
+                    break;
+                }
+            }
+        }
+        None => h.borrow_mut().run_steps(steps),
+    }
+}
+
 /// Register the whole API on an engine, capturing the shared handles.
+#[allow(clippy::too_many_arguments)]
 pub fn register_api(
     engine: &mut Engine,
     net: NetHandle,
@@ -188,6 +244,9 @@ pub fn register_api(
     rng: RngHandle,
     cfg: CfgHandle,
     backend: BackendKind,
+    net_version: Rc<std::cell::Cell<u64>>,
+    progress: Rc<RefCell<Option<ProgressFn>>>,
+    progress_chunk: Rc<std::cell::Cell<usize>>,
 ) {
     engine
         .register_type_with_name::<NetHandle>("Net")
@@ -204,11 +263,11 @@ pub fn register_api(
 
     // ---- net methods ----
     {
-        let s = sim.clone();
+        let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
             "add_neuron",
             move |n: &mut NetHandle, x: f64, y: f64, z: f64| -> rhai::INT {
-                *s.borrow_mut() = None; // net changed -> stale sim
+                invalidate(&s, &v);
                 n.borrow_mut()
                     .add_neuron([x as f32, y as f32, z as f32], NeuronKind::Excitatory)
                     as rhai::INT
@@ -231,11 +290,11 @@ pub fn register_api(
         },
     );
     {
-        let s = sim.clone();
+        let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
             "create_2d_grid",
             move |n: &mut NetHandle, g: &str, w: rhai::INT, h: rhai::INT, d: f64| {
-                *s.borrow_mut() = None;
+                invalidate(&s, &v);
                 builders::create_2d_grid(
                     &mut n.borrow_mut(),
                     g,
@@ -248,7 +307,7 @@ pub fn register_api(
         );
     }
     {
-        let s = sim.clone();
+        let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
             "create_3d_grid",
             move |n: &mut NetHandle,
@@ -257,7 +316,7 @@ pub fn register_api(
                   h: rhai::INT,
                   dep: rhai::INT,
                   d: f64| {
-                *s.borrow_mut() = None;
+                invalidate(&s, &v);
                 builders::create_3d_grid(
                     &mut n.borrow_mut(),
                     g,
@@ -271,11 +330,11 @@ pub fn register_api(
         );
     }
     {
-        let (r, s) = (rng.clone(), sim.clone());
+        let (r, s, v) = (rng.clone(), sim.clone(), net_version.clone());
         engine.register_fn(
             "create_connections",
             move |n: &mut NetHandle, g: &str, scaling: f64, lambda: f64, w: f64| {
-                *s.borrow_mut() = None;
+                invalidate(&s, &v);
                 builders::create_connections(
                     &mut n.borrow_mut(),
                     g,
@@ -288,11 +347,11 @@ pub fn register_api(
         );
     }
     {
-        let (r, s) = (rng.clone(), sim.clone());
+        let (r, s, v) = (rng.clone(), sim.clone(), net_version.clone());
         engine.register_fn(
             "set_synapse_weights",
             move |n: &mut NetHandle, g: &str, mean: f64, sd: f64| {
-                *s.borrow_mut() = None;
+                invalidate(&s, &v);
                 builders::set_synapse_weights(
                     &mut n.borrow_mut(),
                     g,
@@ -304,21 +363,21 @@ pub fn register_api(
         );
     }
     {
-        let (r, s) = (rng.clone(), sim.clone());
+        let (r, s, v) = (rng.clone(), sim.clone(), net_version.clone());
         engine.register_fn(
             "set_exc_inh",
             move |n: &mut NetHandle, g: &str, frac: f64| {
-                *s.borrow_mut() = None;
+                invalidate(&s, &v);
                 builders::set_exc_inh(&mut n.borrow_mut(), g, frac, &mut r.borrow_mut());
             },
         );
     }
     {
-        let s = sim.clone();
+        let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
             "set_izh",
             move |n: &mut NetHandle, id: rhai::INT, a: f64, b: f64, c: f64, d: f64| {
-                *s.borrow_mut() = None;
+                invalidate(&s, &v);
                 n.borrow_mut().neuron_mut(id as u32).model = net_format::NeuronModel::Izhikevich {
                     a: a as f32,
                     b: b as f32,
@@ -329,29 +388,29 @@ pub fn register_api(
         );
     }
     {
-        let s = sim.clone();
+        let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn("delete_neuron", move |n: &mut NetHandle, id: rhai::INT| {
-            *s.borrow_mut() = None;
+            invalidate(&s, &v);
             n.borrow_mut().delete_neuron(id as u32);
         });
     }
     {
-        let s = sim.clone();
+        let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
             "delete_neurons",
             move |n: &mut NetHandle, ids: rhai::Array| {
-                *s.borrow_mut() = None;
+                invalidate(&s, &v);
                 n.borrow_mut()
                     .delete_neurons(ids.iter().map(|d| d_i64(d) as u32).collect());
             },
         );
     }
     {
-        let s = sim.clone();
+        let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
             "set_pos",
             move |n: &mut NetHandle, id: rhai::INT, x: f64, y: f64, z: f64| {
-                *s.borrow_mut() = None;
+                invalidate(&s, &v);
                 let mut g = n.borrow_mut();
                 g.neuron_mut(id as u32).pos = [x as f32, y as f32, z as f32];
                 g.refresh_delays_of(id as u32);
@@ -409,11 +468,11 @@ pub fn register_api(
         },
     );
     {
-        let s = sim.clone();
+        let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
             "add_input",
             move |n: &mut NetHandle, name: &str, targets: rhai::Array| {
-                *s.borrow_mut() = None;
+                invalidate(&s, &v);
                 let mut tw = Vec::new();
                 for t in targets {
                     if let Some(arr) = t.try_cast::<rhai::Array>() {
@@ -439,13 +498,13 @@ pub fn register_api(
         }
     });
     {
-        let s = sim.clone();
+        let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
             "load",
             move |n: &mut NetHandle, path: &str| match net_format::io::load(path) {
                 Ok(loaded) => {
                     *n.borrow_mut() = loaded;
-                    *s.borrow_mut() = None;
+                    invalidate(&s, &v);
                 }
                 Err(e) => eprintln!("load {path}: {e}"),
             },
@@ -460,22 +519,25 @@ pub fn register_api(
     // ---- sim methods ----
     {
         let (s, n, c) = (sim.clone(), net.clone(), cfg.clone());
+        let (p, pc) = (progress.clone(), progress_chunk.clone());
         engine.register_fn(
             "run",
             move |_: &mut SimSlot, ms: f64| -> Result<(), Box<rhai::EvalAltResult>> {
                 let h = ensure_sim(&s, &n, &c, backend)?;
-                h.borrow_mut().run_ms(ms as f32);
+                let steps = (ms as f32 / c.borrow().dt_ms).round().max(0.0) as usize;
+                run_chunked(&h, steps, &p, &pc);
                 Ok(())
             },
         );
     }
     {
         let (s, n, c) = (sim.clone(), net.clone(), cfg.clone());
+        let (p, pc) = (progress.clone(), progress_chunk.clone());
         engine.register_fn(
             "run_steps",
             move |_: &mut SimSlot, steps: rhai::INT| -> Result<(), Box<rhai::EvalAltResult>> {
                 let h = ensure_sim(&s, &n, &c, backend)?;
-                h.borrow_mut().run_steps(steps as usize);
+                run_chunked(&h, steps.max(0) as usize, &p, &pc);
                 Ok(())
             },
         );
