@@ -114,6 +114,21 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
                 .or(resp.hover_pos())
                 .map(|p| Vec2::new((p.x - rect.min.x) / w, (p.y - rect.min.y) / h));
 
+            // ---- pick result first: frees the pick slot so a click this
+            // frame can always be queued (the every-frame hover pick would
+            // otherwise starve click picks ~half the time) ----
+            let mut picked: Option<(bool, Option<u32>)> = None;
+            with_gpu(rs, |gpu| {
+                picked = gpu.poll_pick();
+            });
+            if let Some((hover, res)) = picked {
+                if hover {
+                    app.hover = res;
+                } else {
+                    on_pick(app, res, ctx, mouse_vp, aspect);
+                }
+            }
+
             // ---- pick request on click (and a cheap hover pick each frame
             // so the status bar + context menu know what's under the cursor)
             if resp.clicked() || (resp.drag_started() && app.mode == Mode::Move) {
@@ -127,19 +142,6 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
                     let px = (mv.x * w_px as f32).min(w_px as f32 - 1.0) as u32;
                     let py = (mv.y * h_px as f32).min(h_px as f32 - 1.0) as u32;
                     with_gpu(rs, |gpu| gpu.request_pick(px, py, w_px, h_px, true));
-                }
-            }
-
-            // ---- pick result (arrives a frame or two later) ----
-            let mut picked: Option<(bool, Option<u32>)> = None;
-            with_gpu(rs, |gpu| {
-                picked = gpu.poll_pick();
-            });
-            if let Some((hover, res)) = picked {
-                if hover {
-                    app.hover = res;
-                } else {
-                    on_pick(app, res, ctx, mouse_vp, aspect);
                 }
             }
 
@@ -221,7 +223,11 @@ fn camera_input(app: &mut EditorApp, ctx: &egui::Context, resp: &egui::Response)
         app.camera.zoom(wheel);
     }
     let (mut pr, mut pf, mut pu) = (0f32, 0f32, 0f32);
+    let typing = ctx.wants_keyboard_input();
     ctx.input(|i| {
+        if typing {
+            return;
+        }
         if i.key_down(egui::Key::W) {
             pf += 1.0;
         }
@@ -247,6 +253,9 @@ fn camera_input(app: &mut EditorApp, ctx: &egui::Context, resp: &egui::Response)
 }
 
 fn keys(app: &mut EditorApp, ui: &mut egui::Ui) {
+    if ui.ctx().wants_keyboard_input() {
+        return; // a text field owns the keyboard — don't fire shortcuts
+    }
     ui.input(|i| {
         if i.key_pressed(egui::Key::Escape) {
             app.mode = Mode::Navigate;
