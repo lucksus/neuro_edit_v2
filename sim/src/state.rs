@@ -22,6 +22,10 @@ pub struct SimConfig {
     pub record_spikes: bool,
     /// Rolling window depth, in steps.
     pub spike_record_steps: usize,
+    /// CUDA only: accumulate the delay ring in 32-bit fixed point
+    /// (scale 4096). Integer atomicAdd is order-independent, so runs are
+    /// bitwise reproducible; the float ring is not (atomic order varies).
+    pub int_weights: bool,
 }
 
 impl Default for SimConfig {
@@ -35,6 +39,7 @@ impl Default for SimConfig {
             seed: 1,
             record_spikes: false,
             spike_record_steps: 512,
+            int_weights: false,
         }
     }
 }

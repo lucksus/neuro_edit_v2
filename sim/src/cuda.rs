@@ -32,7 +32,9 @@ pub struct CudaSim {
     s: CudaSlice<f32>,
     trace: CudaSlice<f32>,
     ext: CudaSlice<f32>,
-    ring: CudaSlice<f32>,
+    /// Delay ring: f32 elements, or i32 fixed-point (scale 4096) when
+    /// `cfg.int_weights` — same 4-byte words either way.
+    ring: CudaSlice<u32>,
     a: CudaSlice<f32>,
     b: CudaSlice<f32>,
     c: CudaSlice<f32>,
@@ -80,8 +82,14 @@ impl CudaSim {
         let ctx = CudaContext::new(0).context("no CUDA device / driver")?;
         let stream = ctx.default_stream();
 
-        // NVRTC compile for this device's arch.
-        let ptx = nvrtc::compile_ptx(KERNELS_SRC).context("NVRTC compile")?;
+        // NVRTC compile for this device's arch. int_weights selects the
+        // fixed-point delay ring (bitwise-reproducible accumulation).
+        let src = if cfg.int_weights {
+            format!("#define INT_RING 1\n{KERNELS_SRC}")
+        } else {
+            KERNELS_SRC.to_string()
+        };
+        let ptx = nvrtc::compile_ptx(&src).context("NVRTC compile")?;
         let module: Arc<CudaModule> = ctx.load_module(ptx).context("load_module")?;
         let f_neuron = module.load_function("neuron_kernel")?;
         let f_prop = module.load_function("prop_kernel")?;

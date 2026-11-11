@@ -113,10 +113,16 @@ editor --screenshot big.png  --net big.ne2 --no-synapses
   closures invoked via `.call(...)`. Same constraint will apply to editor
   console scripts.
 - **GPU determinism**: `float atomics` in the prop kernel sum synaptic input
-  in nondeterministic order → GPU runs are not bitwise identical between runs
-  (or vs CPU). For the seeded example this doesn't matter (streams are
-  host-generated). Integer/fixed-point weights would fix it; noted as an
-  option, not implemented.
+  in nondeterministic order → default (float) GPU runs are not bitwise
+  identical between runs (or vs CPU). Implemented fix: `--int-weights` /
+  `SimConfig::int_weights` / `sim.set_int_weights(1)` compiles a kernel
+  variant whose delay ring is 32-bit fixed point (scale 4096); int
+  atomicAdd is order-independent, so runs are bitwise reproducible.
+  Verified: `gpu_int_weights_bitwise_deterministic` (identical v + spike
+  bitmaps across two seeded runs) and `--bench 10000 --int-weights` twice
+  → identical 104384 spikes / 20.9 Hz. Weights quantize to 1/4096 —
+  `gpu_int_weights_close_to_float` checks the regime stays within 30%
+  of the float run (measured ~same at 10k).
 - **Sim threading for the editor**: implemented as described — worker owns
   `Env` (net+sim+Rhai), snapshots via `Arc<RwLock<Shared>>`; geometry only
   re-uploaded on `net_version` change; activity/spikes every progress chunk.

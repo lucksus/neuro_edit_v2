@@ -263,7 +263,7 @@ pub fn register_api(
 
     // ---- help ----
     engine.register_fn("help", || -> String {
-        "API:\n  net.add_neuron(x,y,z)  net.connect(a,b,w)\n  net.create_2d_grid(g,w,h,d)  net.create_3d_grid(g,w,h,d,sp)\n  net.create_connections(g,scaling,lambda,w)  net.set_synapse_weights(g,mean,sd)\n  net.set_exc_inh(g,frac)  net.neurons_of(g)  net.add_input(name,[[n,w],..])\n  net.neuron_count()  net.synapse_count()  net.save(path)  net.load(path)\n  sim.run(ms)  sim.run_steps(n)  sim.time()  sim.reset()  sim.rate()  sim.spikes()\n  sim.trace()  sim.trace_of(ids)  sim.v(id)  sim.set_input(name,x)\n  sim.play_input(name,arr)  sim.set_external(id,amps)  sim.set_noise(hz,kick)\n  sim.rebuild()  sim.set_dt(dt)\n  net.add_readout(name,units)  net.set_readout_weights(name,w)  net.readout_weights(name)\n  net.samples_write(n,t,v)  net.samples_save(n,p)  net.samples_load(n,p)\n  net.script_add(n,code)  net.script_remove(n)\n  readouts: delta_new(n) r.learn(trace,target,rate) r.output(trace)\n  fit_ridge(x_flat,T,F,y,lambda)  ridge_output(w,x)  accuracy(s,y)  auc(s,y)\n  streams: rng_stream(seed,n_src,p) .window(steps,label,pairs,strength)\n  misc: rand(a,b)  gauss(m,sd)  seed(s)  print(x)"
+        "API:\n  net.add_neuron(x,y,z)  net.connect(a,b,w)\n  net.create_2d_grid(g,w,h,d)  net.create_3d_grid(g,w,h,d,sp)\n  net.create_connections(g,scaling,lambda,w)  net.set_synapse_weights(g,mean,sd)\n  net.set_exc_inh(g,frac)  net.neurons_of(g)  net.add_input(name,[[n,w],..])\n  net.neuron_count()  net.synapse_count()  net.save(path)  net.load(path)\n  sim.run(ms)  sim.run_steps(n)  sim.time()  sim.reset()  sim.rate()  sim.spikes()\n  sim.trace()  sim.trace_of(ids)  sim.v(id)  sim.set_input(name,x)\n  sim.play_input(name,arr)  sim.set_external(id,amps)  sim.set_noise(hz,kick)\n  sim.rebuild()  sim.set_dt(dt)  sim.set_int_weights(on)\n  net.add_readout(name,units)  net.set_readout_weights(name,w)  net.readout_weights(name)\n  net.samples_write(n,t,v)  net.samples_save(n,p)  net.samples_load(n,p)\n  net.script_add(n,code)  net.script_remove(n)\n  readouts: delta_new(n) r.learn(trace,target,rate) r.output(trace)\n  fit_ridge(x_flat,T,F,y,lambda)  ridge_output(w,x)  accuracy(s,y)  auc(s,y)\n  streams: rng_stream(seed,n_src,p) .window(steps,label,pairs,strength)\n  misc: rand(a,b)  gauss(m,sd)  seed(s)  print(x)"
             .to_string()
     });
 
@@ -784,6 +784,13 @@ pub fn register_api(
         engine.register_fn("set_dt", move |_: &mut SimSlot, dt: f64| {
             c.borrow_mut().dt_ms = dt as f32;
             *s.borrow_mut() = None; // ring depth depends on dt
+        });
+    }
+    {
+        let (c, s) = (cfg.clone(), sim.clone());
+        engine.register_fn("set_int_weights", move |_: &mut SimSlot, on: rhai::INT| {
+            c.borrow_mut().int_weights = on != 0;
+            *s.borrow_mut() = None; // switches the kernel + ring semantics
         });
     }
 

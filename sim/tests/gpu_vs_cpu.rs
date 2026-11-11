@@ -79,3 +79,68 @@ fn gpu_cpu_close_with_noise() {
     let v = gpu.v();
     assert!(v.iter().all(|x| *x < 100.0 && *x > -200.0));
 }
+
+/// Integer fixed-point ring: two identical seeded runs must produce bitwise
+/// identical state — int atomicAdd is order-independent, float is not.
+#[test]
+fn gpu_int_weights_bitwise_deterministic() {
+    if !gpu_available() {
+        eprintln!("no GPU, skipping");
+        return;
+    }
+    let net = lsm_like_net(8, 5);
+    let cfg = SimConfig {
+        noise_rate_hz: 2000.0,
+        noise_kick_mv: 20.0,
+        seed: 7,
+        int_weights: true,
+        record_spikes: true,
+        ..Default::default()
+    };
+    let mut a = Sim::new(&net, cfg.clone(), BackendKind::Cuda).unwrap();
+    let mut b = Sim::new(&net, cfg, BackendKind::Cuda).unwrap();
+    a.run_ms(80.0);
+    b.run_ms(80.0);
+    assert_eq!(a.spikes_total(), b.spikes_total());
+    // v(u8-quantized or not) and the recorded spike bitmap must match exactly
+    assert_eq!(a.v(), b.v(), "v differs between identical int-ring runs");
+    assert_eq!(a.spike_counts(64), b.spike_counts(64));
+    // sanity: it actually ran and spiked
+    assert!(a.spikes_total() > 0);
+}
+
+/// The int-ring result should stay close to the float ring (same regime,
+/// small quantization drift allowed).
+#[test]
+fn gpu_int_weights_close_to_float() {
+    if !gpu_available() {
+        eprintln!("no GPU, skipping");
+        return;
+    }
+    let net = lsm_like_net(8, 11);
+    let base = SimConfig {
+        noise_rate_hz: 2000.0,
+        noise_kick_mv: 20.0,
+        seed: 3,
+        ..Default::default()
+    };
+    let mut f = Sim::new(&net, base.clone(), BackendKind::Cuda).unwrap();
+    let mut i = Sim::new(
+        &net,
+        SimConfig {
+            int_weights: true,
+            ..base
+        },
+        BackendKind::Cuda,
+    )
+    .unwrap();
+    f.run_ms(80.0);
+    i.run_ms(80.0);
+    let (tf, ti) = (f.spikes_total() as f64, i.spikes_total() as f64);
+    eprintln!("float={tf} int={ti}");
+    assert!(tf > 0.0 && ti > 0.0);
+    assert!(
+        (tf - ti).abs() / tf.max(1.0) < 0.3,
+        "int ring diverged from float: float={tf} int={ti}"
+    );
+}

@@ -71,6 +71,11 @@ struct Args {
     /// Seed
     #[arg(long, default_value_t = 1)]
     seed: u64,
+
+    /// CUDA: accumulate synaptic input in 32-bit fixed point → bitwise
+    /// reproducible GPU runs (float atomics are not).
+    #[arg(long)]
+    int_weights: bool,
 }
 
 fn load_net(path: &PathBuf) -> anyhow::Result<Network> {
@@ -92,7 +97,18 @@ fn main() -> ExitCode {
         let net =
             sim::bench::bench_net(n, args.bench_k, args.seed, args.wscale, args.w_inh, args.dt);
         let r = sim::bench::run_bench(
-            &net, backend, args.dt, args.ms, args.warm, args.noise, args.seed,
+            &net,
+            backend,
+            sim::SimConfig {
+                dt_ms: args.dt,
+                noise_rate_hz: args.noise,
+                noise_kick_mv: 20.0,
+                seed: args.seed,
+                int_weights: args.int_weights,
+                ..Default::default()
+            },
+            args.ms,
+            args.warm,
         );
         println!(
             "{:?} N={} syn={} dt={} sim={}ms wall={:.3}s realtime_x={:.2} rate={:.1}Hz spikes={} gpu_mem={}MB",
@@ -131,6 +147,7 @@ fn main() -> ExitCode {
     };
     env.cfg.borrow_mut().dt_ms = args.dt;
     env.cfg.borrow_mut().noise_rate_hz = args.noise;
+    env.cfg.borrow_mut().int_weights = args.int_weights;
 
     if let Some(path) = &args.script {
         let code = match std::fs::read_to_string(path) {

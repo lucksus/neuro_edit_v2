@@ -10,6 +10,20 @@ typedef unsigned long long u64;
 typedef unsigned int u32;
 typedef unsigned short u16;
 
+// Delay-ring element type. With INT_RING the ring is 32-bit fixed point
+// (WSCALE 4096): int atomicAdd is order-independent, so runs are bitwise
+// reproducible — the float ring is not.
+#ifdef INT_RING
+  #define WSCALE 4096.f
+  typedef int rt_t;
+  __device__ __forceinline__ float rt_get(rt_t x){ return (float)x / WSCALE; }
+  __device__ __forceinline__ rt_t rt_put(float w){ return (int)lrintf(w * WSCALE); }
+#else
+  typedef float rt_t;
+  __device__ __forceinline__ float rt_get(rt_t x){ return x; }
+  __device__ __forceinline__ rt_t rt_put(float w){ return w; }
+#endif
+
 // Same mixing as state::noise_hash on the CPU.
 __device__ __forceinline__ u32 noise_hash(u32 i, u64 t, u64 seed){
   u32 h = (u32)((u64)i * 747796405ull + t * 2891336453ull + seed * 12345ull);
@@ -23,7 +37,7 @@ extern "C" __global__ void neuron_kernel(
     float pkick, float kick,
     float* v, float* u, float* s, float* trace,
     const float* a, const float* b, const float* c, const float* d,
-    float* ring,
+    rt_t* ring,
     const float* ext,
     const float* stim, long long stim_t0, int n_inputs,
     const u32* stim_ptr, const u32* stim_input, const float* stim_w,
@@ -36,8 +50,8 @@ extern "C" __global__ void neuron_kernel(
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if(i >= N) return;
   int slot = (int)(t % (u64)D);
-  float arr = ring[(u64)slot * N + i];
-  ring[(u64)slot * N + i] = 0.f;
+  float arr = rt_get(ring[(u64)slot * N + i]);
+  ring[(u64)slot * N + i] = rt_put(0.f);
   float sv = s[i] + arr;
   float I = sv + ext[i];
 
@@ -84,7 +98,7 @@ extern "C" __global__ void prop_kernel(
     const int* spk, const int* cnt_cur, int* cnt_next,
     u64* spikes_total,
     const u32* src_ptr, const u32* tgt, const float* w, const u16* delay,
-    float* ring)
+    rt_t* ring)
 {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   if(tid == 0){
@@ -100,7 +114,7 @@ extern "C" __global__ void prop_kernel(
     u32 lo = src_ptr[i], hi = src_ptr[i + 1];
     for(u32 j = lo + lane; j < hi; j += 32){
       int slot = (int)((t + (u64)delay[j]) % (u64)D);
-      atomicAdd(&ring[(u64)slot * N + tgt[j]], w[j]);
+      atomicAdd(&ring[(u64)slot * N + tgt[j]], rt_put(w[j]));
     }
   }
 }

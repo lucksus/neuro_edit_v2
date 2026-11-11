@@ -68,20 +68,11 @@ pub struct BenchResult {
 pub fn run_bench(
     net: &Network,
     kind: BackendKind,
-    dt: f32,
+    mut cfg: SimConfig,
     sim_ms: f32,
     warm_ms: f32,
-    noise_hz: f32,
-    seed: u64,
 ) -> BenchResult {
-    let cfg = SimConfig {
-        dt_ms: dt,
-        noise_rate_hz: noise_hz,
-        noise_kick_mv: 20.0,
-        seed,
-        record_spikes: false,
-        ..Default::default()
-    };
+    cfg.record_spikes = false;
     let mut sim = Sim::new(net, cfg, kind).expect("sim init");
     let mut gpu_mem_mb = 0;
     #[cfg(feature = "cuda")]

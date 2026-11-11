@@ -68,11 +68,14 @@ editor --script examples/lsm_hidden.rhai   # run a script at startup
 ```
 
 Controls: right-drag orbit, wheel zoom, WASD pan; left-click select,
-shift-click add, box-select by dragging; `I` insert mode (click to place),
-`C` connect mode (drag neuron→neuron), `Del` deletes the selection; toolbar has
-run/pause/step, speed, dt and noise; bottom console evaluates Rhai (`sim`,
-`net` globals); panels: inspector, plots (v(t) traces of selected neurons,
-spike raster).
+shift-click add, box-select by dragging; right-click opens a context menu
+on the object under the cursor; `I` insert mode (click to place), `C`
+connect mode (click neuron→neuron), `M` move mode, `Del` deletes the
+selection; Ctrl+C/X/V copies/cuts/pastes selected subnets as JSON (system
+clipboard); toolbar has run/pause/step, speed, dt and noise; bottom console
+evaluates Rhai (`sim`, `net`, `rng` globals); panels: inspector, plots
+(v(t) traces, spike raster, readout weights, samples), multiline script
+editor with scripts saved inside the `.ne2`.
 
 Headless screenshot (no display needed):
 
