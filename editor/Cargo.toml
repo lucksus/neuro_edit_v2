@@ -7,3 +7,16 @@ version.workspace = true
 [dependencies]
 net-format = { path = "../net-format" }
 sim = { path = "../sim" }
+anyhow = "1"
+bytemuck = { version = "1", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
+eframe = { version = "0.32", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
+egui_plot = "0.33"
+glam = { version = "0.30", features = ["bytemuck"] }
+image = "0.25"
+pollster = "0.4"
+rhai = "1.20"
+wgpu = "25"
+
+[features]
+default = ["sim/cuda"]
