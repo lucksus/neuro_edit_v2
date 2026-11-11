@@ -518,6 +518,16 @@ impl Gpu {
             entity_of_inst.push(Entity::Readout(k as u32));
         }
         let inst_total = inst.len();
+        // An empty network (the editor starts on one) would make a zero-sized
+        // storage binding, which wgpu rejects. Draws use `entity_of_inst.len()`,
+        // so the placeholder is never drawn.
+        if inst.is_empty() {
+            inst.push(Inst {
+                pos_scale: [0.0; 4],
+                aux: 0,
+                _pad: [0; 3],
+            });
+        }
 
         let inst_buf = self
             .device
