@@ -4,8 +4,10 @@
 //! `cuda` (cudarc/NVRTC kernels). Both step the same flattened model built
 //! from `net_format::Network`.
 
+pub mod bench;
 pub mod cpu;
 pub mod readout;
+pub mod script;
 pub mod state;
 pub mod stim;
 
