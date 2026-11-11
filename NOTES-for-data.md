@@ -5,9 +5,9 @@ Working notes for Nico on neuro_edit v2 (Rust + CUDA rewrite).
 ## What works (commands + numbers)
 
 ### Workspace
-`cargo build --workspace`, `cargo test --workspace` (24 tests), `cargo clippy
+`cargo build --workspace`, `cargo test --workspace` (26 tests), `cargo clippy
 --workspace --all-targets` all clean. Target dir lives at `../neuro_edit_v2-target`
-(outside the repo; set via `.cargo/config.toml`).
+(outside the repo; `CARGO_TARGET_DIR` env var).
 
 ### Headless sim
 
@@ -48,21 +48,40 @@ drive a 512-neuron liquid (8x8x8 grid, distance-dependent connections). During
 labelled "event" windows each of 4 source *pairs* flips a shared coin
 (strength 0.8); per-stream marginals stay iid Bernoulli(0.5) — signal exists
 only in pairwise correlation. 200 train / 120 held-out windows, 50 ms each.
-Features = per-neuron spike rates over the window.
+Features = per-neuron spike rates over the window. The script loops over 12
+seeds, rebuilding the liquid each seed (`net.clear()`).
 
-Measured (seed=1, CUDA):
+Measured (12 seeds, CUDA; ~45 s):
 
 ```
-main          delta: acc=0.78 auc=0.88  ridge: acc=0.83 auc=0.88
-signal off    delta: acc=0.52 auc=0.53  ridge: acc=0.51 auc=0.53
-shuffled      delta: acc=0.50 auc=0.58  ridge: acc=0.46 auc=0.48
-raw baseline  delta: acc=0.50 auc=0.51  ridge: acc=0.53 auc=0.50
-sweep s:      0.0→auc~0.53  0.5→0.80  0.8→0.88  1.0→0.89 (ridge; delta similar)
+main          delta_auc = 0.880 ± 0.030   ridge_auc = 0.874 ± 0.032
+signal off    delta_auc = 0.484 ± 0.036   ridge_auc = 0.484 ± 0.035
+shuffled      delta_auc = 0.500 ± 0.001   ridge_auc = 0.500 ± 0.000
+raw baseline  delta_auc = 0.480 ± 0.051   ridge_auc = 0.482 ± 0.046
+shuffled single-draw ridge AUC: mean 0.500, sd 0.185
+sweep (seed 11): s=0.0→0.45  0.5→0.79  0.8→0.89  1.0→0.94 (ridge auc)
 ```
 
-All controls at chance, detection threshold visible in the sweep. Fully
-deterministic: identical numbers on CPU and CUDA runs (streams come from
-`rng_stream`, a seeded counter-based Rust RNG, not the sim's noise channel).
+**The shuffled-label bug (reviewer's finding, now fixed).** The old control
+retrained the readouts on ONE label permutation and reported that AUC. On
+this pipeline that single draw is *not* a point estimate at 0.5 — it's a
+draw from a wide null: 200 windows in 513 features are interpolated, so the
+weight vector fitted to random labels is large and its projection onto the
+true class-separation direction is randomly ±, scaling with the signal
+strength. Measured: single-draw sd ≈ 0.19, 28% of draws < 0.4 — seeds 7/42
+drew 0.28/0.32, which looked "~4 SE below chance" only against the wrong
+(within-sample) SE. There is no leak and no metric bug: over the full
+permutation group E[AUC] = 0.5 exactly, by complement symmetry
+(w(1−y) = −w(y) for ridge ⇒ scores negate ⇒ AUC → 1−AUC). The fix: the
+control now averages over NPERM=20 permutation *pairs* (each permutation
+and its label complement — antithetic pairs, so the per-seed null lands
+essentially exactly on 0.5) and the script also prints the single-draw sd
+so the spread stays visible. Regression test: `lsm_null.rs` reproduces the
+tail draw (0.344) and the ~0.5 mean at reduced scale.
+
+Fully deterministic: identical numbers on CPU and CUDA runs (streams come
+from `rng_stream`, a seeded counter-based Rust RNG, not the sim's noise
+channel).
 
 ### Editor + screenshots (headless-verified)
 
