@@ -114,23 +114,36 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
                 .or(resp.hover_pos())
                 .map(|p| Vec2::new((p.x - rect.min.x) / w, (p.y - rect.min.y) / h));
 
-            // ---- pick request on click ----
+            // ---- pick request on click (and a cheap hover pick each frame
+            // so the status bar + context menu know what's under the cursor)
             if resp.clicked() || (resp.drag_started() && app.mode == Mode::Move) {
                 if let Some(mv) = mouse_vp {
                     let px = (mv.x * w_px as f32).min(w_px as f32 - 1.0) as u32;
                     let py = (mv.y * h_px as f32).min(h_px as f32 - 1.0) as u32;
-                    with_gpu(rs, |gpu| gpu.request_pick(px, py, w_px, h_px));
+                    with_gpu(rs, |gpu| gpu.request_pick(px, py, w_px, h_px, false));
+                }
+            } else if resp.hovered() && !resp.dragged() {
+                if let Some(mv) = mouse_vp {
+                    let px = (mv.x * w_px as f32).min(w_px as f32 - 1.0) as u32;
+                    let py = (mv.y * h_px as f32).min(h_px as f32 - 1.0) as u32;
+                    with_gpu(rs, |gpu| gpu.request_pick(px, py, w_px, h_px, true));
                 }
             }
 
             // ---- pick result (arrives a frame or two later) ----
-            let mut picked: Option<Option<u32>> = None;
+            let mut picked: Option<(bool, Option<u32>)> = None;
             with_gpu(rs, |gpu| {
                 picked = gpu.poll_pick();
             });
-            if let Some(res) = picked {
-                on_pick(app, res, ctx, mouse_vp, aspect);
+            if let Some((hover, res)) = picked {
+                if hover {
+                    app.hover = res;
+                } else {
+                    on_pick(app, res, ctx, mouse_vp, aspect);
+                }
             }
+
+            context_menu(app, &resp);
 
             // ---- mode interactions ----
             mode_input(app, &resp, rect, mouse_vp, aspect);
@@ -258,6 +271,71 @@ fn keys(app: &mut EditorApp, ui: &mut egui::Ui) {
         }
         if i.modifiers.ctrl && i.key_pressed(egui::Key::V) {
             app.paste(None);
+        }
+    });
+}
+
+/// Right-click context menu on the entity under the cursor (or empty space).
+fn context_menu(app: &mut EditorApp, resp: &egui::Response) {
+    resp.context_menu(|ui| {
+        let ent = app
+            .hover
+            .and_then(|i| app.geo.as_ref().and_then(|g| entity_of(g, i)));
+        match ent {
+            Some(Entity::Neuron(n)) => {
+                ui.label(format!("neuron {n}"));
+                ui.separator();
+                if ui.button("Watch v(t)").clicked() {
+                    app.watch(vec![n]);
+                    ui.close();
+                }
+                if ui.button("Connect from here").clicked() {
+                    app.mode = Mode::Connect;
+                    app.connect_from = app.hover;
+                    ui.close();
+                }
+                if ui.button("Delete").clicked() {
+                    app.delete_entity(n);
+                    ui.close();
+                }
+            }
+            Some(Entity::Input(k)) => {
+                if let Some(g) = &app.geo {
+                    ui.label(format!("input {}", g.inputs[k as usize].name));
+                }
+                ui.separator();
+                if ui.button("Set value…").clicked() {
+                    app.open_input_dialog(k);
+                    ui.close();
+                }
+            }
+            Some(Entity::Readout(k)) => {
+                if let Some(g) = &app.geo {
+                    ui.label(format!("readout {}", g.readouts[k as usize].0));
+                }
+                ui.separator();
+                if ui.button("Plot weights").clicked() {
+                    app.plot_readout_weights(k);
+                    ui.close();
+                }
+            }
+            None => {
+                ui.label("(empty space)");
+                ui.separator();
+                if ui.button("Insert neuron here").clicked() {
+                    app.mode = Mode::Insert;
+                    ui.close();
+                }
+                if ui.button("Paste").clicked() {
+                    app.paste(None);
+                    ui.close();
+                }
+            }
+        }
+        ui.separator();
+        if ui.button("Frame network").clicked() {
+            app.frame_all();
+            ui.close();
         }
     });
 }

@@ -34,6 +34,8 @@ pub struct EditorApp {
     pub move_drag: Option<MoveDrag>,
     pub preview_delta: Option<glam::Vec3>,
     pub last_pick: Option<u32>,
+    /// Instance under the cursor (hover pick, one frame behind).
+    pub hover: Option<u32>,
     pub show_grid: bool,
     pub show_synapses: bool,
 
@@ -43,6 +45,16 @@ pub struct EditorApp {
     show_console: bool,
     show_plots: bool,
     show_inspector: bool,
+    show_script: bool,
+    plot_tab: PlotTab,
+    /// Readout index shown in the weights tab.
+    ro_sel: usize,
+    /// Script editor buffer + the name it is saved under in the file.
+    script_text: String,
+    script_name: String,
+    script_file: String,
+    /// Recently opened/saved .ne2 paths (persisted across runs).
+    pub recent: VecDeque<String>,
 
     speed: f32,
     speed_actual: f32,
@@ -72,6 +84,14 @@ pub enum Mode {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum InsertKind {
     Neuron,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PlotTab {
+    Voltage,
+    Raster,
+    Readouts,
+    Samples,
 }
 
 #[derive(Clone)]
@@ -127,9 +147,20 @@ pub enum Dialog {
     About,
 }
 
+/// Persisted UI state (recent files) across sessions.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+pub struct Persisted {
+    pub recent: Vec<String>,
+}
+
 impl EditorApp {
-    pub fn new(ctl: SimCtl) -> Self {
+    pub fn new(ctl: SimCtl, storage: Option<&dyn eframe::Storage>) -> Self {
+        let recent: VecDeque<String> = storage
+            .and_then(|s| eframe::get_value::<Persisted>(s, "state"))
+            .map(|p| p.recent.into_iter().collect())
+            .unwrap_or_default();
         Self {
+            recent,
             ctl,
             camera: Camera::default(),
             geo: None,
@@ -148,12 +179,19 @@ impl EditorApp {
             move_drag: None,
             preview_delta: None,
             last_pick: None,
+            hover: None,
             console_input: String::new(),
             history: Vec::new(),
             hist_idx: None,
             show_console: true,
             show_plots: true,
             show_inspector: true,
+            show_script: false,
+            plot_tab: PlotTab::Voltage,
+            ro_sel: 0,
+            script_text: String::new(),
+            script_name: "main".into(),
+            script_file: "script.rhai".into(),
             show_grid: true,
             show_synapses: true,
             speed: 1.0,
@@ -178,6 +216,61 @@ impl EditorApp {
 
     fn edit_net(&self, f: impl FnOnce(&mut net_format::Network) + Send + 'static) {
         self.send(Cmd::EditNet(Box::new(f)));
+    }
+
+    /// Context-menu helper: watch a neuron's v(t) by selecting it (the
+    /// plots derive their watch list from the selection).
+    pub fn watch(&mut self, ids: Vec<u32>) {
+        self.selection = ids.into_iter().collect();
+    }
+
+    /// Context-menu helper: delete one neuron.
+    pub fn delete_entity(&mut self, id: u32) {
+        self.edit_net(move |n| n.delete_neurons(vec![id]));
+    }
+
+    /// Context-menu helper: select an input so its value slider shows in
+    /// the inspector.
+    pub fn open_input_dialog(&mut self, k: u32) {
+        if let Some(g) = &self.geo {
+            let inst = g.pos.len() as u32 + k;
+            self.selection = [inst].into_iter().collect();
+            self.show_inspector = true;
+        }
+    }
+
+    /// Context-menu helper: jump the plots panel to this readout's weights.
+    pub fn plot_readout_weights(&mut self, k: u32) {
+        self.ro_sel = k as usize;
+        self.plot_tab = PlotTab::Readouts;
+        self.show_plots = true;
+    }
+
+    /// Fit the camera on the whole network.
+    pub fn frame_all(&mut self) {
+        let Some(g) = &self.geo else { return };
+        let (mut mn, mut mx) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
+        for p in &g.pos {
+            mn = mn.min((*p).into());
+            mx = mx.max((*p).into());
+        }
+        if mn.x <= mx.x {
+            self.camera.frame(mn, mx);
+        }
+    }
+
+    /// Load a file through the worker and remember it in recents.
+    pub fn load_net(&mut self, path: String) {
+        self.send(Cmd::LoadNet(path.clone()));
+        self.net_path = Some(path.clone());
+        self.push_recent(path);
+        self.selection.clear();
+    }
+
+    pub fn push_recent(&mut self, path: String) {
+        self.recent.retain(|p| *p != path);
+        self.recent.push_front(path);
+        self.recent.truncate(8);
     }
 
     /// Selection → watched neurons for v plots (first 8 selected neurons).
@@ -327,9 +420,25 @@ impl EditorApp {
                         });
                         ui.close();
                     }
+                    ui.menu_button("Recent files", |ui| {
+                        if self.recent.is_empty() {
+                            ui.label("(empty)");
+                        }
+                        let rec: Vec<String> = self.recent.iter().cloned().collect();
+                        for p in rec {
+                            if ui.button(&p).clicked() {
+                                self.load_net(p);
+                                ui.close();
+                            }
+                        }
+                    });
                     if ui.button("Save").clicked() {
                         match &self.net_path {
-                            Some(p) => self.send(Cmd::Eval(format!("net.save({p:?})"))),
+                            Some(p) => {
+                                self.send(Cmd::Eval(format!("net.save({p:?})")));
+                                let p = p.clone();
+                                self.push_recent(p);
+                            }
                             None => {
                                 self.dlg = Some(Dialog::SaveAs {
                                     path: "net.ne2".into(),
@@ -343,6 +452,10 @@ impl EditorApp {
                             path: self.net_path.clone().unwrap_or("net.ne2".into()),
                         });
                         ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Quit").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
                 ui.menu_button("Edit", |ui| {
@@ -518,6 +631,11 @@ impl EditorApp {
                 ui.checkbox(&mut self.show_synapses, "synapses");
                 ui.checkbox(&mut self.show_grid, "grid");
                 ui.separator();
+                ui.checkbox(&mut self.show_console, "console");
+                ui.checkbox(&mut self.show_plots, "plots");
+                ui.checkbox(&mut self.show_inspector, "inspector");
+                ui.checkbox(&mut self.show_script, "script");
+                ui.separator();
                 ui.label(&self.status);
             });
         });
@@ -542,6 +660,34 @@ impl EditorApp {
                 ui.label(format!("spikes = {spikes}"));
                 ui.separator();
                 ui.label(format!("sim speed = {sps:.0} steps/s"));
+                if let (Some(g), Some(inst)) = (&self.geo, self.hover) {
+                    ui.separator();
+                    let label = match crate::view::entity_of(g, inst) {
+                        Some(Entity::Neuron(n)) => g
+                            .names
+                            .get(n as usize)
+                            .cloned()
+                            .unwrap_or_else(|| format!("neuron {n}")),
+                        Some(Entity::Input(k)) => format!(
+                            "input {}",
+                            g.inputs
+                                .get(k as usize)
+                                .map(|i| i.name.as_str())
+                                .unwrap_or("?")
+                        ),
+                        Some(Entity::Readout(k)) => format!(
+                            "readout {}",
+                            g.readouts
+                                .get(k as usize)
+                                .map(|r| r.0.as_str())
+                                .unwrap_or("?")
+                        ),
+                        None => String::new(),
+                    };
+                    if !label.is_empty() {
+                        ui.label(format!("⦿ {label}"));
+                    }
+                }
                 if self.busy {
                     ui.separator();
                     ui.spinner();
@@ -597,7 +743,7 @@ impl EditorApp {
                     }
                     ui.separator();
                     ui.heading("Readouts");
-                    for (name, units) in &g.readouts {
+                    for (name, units, _) in &g.readouts {
                         ui.label(format!("{name}: {} units", units.len()));
                     }
                     if g.readouts.is_empty() {
@@ -661,9 +807,14 @@ impl EditorApp {
                 }
             }
             Some(Entity::Readout(k)) => {
-                let (name, units) = &g.readouts[k as usize];
+                let (name, units, w) = &g.readouts[k as usize];
                 ui.label(format!("readout: {name}"));
                 ui.label(format!("{} units", units.len()));
+                if w.is_empty() {
+                    ui.label("weights: —");
+                } else {
+                    ui.label(format!("weights: {} (plot in Plots)", w.len()));
+                }
             }
             None => {
                 ui.label("?");
@@ -805,6 +956,83 @@ impl EditorApp {
             });
     }
 
+    /// Multiline script editor (the original's QScintilla script window):
+    /// scripts saved in the .ne2, load/save to .rhai files, Run via worker.
+    fn script_window(&mut self, ctx: &egui::Context) {
+        if !self.show_script {
+            return;
+        }
+        let mut open = self.show_script;
+        egui::Window::new("Script editor")
+            .open(&mut open)
+            .default_size([480.0, 360.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("name");
+                    ui.text_edit_singleline(&mut self.script_name);
+                    if ui.button("Run").clicked() {
+                        let code = self.script_text.clone();
+                        self.send(Cmd::Eval(code));
+                    }
+                    if ui.button("Save to net").clicked() {
+                        self.send(Cmd::Eval(format!(
+                            "net.script_add({:?}, {:?})",
+                            self.script_name, self.script_text
+                        )));
+                        self.status = format!("script {:?} saved to net", self.script_name);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("file");
+                    ui.text_edit_singleline(&mut self.script_file);
+                    if ui.button("Open").clicked() {
+                        match std::fs::read_to_string(&self.script_file) {
+                            Ok(s) => self.script_text = s,
+                            Err(e) => self.status = format!("open: {e}"),
+                        }
+                    }
+                    if ui.button("Save").clicked() {
+                        if let Err(e) = std::fs::write(&self.script_file, &self.script_text) {
+                            self.status = format!("save: {e}");
+                        }
+                    }
+                });
+                // scripts stored in the loaded .ne2
+                if let Some(g) = self.geo.clone() {
+                    if !g.scripts.is_empty() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("in file:");
+                            for (name, code) in &g.scripts {
+                                if ui.button(name).clicked() {
+                                    self.script_name = name.clone();
+                                    self.script_text = code.clone();
+                                }
+                            }
+                        });
+                    }
+                }
+                ui.separator();
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let r = ui.add(
+                        egui::TextEdit::multiline(&mut self.script_text)
+                            .code_editor()
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(16),
+                    );
+                    let run = r.has_focus()
+                        && ui.input(|i| {
+                            i.key_pressed(egui::Key::Enter)
+                                && (i.modifiers.ctrl || i.modifiers.command)
+                        });
+                    if run && !self.script_text.trim().is_empty() {
+                        let code = self.script_text.clone();
+                        self.send(Cmd::Eval(code));
+                    }
+                });
+            });
+        self.show_script = open;
+    }
+
     fn plots(&mut self, ctx: &egui::Context) {
         if !self.show_plots {
             return;
@@ -816,37 +1044,105 @@ impl EditorApp {
                 ui.horizontal(|ui| {
                     ui.heading("Plots");
                     ui.separator();
-                    ui.label(format!(
-                        "watching {} neuron(s) — select neurons to plot v(t)",
-                        self.watch_sent.len()
-                    ));
-                });
-                egui_plot::Plot::new("vplot").height(60.0).show(ui, |ui| {
-                    for (&id, h) in &self.v_hist {
-                        let pts: PlotPoints = h.iter().map(|(t, v)| [*t, *v as f64]).collect();
-                        ui.line(Line::new(format!("n{id}"), pts));
+                    ui.selectable_value(&mut self.plot_tab, PlotTab::Voltage, "v(t)");
+                    ui.selectable_value(&mut self.plot_tab, PlotTab::Raster, "raster");
+                    ui.selectable_value(&mut self.plot_tab, PlotTab::Readouts, "readouts");
+                    ui.selectable_value(&mut self.plot_tab, PlotTab::Samples, "samples");
+                    ui.separator();
+                    if self.plot_tab == PlotTab::Voltage {
+                        ui.label(format!(
+                            "watching {} neuron(s) — select neurons to plot v(t)",
+                            self.watch_sent.len()
+                        ));
                     }
                 });
-                // raster strip: x = recent snaps, y = neuron (sampled)
-                egui_plot::Plot::new("raster").height(50.0).show(ui, |ui| {
-                    let mut pts = Vec::new();
-                    let n_snaps = self.raster.len();
-                    for (x, fired) in self.raster.iter().enumerate() {
-                        let stride = (fired.len() / 200).max(1);
-                        for (k, &id) in fired.iter().enumerate() {
-                            if k % stride == 0 {
-                                pts.push([x as f64, id as f64]);
+                match self.plot_tab {
+                    PlotTab::Voltage => {
+                        egui_plot::Plot::new("vplot").height(100.0).show(ui, |ui| {
+                            for (&id, h) in &self.v_hist {
+                                let pts: PlotPoints =
+                                    h.iter().map(|(t, v)| [*t, *v as f64]).collect();
+                                ui.line(Line::new(format!("n{id}"), pts));
                             }
-                        }
+                        });
                     }
-                    let _ = n_snaps;
-                    ui.points(
-                        egui_plot::Points::new("spikes", PlotPoints::from(pts))
-                            .radius(1.0_f32)
-                            .color(egui::Color32::LIGHT_BLUE),
-                    );
-                });
+                    PlotTab::Raster => {
+                        // raster strip: x = recent snaps, y = neuron (sampled)
+                        egui_plot::Plot::new("raster").height(100.0).show(ui, |ui| {
+                            let mut pts = Vec::new();
+                            for (x, fired) in self.raster.iter().enumerate() {
+                                let stride = (fired.len() / 200).max(1);
+                                for (k, &id) in fired.iter().enumerate() {
+                                    if k % stride == 0 {
+                                        pts.push([x as f64, id as f64]);
+                                    }
+                                }
+                            }
+                            ui.points(
+                                egui_plot::Points::new("spikes", PlotPoints::from(pts))
+                                    .radius(1.0_f32)
+                                    .color(egui::Color32::LIGHT_BLUE),
+                            );
+                        });
+                    }
+                    PlotTab::Readouts => self.plot_readouts(ui),
+                    PlotTab::Samples => self.plot_samples(ui),
+                }
             });
+    }
+
+    /// Bar chart of the selected readout's trained weights (original's
+    /// ReadOut weights visualization).
+    fn plot_readouts(&mut self, ui: &mut egui::Ui) {
+        let Some(g) = self.geo.clone() else { return };
+        if g.readouts.is_empty() {
+            ui.label("no readouts — net.add_readout(\"ro\", units) in a script");
+            return;
+        }
+        self.ro_sel = self.ro_sel.min(g.readouts.len() - 1);
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("ro_sel")
+                .selected_text(g.readouts[self.ro_sel].0.clone())
+                .show_ui(ui, |ui| {
+                    for (i, (name, _, _)) in g.readouts.iter().enumerate() {
+                        ui.selectable_value(&mut self.ro_sel, i, name);
+                    }
+                });
+            let (_, units, w) = &g.readouts[self.ro_sel];
+            ui.label(format!("{} units, {} weights", units.len(), w.len()));
+        });
+        let (_, _, w) = &g.readouts[self.ro_sel];
+        if w.is_empty() {
+            ui.label("no weights — push them from a script: net.set_readout_weights(\"name\", ro.weights())");
+            return;
+        }
+        egui_plot::Plot::new("row").height(80.0).show(ui, |ui| {
+            let bars: Vec<egui_plot::Bar> = w
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| egui_plot::Bar::new(i as f64, v as f64).width(0.8))
+                .collect();
+            ui.bar_chart(egui_plot::BarChart::new("w", bars));
+        });
+    }
+
+    /// Time-series plot of `net.samples` (the original's samples plot).
+    fn plot_samples(&mut self, ui: &mut egui::Ui) {
+        let Some(g) = self.geo.clone() else { return };
+        if g.samples.is_empty() {
+            ui.label("no samples — net.samples_write(\"s\", times, values) in a script");
+            return;
+        }
+        egui_plot::Plot::new("smp").height(100.0).show(ui, |ui| {
+            for (name, t, v) in g.samples.iter().take(8) {
+                let pts: PlotPoints = t
+                    .iter()
+                    .zip(v.iter())
+                    .map(|(&a, &b)| [a as f64, b as f64])
+                    .collect();
+                ui.line(Line::new(name.clone(), pts));
+            }
+        });
     }
 
     fn dialog(&mut self, ctx: &egui::Context) {
@@ -1053,7 +1349,8 @@ impl EditorApp {
                         if ui.button("Save").clicked() {
                             let p = path.clone();
                             self.send(Cmd::Eval(format!("net.save({p:?})")));
-                            self.net_path = Some(p);
+                            self.net_path = Some(p.clone());
+                            self.push_recent(p);
                             keep = false;
                         }
                     });
@@ -1065,9 +1362,7 @@ impl EditorApp {
                         ui.text_edit_singleline(path);
                         if ui.button("Load").clicked() {
                             let p = path.clone();
-                            self.send(Cmd::LoadNet(p.clone()));
-                            self.net_path = Some(p);
-                            self.selection.clear();
+                            self.load_net(p);
                             keep = false;
                         }
                     });
@@ -1091,6 +1386,13 @@ impl EditorApp {
 }
 
 impl eframe::App for EditorApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        let p = Persisted {
+            recent: self.recent.iter().cloned().collect(),
+        };
+        eframe::set_value(storage, "state", &p);
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // GPU lives in egui-wgpu callback resources; we need it here for
         // scene updates + picking. Get it via render_state.
@@ -1127,6 +1429,7 @@ impl eframe::App for EditorApp {
         self.status_bar(ctx);
         self.inspector(ctx);
         self.console(ctx);
+        self.script_window(ctx);
         self.plots(ctx);
         self.dialog(ctx);
 

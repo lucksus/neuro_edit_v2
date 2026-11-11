@@ -29,7 +29,13 @@ pub struct GeoSnap {
     pub groups: Vec<(String, Vec<u32>)>,
     /// (name, targets) — inputs drawn as markers.
     pub inputs: Vec<InputSnap>,
-    pub readouts: Vec<(String, Vec<u32>)>,
+    /// (name, units, weights) — weights may be empty until a script pushes
+    /// them via `net.set_readout_weights`.
+    pub readouts: Vec<(String, Vec<u32>, Vec<f32>)>,
+    /// (name, times, values) — plotted in the samples tab.
+    pub samples: Vec<(String, Vec<f32>, Vec<f32>)>,
+    /// (name, code) — script list saved in the file.
+    pub scripts: Vec<(String, String)>,
     pub dt_ms: f32,
 }
 

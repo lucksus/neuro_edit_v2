@@ -95,7 +95,6 @@ fn worker_cuda_smoke() {
     ));
     wait_for(Duration::from_secs(15), || {
         let s = ctl.shared.read().ok()?;
-        (s.snap.time_ms >= 49.9 && s.geo.as_ref().is_some_and(|g| g.pos.len() == 64))
-            .then_some(())
+        (s.snap.time_ms >= 49.9 && s.geo.as_ref().is_some_and(|g| g.pos.len() == 64)).then_some(())
     });
 }

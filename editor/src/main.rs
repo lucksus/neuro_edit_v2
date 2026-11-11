@@ -92,8 +92,11 @@ fn main() -> anyhow::Result<()> {
         "neuro_edit v2",
         native,
         Box::new(move |cc| {
-            let mut app = editor::app::EditorApp::new(ctl);
-            app.net_path = net_path;
+            let mut app = editor::app::EditorApp::new(ctl, cc.storage);
+            app.net_path = net_path.clone();
+            if let Some(p) = &net_path {
+                app.push_recent(p.clone());
+            }
             // dark theme
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
             Ok(Box::new(app))

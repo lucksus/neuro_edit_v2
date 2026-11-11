@@ -468,8 +468,14 @@ pub fn geo_from_net(net: &Network, dt: f32) -> GeoSnap {
         readouts: net
             .readouts
             .iter()
-            .map(|r| (r.name.clone(), r.units.clone()))
+            .map(|r| (r.name.clone(), r.units.clone(), r.weights.clone()))
             .collect(),
+        samples: net
+            .samples
+            .iter()
+            .map(|s| (s.name.clone(), s.times.clone(), s.values.clone()))
+            .collect(),
+        scripts: net.scripts.clone(),
         dt_ms: dt,
     }
 }

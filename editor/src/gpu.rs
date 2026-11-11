@@ -124,6 +124,7 @@ struct PickTarget {
 
 struct PendingPick {
     result: Arc<std::sync::Mutex<Option<u32>>>,
+    hover: bool,
     // kept to hold the staging buffer alive until the map completes
     _buf: Arc<wgpu::Buffer>,
 }
@@ -475,7 +476,7 @@ impl Gpu {
             });
             entity_of_inst.push(Entity::Input(k as u32));
         }
-        for (k, (name, _)) in geo.readouts.iter().enumerate() {
+        for (k, (name, _, _)) in geo.readouts.iter().enumerate() {
             let _ = name;
             // readout marker at centroid + offset
             let units = &geo.readouts[k].1;
@@ -911,8 +912,10 @@ impl Gpu {
         rpass.draw(0..3, 0..1);
     }
 
-    /// Schedule a GPU pick of the `px,py` pixel (viewport space); poll later.
-    pub fn request_pick(&mut self, px: u32, py: u32, vw: u32, vh: u32) {
+    /// Queue a single-pixel entity pick at (px,py). `hover` tags the result
+    /// so the UI can tell hover picks (context menu, status bar) apart from
+    /// click picks (selection).
+    pub fn request_pick(&mut self, px: u32, py: u32, vw: u32, vh: u32, hover: bool) {
         if self.pick_pending.is_some() || self.scene.is_none() {
             return;
         }
@@ -995,18 +998,24 @@ impl Gpu {
             };
             *res2.lock().unwrap() = Some(v);
         });
-        self.pick_pending = Some(PendingPick { result, _buf: buf });
+        self.pick_pending = Some(PendingPick {
+            result,
+            hover,
+            _buf: buf,
+        });
     }
 
     /// Poll the pick result: outer None = still pending; inner None = miss.
-    pub fn poll_pick(&mut self) -> Option<Option<u32>> {
+    /// Returns (was_hover_request, picked_instance).
+    pub fn poll_pick(&mut self) -> Option<(bool, Option<u32>)> {
         let p = self.pick_pending.as_ref()?;
         let v = *p.result.lock().unwrap();
         match v {
             None => None,
             Some(raw) => {
+                let hover = p.hover;
                 self.pick_pending = None;
-                Some(if raw == 0 { None } else { Some(raw - 1) })
+                Some((hover, if raw == 0 { None } else { Some(raw - 1) }))
             }
         }
     }

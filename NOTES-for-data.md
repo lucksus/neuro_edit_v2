@@ -89,9 +89,9 @@ editor --screenshot big.png  --net big.ne2 --no-synapses
 - Interactive GUI not verified: miguel has no display; `--screenshot` is the
   render-verification path. Picking/box-select/camera/drag code is written
   but untested interactively (marked `[~]` in FEATURE-PARITY).
-- Missing vs original: cut/copy/paste, right-click context menus, samples
+- Missing vs original: right-click context menus, samples
   plot, readout-weights plot, `.nsamples` I/O, multiline script editor,
-  recent-files list, about dialog, REPL.
+  recent-files list, delete-cascade into groups/inputs.
 - No `.neb` import (out of scope unless trivial).
 - STDP, AdEx/HH, dendritic compartments: out of scope by design.
 
@@ -125,7 +125,8 @@ editor --screenshot big.png  --net big.ne2 --no-synapses
 ## Open FEATURE-PARITY items
 
 Editor core (3D view, selection, editing dialogs, plots, console, file I/O,
-screenshots, live sim) is implemented; interactive-only items are `[~]`
-pending a display test. Still open: clipboard ops, context menus, samples &
+screenshots, live sim, copy/cut/paste of subnet JSON via menu + Ctrl+C/X/V +
+OS clipboard, Help→About) is implemented; interactive-only items are `[~]`
+pending a display test. Still open: context menus, samples &
 readout-weight plots, `.nsamples` I/O, script editor pane, recent files,
-about, REPL, per-synapse τ.
+per-synapse τ, delete-cascade into groups/inputs.

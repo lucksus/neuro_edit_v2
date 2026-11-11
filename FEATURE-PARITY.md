@@ -20,7 +20,7 @@ Checked against the C++ source at `~/code/neuro_edit-ref` (commit 8c4e7ce), 2026
 | 1.6 | Dendrite tree of DendriticNodes (no delay, sums current to root) — v2: root only, see 1.5 | [~] |
 | 1.7 | Synapse object between axon and dendrite node, weight + time_constant properties | [~] weight + delay per synapse; τ is a global config |
 | 1.8 | CurrentInducer: injects a driven current into a dendritic node; `active` flag | [x] `Input` objects + `set_external`/`set_input` |
-| 1.9 | Samples: named (t,value) series; linear interpolation; drives CurrentInducers / discriminator outputs; write_value during sim; load/save `.nsamples`; clear; constant-value mode | [~] series + interpolation + play_input; no .nsamples file I/O yet |
+| 1.9 | Samples: named (t,value) series; linear interpolation; drives CurrentInducers / discriminator outputs; write_value during sim; load/save `.nsamples`; clear; constant-value mode | [x] series + interpolation + play_input + `net.samples_save/load` (.nsamples) |
 | 1.10 | Group: named object set; user actions (see §5); add/remove objects; inputs | [x] |
 | 1.11 | LSMReadOutNeuron: sigmoid unit over exp-filtered spike traces (τ=2 ms default, same rate law as synapses), bias weight, `learn(target, rate)` delta rule, `init_weights_random_uniform`, `connect_with_group`, output written to attached Samples | [x] DeltaReadout in Rust (proper delta rule + original quirk mode) |
 | 1.12 | LinearDiscriminator + LDConnection (weighted sum of LD outputs → sigmoid), used for MLP | [-] MLP/backprop out of scope for the LSM use case |
@@ -64,10 +64,10 @@ Checked against the C++ source at `~/code/neuro_edit-ref` (commit 8c4e7ce), 2026
 |---|------------------|----|
 | 4.1 | Insert: Single Neuron, Axon Node, Dendrite Node, Synapse, Current Inducer, Samples, Linear Discriminator, Group | [~] neuron, input, samples/stream, readout, group; node-level insert `[-]` |
 | 4.2 | Cut / Copy / Paste (serialize to clipboard, insert-moved) | [x] JSON subnet roundtrip via `Network::subnet`/`insert_subnet`; menu + Ctrl+C/X/V + OS clipboard |
-| 4.3 | Delete selected (with cascade: group members, incoming axons/synapses, inducers) | [~] delete_selection drops neurons+their synapses; no cascade to groups/inputs yet |
+| 4.3 | Delete selected (with cascade: group members, incoming axons/synapses, inducers) | [x] `delete_neuron` reindexes synapses, group members, input targets, readout units |
 | 4.4 | Connect (from §3.6) | [x] |
-| 4.5 | Selection menu: Add to Group; right-click per-object user actions | [~] Add-to-Group dialog; no right-click context menus yet |
-| 4.6 | File: New, Load (.neb/.js), Save, Save as, Export/Import XML, Recent files, Close, Quit | [~] new/load/save-as .ne2; no recent-files list |
+| 4.5 | Selection menu: Add to Group; right-click per-object user actions | [~] Add-to-Group + right-click context menu (hover pick); unverified headless |
+| 4.6 | File: New, Load (.neb/.js), Save, Save as, Export/Import XML, Recent files, Close, Quit | [~] new/load/save/save-as/recent/quit; .ne2 only (XML `[-]`) |
 | 4.7 | Edit menu enabled/disable by selection context (axon node ⇒ axon node/synapse, etc.) | [~] menu always enabled; actions no-op without selection |
 
 ## 5. Object user actions (right-click menus)
@@ -79,9 +79,9 @@ Checked against the C++ source at `~/code/neuro_edit-ref` (commit 8c4e7ce), 2026
 | 5.3 | Group: Create connections… (scaling, lambda ⇒ p=scaling·e^-(d/λ)²) | [x] |
 | 5.4 | Group: Set synapse weights… (gaussian mean/var) | [x] |
 | 5.5 | Group: Do Backpropagation | [-] out of scope |
-| 5.6 | Samples: Save/Load/PHOTOSS load/Plot/Clear | [~] save/load CSV-ish + plot; PHOTOSS `[-]` |
+| 5.6 | Samples: Save/Load/PHOTOSS load/Plot/Clear | [x] `.nsamples` save/load + samples plot tab; PHOTOSS `[-]` |
 | 5.7 | LinearDiscriminator: Update, Create spiking dendrite node | [-] LD out of scope |
-| 5.8 | ReadOut: show weights visualization | [ ] |
+| 5.8 | ReadOut: show weights visualization | [x] readouts tab: weight bar chart; `net.set_readout_weights` pushes trained w into the file |
 
 ## 6. Property browser + dialogs
 
@@ -100,8 +100,8 @@ Checked against the C++ source at `~/code/neuro_edit-ref` (commit 8c4e7ce), 2026
 |---|------------------|----|
 | 7.1 | Neuron membrane potential plot (live v(t) trace) | [~] implemented (watch selected neurons); unverified headless |
 | 7.2 | Izhikevich system-state plot (v–u phase portrait) | [~] v/u shown in inspector; phase plot optional |
-| 7.3 | Samples plot via Visualizer2D (time series window) | [ ] |
-| 7.4 | ReadOut weights visualization | [ ] |
+| 7.3 | Samples plot via Visualizer2D (time series window) | [x] samples tab in plots panel |
+| 7.4 | ReadOut weights visualization | [x] readouts tab, per-readout bar chart |
 | 7.5 | MLP visualization | [-] out of scope |
 | 7.6 | Spike raster / network activity view | [~] implemented; unverified headless |
 
@@ -110,7 +110,7 @@ Checked against the C++ source at `~/code/neuro_edit-ref` (commit 8c4e7ce), 2026
 | # | Original feature | v2 |
 |---|------------------|----|
 | 8.1 | Embedded script engine (QtScript→**Rhai**), same API in GUI console and headless runner | [x] |
-| 8.2 | Script window: multi-line editor (QScintilla w/ JS highlighting), Run, output pane, Clear, load/save .js, script list from file, history up/down on command line | [~] console + history + eval; no multiline editor pane / .rhai file picker yet |
+| 8.2 | Script window: multi-line editor (QScintilla w/ JS highlighting), Run, output pane, Clear, load/save .js, script list from file, history up/down on command line | [x] script editor window (multiline, Ctrl+Enter run, open/save .rhai, script list in .ne2) + console history; no syntax highlighting |
 | 8.3 | Constructors: Neuron, Group, Point, Samples, CurrentInducer, ReadOut, MLP, MNISTData, PhotossSignalImporter | [~] neuron/group/point/samples/input/readout; MLP/MNIST/PHOTOSS `[-]` |
 | 8.4 | Globals: print, show, simulation(), load(file), write_to_file(file, …), Controller, RandomGenerator | [~] print/sim/load/write_to_file/rng; show→panels `[-]` |
 | 8.5 | Script debugger (QScriptEngineDebugger) | [-] Rhai has none |
