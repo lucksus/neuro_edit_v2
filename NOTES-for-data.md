@@ -127,10 +127,11 @@ editor --screenshot big.png  --net big.ne2 --no-synapses
   verification"); what remains unexercised there: WASD/QE pan, double-click
   focus, shift-add selection, cut/copy/paste keys, save/load dialogs,
   plane switching during Move. `--screenshot` remains the render CI path.
-- Missing vs original: XML .nex export/import, syntax highlighting in the
-  script editor, per-synapse τ (v2 uses one global `synapse_tau_ms`), and
-  the axon/dendrite *node* objects the original could place individually
-  (v2 collapses trees to one delay per synapse pair, by design).
+- Missing vs original: XML .nex export/import, per-synapse τ (v2 uses one
+  global `synapse_tau_ms`; needs per-synapse trace state in both kernels),
+  and the axon/dendrite *node* objects the original could place
+  individually (v2 collapses trees to one delay per synapse pair, by
+  design).
 - No `.neb` import (out of scope unless trivial).
 - STDP, AdEx/HH, dendritic compartments: out of scope by design.
 
@@ -222,6 +223,6 @@ Ctrl+C/X/V + OS clipboard), right-click context menu, groups/grids/weights
 dialogs, property inspector, run/step/pause/speed/dt/noise controls, v(t)
 + raster + readout-weights + samples plots, Rhai console + multiline
 script editor (scripts saved into .ne2), new/load/save/recent/quit,
-headless screenshots, live worker sim. Still open: XML I/O, syntax
-highlighting, per-synapse τ, node-level axon/dendrite objects (`[-]` by
-design).
+headless screenshots, live worker sim, Rhai syntax highlighting in the
+script editor + console (`editor/src/syntax.rs`). Still open: XML I/O,
+per-synapse τ, node-level axon/dendrite objects (`[-]` by design).
