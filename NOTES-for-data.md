@@ -5,7 +5,7 @@ Working notes for Nico on neuro_edit v2 (Rust + CUDA rewrite).
 ## What works (commands + numbers)
 
 ### Workspace
-`cargo build --workspace`, `cargo test --workspace` (19 tests), `cargo clippy
+`cargo build --workspace`, `cargo test --workspace` (24 tests), `cargo clippy
 --workspace --all-targets` all clean. Target dir lives at `../neuro_edit_v2-target`
 (outside the repo; set via `.cargo/config.toml`).
 
@@ -17,8 +17,9 @@ cargo run -p sim --release -- --bench --bench-k 100 --wscale 0.7 --w-inh 5 --cud
 
 - `--net`, `--script file.rhai`, repeated `--eval`, `--cpu`/`--cuda`,
   `--bench`, `--bench-k`, `--wscale`, `--w-inh`, `--dt`, `--ms`, `--warm`,
-  `--noise`, `--seed`. Bare `sim` opens an interactive Rhai console; bare
-  `--net x.ne2` runs the net for `--ms`.
+  `--noise`, `--seed`, `--int-weights` (fixed-point ring → bitwise
+  reproducible runs; `sim.set_int_weights(1)` in scripts). Bare `sim` opens
+  an interactive Rhai console; bare `--net x.ne2` runs the net for `--ms`.
 
 Benchmarks (dt=0.1, K=100 synapses/neuron, wscale=0.7 → ~21 Hz healthy regime,
 3000 ms simulated, 3090):

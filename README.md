@@ -40,6 +40,9 @@ sim --eval 'net.create_2d_grid("g", 10, 10, 50.0)' --eval 'print(net.neuron_coun
 # throughput benchmark (N neurons, ~100 out-degree each)
 sim --bench 10000  --wscale 0.7 --noise 1
 sim --bench 100000 --wscale 0.7 --noise 1
+
+# bitwise-reproducible CUDA runs (fixed-point synaptic ring)
+sim --script examples/lsm_hidden.rhai --cuda --int-weights
 ```
 
 ## The LSM example (the milestone use case)
