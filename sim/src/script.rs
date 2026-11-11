@@ -211,6 +211,12 @@ fn invalidate(s: &SimSlot, ver: &Rc<std::cell::Cell<u64>>) {
     ver.set(ver.get() + 1);
 }
 
+/// Net changed in a way the sim does not see (readout weights, samples,
+/// script list): bump the version only, so the editor republishes geometry.
+fn bump(ver: &Rc<std::cell::Cell<u64>>) {
+    ver.set(ver.get() + 1);
+}
+
 /// Step `h` `steps` times, calling `progress` between chunks when set.
 fn run_chunked(
     h: &Rc<RefCell<Sim>>,
@@ -257,7 +263,7 @@ pub fn register_api(
 
     // ---- help ----
     engine.register_fn("help", || -> String {
-        "API:\n  net.add_neuron(x,y,z)  net.connect(a,b,w)\n  net.create_2d_grid(g,w,h,d)  net.create_3d_grid(g,w,h,d,sp)\n  net.create_connections(g,scaling,lambda,w)  net.set_synapse_weights(g,mean,sd)\n  net.set_exc_inh(g,frac)  net.neurons_of(g)  net.add_input(name,[[n,w],..])\n  net.neuron_count()  net.synapse_count()  net.save(path)  net.load(path)\n  sim.run(ms)  sim.run_steps(n)  sim.time()  sim.reset()  sim.rate()  sim.spikes()\n  sim.trace()  sim.trace_of(ids)  sim.v(id)  sim.set_input(name,x)\n  sim.play_input(name,arr)  sim.set_external(id,amps)  sim.set_noise(hz,kick)\n  sim.rebuild()  sim.set_dt(dt)\n  readouts: delta_new(n) r.learn(trace,target,rate) r.output(trace)\n  fit_ridge(x_flat,T,F,y,lambda)  ridge_output(w,x)  accuracy(s,y)  auc(s,y)\n  streams: rng_stream(seed,n_src,p) .window(steps,label,pairs,strength)\n  misc: rand(a,b)  gauss(m,sd)  seed(s)  print(x)"
+        "API:\n  net.add_neuron(x,y,z)  net.connect(a,b,w)\n  net.create_2d_grid(g,w,h,d)  net.create_3d_grid(g,w,h,d,sp)\n  net.create_connections(g,scaling,lambda,w)  net.set_synapse_weights(g,mean,sd)\n  net.set_exc_inh(g,frac)  net.neurons_of(g)  net.add_input(name,[[n,w],..])\n  net.neuron_count()  net.synapse_count()  net.save(path)  net.load(path)\n  sim.run(ms)  sim.run_steps(n)  sim.time()  sim.reset()  sim.rate()  sim.spikes()\n  sim.trace()  sim.trace_of(ids)  sim.v(id)  sim.set_input(name,x)\n  sim.play_input(name,arr)  sim.set_external(id,amps)  sim.set_noise(hz,kick)\n  sim.rebuild()  sim.set_dt(dt)\n  net.add_readout(name,units)  net.set_readout_weights(name,w)  net.readout_weights(name)\n  net.samples_write(n,t,v)  net.samples_save(n,p)  net.samples_load(n,p)\n  net.script_add(n,code)  net.script_remove(n)\n  readouts: delta_new(n) r.learn(trace,target,rate) r.output(trace)\n  fit_ridge(x_flat,T,F,y,lambda)  ridge_output(w,x)  accuracy(s,y)  auc(s,y)\n  streams: rng_stream(seed,n_src,p) .window(steps,label,pairs,strength)\n  misc: rand(a,b)  gauss(m,sd)  seed(s)  print(x)"
             .to_string()
     });
 
@@ -485,13 +491,66 @@ pub fn register_api(
             },
         );
     }
+    {
+        let v = net_version.clone();
+        engine.register_fn(
+            "add_readout",
+            move |n: &mut NetHandle, name: &str, units: rhai::Array| {
+                bump(&v);
+                let us: Vec<u32> = units.iter().map(|d| d_i64(d) as u32).collect();
+                n.borrow_mut().add_readout(name, us);
+            },
+        );
+    }
+    {
+        // Trained DeltaReadout weights → the network object (persisted in
+        // .ne2, shown in the editor's weights plot).
+        let v = net_version.clone();
+        engine.register_fn(
+            "set_readout_weights",
+            move |n: &mut NetHandle, name: &str, w: rhai::Array| {
+                bump(&v);
+                let mut b = n.borrow_mut();
+                let w: Vec<f32> = w.iter().map(|d| d_f64(d) as f32).collect();
+                if let Some(r) = b.readouts.iter_mut().find(|r| r.name == name) {
+                    r.weights = w;
+                }
+            },
+        );
+    }
     engine.register_fn(
-        "add_readout",
-        |n: &mut NetHandle, name: &str, units: rhai::Array| {
-            let us: Vec<u32> = units.iter().map(|d| d_i64(d) as u32).collect();
-            n.borrow_mut().add_readout(name, us);
+        "readout_weights",
+        |n: &mut NetHandle, name: &str| -> rhai::Array {
+            n.borrow()
+                .readouts
+                .iter()
+                .find(|r| r.name == name)
+                .map(|r| r.weights.iter().map(|&w| dyn_f64(w as f64)).collect())
+                .unwrap_or_default()
         },
     );
+    {
+        let v = net_version.clone();
+        engine.register_fn(
+            "script_add",
+            move |n: &mut NetHandle, name: &str, code: &str| {
+                bump(&v);
+                let mut b = n.borrow_mut();
+                if let Some(s) = b.scripts.iter_mut().find(|(nm, _)| nm == name) {
+                    s.1 = code.to_string();
+                } else {
+                    b.scripts.push((name.to_string(), code.to_string()));
+                }
+            },
+        );
+    }
+    {
+        let v = net_version.clone();
+        engine.register_fn("script_remove", move |n: &mut NetHandle, name: &str| {
+            bump(&v);
+            n.borrow_mut().scripts.retain(|(nm, _)| nm != name);
+        });
+    }
     engine.register_fn("save", |n: &mut NetHandle, path: &str| {
         if let Err(e) = net_format::io::save(&n.borrow(), path) {
             eprintln!("save {path}: {e}");
@@ -850,17 +909,67 @@ pub fn register_api(
     );
 
     // ---- samples / files ----
-    engine.register_fn(
-        "samples_write",
-        |n: &mut NetHandle, name: &str, times: rhai::Array, values: rhai::Array| {
-            let t: Vec<f32> = times.iter().map(|d| d_f64(d) as f32).collect();
-            let v: Vec<f32> = values.iter().map(|d| d_f64(d) as f32).collect();
-            let mut b = n.borrow_mut();
-            let s = b.samples_mut(name);
-            s.times = t;
-            s.values = v;
-        },
-    );
+    {
+        let v = net_version.clone();
+        engine.register_fn(
+            "samples_write",
+            move |n: &mut NetHandle, name: &str, times: rhai::Array, values: rhai::Array| {
+                bump(&v);
+                let t: Vec<f32> = times.iter().map(|d| d_f64(d) as f32).collect();
+                let vv: Vec<f32> = values.iter().map(|d| d_f64(d) as f32).collect();
+                let mut b = n.borrow_mut();
+                let s = b.samples_mut(name);
+                s.times = t;
+                s.values = vv;
+            },
+        );
+    }
+    {
+        let v = net_version.clone();
+        engine.register_fn(
+            "samples_save",
+            move |n: &mut NetHandle, name: &str, path: &str| {
+                bump(&v);
+                let b = n.borrow();
+                if let Some(s) = b.samples(name) {
+                    if let Err(e) = net_format::io::save_samples(s, path) {
+                        eprintln!("samples_save {path}: {e}");
+                    }
+                }
+            },
+        );
+    }
+    {
+        let v = net_version.clone();
+        engine.register_fn(
+            "samples_load",
+            move |n: &mut NetHandle, name: &str, path: &str| match net_format::io::load_samples(
+                path, name,
+            ) {
+                Ok(s) => {
+                    bump(&v);
+                    let mut b = n.borrow_mut();
+                    let slot = b.samples_mut(name);
+                    slot.times = s.times;
+                    slot.values = s.values;
+                }
+                Err(e) => eprintln!("samples_load {path}: {e}"),
+            },
+        );
+    }
+    // `net.samples(name)` → [[t,v],…] pairs.
+    engine.register_fn("samples", |n: &mut NetHandle, name: &str| -> rhai::Array {
+        n.borrow()
+            .samples(name)
+            .map(|s| {
+                s.times
+                    .iter()
+                    .zip(s.values.iter())
+                    .map(|(&t, &v)| rhai::Dynamic::from(vec![dyn_f64(t as f64), dyn_f64(v as f64)]))
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
     engine.register_fn("write_to_file", |path: &str, values: rhai::Array| {
         let mut out = String::new();
         for v in values {

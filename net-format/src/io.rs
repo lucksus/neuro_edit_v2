@@ -83,6 +83,42 @@ pub fn from_json(s: &str) -> Result<Network, LoadError> {
     serde_json::from_str(s).map_err(|e| LoadError::Decode(e.to_string()))
 }
 
+/// `.nsamples`: the original's samples file — one "time value" pair per line.
+pub fn save_samples(s: &crate::Samples, path: impl AsRef<Path>) -> io::Result<()> {
+    let mut out = String::new();
+    for (t, v) in s.times.iter().zip(&s.values) {
+        out.push_str(&format!("{t} {v}\n"));
+    }
+    std::fs::write(path, out)
+}
+
+/// Load a `.nsamples` file ("time value" per line; blank/# lines ignored).
+pub fn load_samples(path: impl AsRef<Path>, name: &str) -> Result<crate::Samples, LoadError> {
+    let s = std::fs::read_to_string(path)?;
+    let mut smp = crate::Samples {
+        name: name.to_string(),
+        ..Default::default()
+    };
+    for (i, line) in s.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let t = it
+            .next()
+            .and_then(|x| x.parse::<f32>().ok())
+            .ok_or_else(|| LoadError::Decode(format!("line {}: bad time", i + 1)))?;
+        let v = it
+            .next()
+            .and_then(|x| x.parse::<f32>().ok())
+            .ok_or_else(|| LoadError::Decode(format!("line {}: bad value", i + 1)))?;
+        smp.times.push(t);
+        smp.values.push(v);
+    }
+    Ok(smp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

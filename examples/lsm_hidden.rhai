@@ -42,6 +42,9 @@ net.create_connections("liquid", CONN_SCALING, CONN_LAMBDA, W_REC);
 let liq = net.neurons_of("liquid");
 let n_liq = liq.len();
 print("liquid: " + n_liq + " neurons, " + net.synapse_count() + " synapses");
+// a network readout object so trained weights persist in the .ne2 and can
+// be viewed in the editor's readouts plot
+net.add_readout("ro", liq);
 
 // each pair shares a pool; each source also gets a private pool so all
 // streams stay equally represented individually
@@ -137,6 +140,10 @@ let experiment = |strength, do_shuffle, raw| {
             let tr = X.extract(it * n_feat, n_feat);
             ro.learn(tr, Ytr[it], LR);
         }
+    }
+    if !raw && !do_shuffle {
+        // keep the trained weights in the file (editor readouts plot)
+        net.set_readout_weights("ro", ro.weights());
     }
     let wr = fit_ridge(X, TRAIN_N, n_feat, Ytr, RIDGE_L);
     let sd = [];
