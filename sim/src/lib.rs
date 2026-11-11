@@ -1,13 +1,18 @@
 //! sim: the neuro_edit v2 simulator library + headless binary.
 //!
-//! Backends behind one API: `cpu` (reference, always available) and `cuda`
-//! (cudarc/NVRTC kernels). Both step the same flattened model built from
-//! `net_format::Network`.
+//! Two backends behind one API: `cpu` (reference, always available) and
+//! `cuda` (cudarc/NVRTC kernels). Both step the same flattened model built
+//! from `net_format::Network`.
 
 pub mod cpu;
 pub mod readout;
 pub mod state;
 pub mod stim;
+
+pub mod kernels;
+
+#[cfg(feature = "cuda")]
+pub mod cuda;
 
 use net_format::Network;
 pub use state::SimConfig;
@@ -21,49 +26,66 @@ pub enum BackendKind {
 /// Facade that dispatches to the chosen backend.
 pub enum Sim {
     Cpu(Box<cpu::CpuSim>),
+    #[cfg(feature = "cuda")]
+    Cuda(Box<cuda::CudaSim>),
 }
 
 impl Sim {
     pub fn new(net: &Network, cfg: SimConfig, kind: BackendKind) -> anyhow::Result<Sim> {
         match kind {
             BackendKind::Cpu => Ok(Sim::Cpu(Box::new(cpu::CpuSim::new(net, cfg)))),
-            BackendKind::Cuda => anyhow::bail!("cuda backend not built yet"),
+            #[cfg(feature = "cuda")]
+            BackendKind::Cuda => Ok(Sim::Cuda(Box::new(cuda::CudaSim::new(net, cfg)?))),
+            #[cfg(not(feature = "cuda"))]
+            BackendKind::Cuda => anyhow::bail!("sim built without the `cuda` feature"),
         }
     }
 
     pub fn n(&self) -> usize {
         match self {
             Sim::Cpu(s) => s.n,
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.n,
         }
     }
 
     pub fn time_ms(&self) -> f64 {
         match self {
             Sim::Cpu(s) => s.time_ms(),
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.time_ms(),
         }
     }
 
     pub fn step_count(&self) -> u64 {
         match self {
             Sim::Cpu(s) => s.t,
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.t,
         }
     }
 
     pub fn run_steps(&mut self, n: usize) {
         match self {
             Sim::Cpu(s) => s.run_steps(n),
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.run_steps(n),
         }
     }
 
     pub fn run_ms(&mut self, ms: f32) {
         match self {
             Sim::Cpu(s) => s.run_ms(ms),
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.run_ms(ms),
         }
     }
 
     pub fn reset_state(&mut self) {
         match self {
             Sim::Cpu(s) => s.reset_state(),
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.reset_state(),
         }
     }
 
@@ -71,6 +93,8 @@ impl Sim {
     pub fn trace(&self) -> Vec<f32> {
         match self {
             Sim::Cpu(s) => s.trace.clone(),
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.trace(),
         }
     }
 
@@ -78,10 +102,13 @@ impl Sim {
     pub fn v(&self) -> Vec<f32> {
         match self {
             Sim::Cpu(s) => s.v.clone(),
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.v(),
         }
     }
 
-    /// Spikes in the last recorded step (indices).
+    /// Spikes in the last recorded step (indices). CUDA returns an empty vec
+    /// unless spike recording is on.
     pub fn last_spikes(&self) -> Vec<u32> {
         match self {
             Sim::Cpu(s) => {
@@ -102,6 +129,8 @@ impl Sim {
                     Vec::new()
                 }
             }
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.last_spikes(),
         }
     }
 
@@ -109,24 +138,33 @@ impl Sim {
     pub fn spike_row(&self, back: usize) -> Option<Vec<u64>> {
         match self {
             Sim::Cpu(s) => s.spike_row(back).map(|r| r.to_vec()),
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.spike_row(back),
         }
     }
 
     pub fn spikes_total(&self) -> u64 {
         match self {
             Sim::Cpu(s) => s.spikes_total,
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.spikes_total(),
         }
     }
 
+    /// Mean firing rate over the whole run so far, Hz.
     pub fn mean_rate_hz(&self) -> f64 {
         match self {
             Sim::Cpu(s) => s.mean_rate_hz(),
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.mean_rate_hz(),
         }
     }
 
     pub fn set_input_constant(&mut self, input: usize, value: f32) {
         match self {
             Sim::Cpu(s) => s.stimulus.constants[input] = value,
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.set_input_constant(input, value),
         }
     }
 
@@ -137,6 +175,8 @@ impl Sim {
                 s.stimulus.series[input] = series;
                 s.stimulus.play_start = s.t;
             }
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.play_input(input, series),
         }
     }
 
@@ -144,6 +184,8 @@ impl Sim {
     pub fn set_external(&mut self, neuron: usize, amps: f32) {
         match self {
             Sim::Cpu(s) => s.ext[neuron] = amps,
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.set_external(neuron, amps),
         }
     }
 
@@ -154,6 +196,8 @@ impl Sim {
                 s.cfg.noise_rate_hz = rate_hz;
                 s.cfg.noise_kick_mv = kick_mv;
             }
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.set_noise(rate_hz, kick_mv),
         }
     }
 }

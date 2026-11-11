@@ -1,0 +1,107 @@
+//! CUDA C source compiled at run time with NVRTC (cudarc). Mirrors `cpu.rs`
+//! step-for-step; differences are only float-atomic summation order in the
+//! delay ring (documented in NOTES).
+//!
+//! The neuron model is a switch point: `model == 0` is Izhikevich; further
+//! models add a `case` and a params interpretation.
+
+pub const KERNELS_SRC: &str = r#"
+typedef unsigned long long u64;
+typedef unsigned int u32;
+typedef unsigned short u16;
+
+// Same mixing as state::noise_hash on the CPU.
+__device__ __forceinline__ u32 noise_hash(u32 i, u64 t, u64 seed){
+  u32 h = (u32)((u64)i * 747796405ull + t * 2891336453ull + seed * 12345ull);
+  h ^= h >> 16; h *= 2246822519u; h ^= h >> 13; h *= 3266489917u; h ^= h >> 16;
+  return h;
+}
+
+// One neuron per thread. t is the absolute step index.
+extern "C" __global__ void neuron_kernel(
+    int N, u64 t, int D, float dt,
+    float pkick, float kick,
+    float* v, float* u, float* s, float* trace,
+    const float* a, const float* b, const float* c, const float* d,
+    float* ring,
+    const float* ext,
+    const float* stim, long long stim_t0, int n_inputs,
+    const u32* stim_ptr, const u32* stim_input, const float* stim_w,
+    float decay_s, float decay_t,
+    u64 seed,
+    int model,
+    int* spk, int* cnt_cur,
+    u64* spk_row)
+{
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if(i >= N) return;
+  int slot = (int)(t % (u64)D);
+  float arr = ring[(u64)slot * N + i];
+  ring[(u64)slot * N + i] = 0.f;
+  float sv = s[i] + arr;
+  float I = sv + ext[i];
+
+  // stimulus
+  long long rel = (long long)t - stim_t0;
+  if(rel >= 0){
+    const float* stim_row = stim + (u64)rel * n_inputs;
+    for(u32 j = stim_ptr[i]; j < stim_ptr[i+1]; ++j){
+      I += stim_w[j] * stim_row[stim_input[j]];
+    }
+  }
+  // background Poisson kicks
+  if(pkick > 0.f && (float)noise_hash((u32)i, t, seed) * 2.3283064e-10f < pkick)
+    I += kick;
+
+  float vv = v[i], uu = u[i];
+  if(model == 0){
+    // Izhikevich (identical order to the CPU reference and the 2011 original)
+    if(vv >= 30.f){ vv = c[i]; uu += d[i]; }
+    vv += dt * (0.04f*vv*vv + 5.f*vv + 140.f - uu + I);
+    uu += dt * a[i] * (b[i]*vv - uu);
+  }
+  v[i] = vv; u[i] = uu;
+
+  if(vv >= 30.f){
+    int k = atomicAdd(cnt_cur, 1);
+    spk[k] = i;
+    trace[i] = 1.f;
+    if(spk_row != 0){
+      atomicOr(spk_row + (i >> 6), (u64)1 << (i & 63));
+    }
+  }else{
+    trace[i] *= decay_t;
+  }
+  s[i] = sv * decay_s;
+}
+
+// One thread per possible spike; iterates the spike's out-degree (CSR by
+// source) and scatters weights into the delay ring.
+// Also: thread 0 resets the NEXT step's counter slot and accumulates the
+// total spike count — that is why there is no per-step host readback.
+extern "C" __global__ void prop_kernel(
+    int N, u64 t, int D,
+    const int* spk, const int* cnt_cur, int* cnt_next,
+    u64* spikes_total,
+    const u32* src_ptr, const u32* tgt, const float* w, const u16* delay,
+    float* ring)
+{
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if(tid == 0){
+    cnt_next[0] = 0;
+    atomicAdd(spikes_total, (u64)cnt_cur[0]);
+  }
+  int lane = tid & 31;
+  int warp = tid >> 5;
+  int nwarps = (gridDim.x * blockDim.x) >> 5;
+  int cnt = cnt_cur[0];
+  for(int s = warp; s < cnt; s += nwarps){
+    int i = spk[s];
+    u32 lo = src_ptr[i], hi = src_ptr[i + 1];
+    for(u32 j = lo + lane; j < hi; j += 32){
+      int slot = (int)((t + (u64)delay[j]) % (u64)D);
+      atomicAdd(&ring[(u64)slot * N + tgt[j]], w[j]);
+    }
+  }
+}
+"#;
