@@ -25,19 +25,27 @@ struct Inst {
 @group(0) @binding(2) var<storage, read> activity: array<f32>;
 @group(0) @binding(3) var<storage, read> sel_bits: array<u32>;
 
+// Unit cube, 6 faces x 2 tris, all triangles wound CCW seen from OUTSIDE
+// (back-face culling is on; a face wound inward is invisible from outside).
 const CUBE: array<vec3f, 36> = array<vec3f, 36>(
+    // -z
     vec3f(-1,-1,-1), vec3f(-1,1,-1), vec3f(1,1,-1),
     vec3f(-1,-1,-1), vec3f(1,1,-1), vec3f(1,-1,-1),
+    // +x
     vec3f(1,-1,-1), vec3f(1,1,-1), vec3f(1,1,1),
     vec3f(1,-1,-1), vec3f(1,1,1), vec3f(1,-1,1),
-    vec3f(1,1,1), vec3f(-1,1,1), vec3f(-1,1,-1),
-    vec3f(1,1,1), vec3f(-1,1,-1), vec3f(1,1,-1),
+    // +y
+    vec3f(-1,1,-1), vec3f(-1,1,1), vec3f(1,1,1),
+    vec3f(-1,1,-1), vec3f(1,1,1), vec3f(1,1,-1),
+    // -x
     vec3f(-1,-1,1), vec3f(-1,1,1), vec3f(-1,1,-1),
     vec3f(-1,-1,-1), vec3f(-1,-1,1), vec3f(-1,1,-1),
-    vec3f(1,-1,1), vec3f(1,-1,-1), vec3f(1,1,-1),
-    vec3f(1,-1,1), vec3f(1,1,-1), vec3f(1,1,1),
-    vec3f(-1,-1,1), vec3f(1,-1,1), vec3f(1,-1,-1),
-    vec3f(-1,-1,-1), vec3f(-1,-1,1), vec3f(1,-1,-1),
+    // +z
+    vec3f(-1,-1,1), vec3f(1,1,1), vec3f(-1,1,1),
+    vec3f(-1,-1,1), vec3f(1,-1,1), vec3f(1,1,1),
+    // -y
+    vec3f(-1,-1,-1), vec3f(1,-1,-1), vec3f(1,-1,1),
+    vec3f(-1,-1,-1), vec3f(1,-1,1), vec3f(-1,-1,1),
 );
 
 const CUBE_N: array<vec3f, 36> = array<vec3f, 36>(
@@ -47,12 +55,12 @@ const CUBE_N: array<vec3f, 36> = array<vec3f, 36>(
     vec3f(1,0,0), vec3f(1,0,0), vec3f(1,0,0),
     vec3f(0,1,0), vec3f(0,1,0), vec3f(0,1,0),
     vec3f(0,1,0), vec3f(0,1,0), vec3f(0,1,0),
+    vec3f(-1,0,0), vec3f(-1,0,0), vec3f(-1,0,0),
+    vec3f(-1,0,0), vec3f(-1,0,0), vec3f(-1,0,0),
     vec3f(0,0,1), vec3f(0,0,1), vec3f(0,0,1),
     vec3f(0,0,1), vec3f(0,0,1), vec3f(0,0,1),
     vec3f(0,-1,0), vec3f(0,-1,0), vec3f(0,-1,0),
     vec3f(0,-1,0), vec3f(0,-1,0), vec3f(0,-1,0),
-    vec3f(-1,0,0), vec3f(-1,0,0), vec3f(-1,0,0),
-    vec3f(-1,0,0), vec3f(-1,0,0), vec3f(-1,0,0),
 );
 
 struct NeurOut {
@@ -71,7 +79,8 @@ fn selected(i: u32) -> bool {
 fn vs_neuron(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> NeurOut {
     var o: NeurOut;
     let it = inst[ii];
-    let size = it.pos_scale.w;
+    // misc.w = pick mode: draw the same cubes 75% bigger for easier clicks.
+    let size = it.pos_scale.w * (1.0 + cam.misc.w * 0.75);
     let wp = it.pos_scale.xyz + CUBE[vi] * size;
     o.clip = cam.view_proj * vec4f(wp, 1.0);
     o.nrm = CUBE_N[vi];

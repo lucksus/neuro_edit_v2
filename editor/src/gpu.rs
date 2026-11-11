@@ -110,6 +110,9 @@ pub struct Gpu {
     // pick readback
     pick_pending: Option<PendingPick>,
     pick_buf: wgpu::Buffer,
+    /// Last camera uniform written by `write_cam`; pick passes rewrite it
+    /// with `misc.w = 1` (enlarged pick footprints).
+    cam_u: CamU,
     pv_bg: wgpu::BindGroup,
     /// Draw counts for this frame, set by the UI before rendering.
     pub draw_params: Option<DrawParams>,
@@ -455,6 +458,7 @@ impl Gpu {
             pv_cap: 0,
             pick_pending: None,
             pick_buf,
+            cam_u: CamU::zeroed(),
             pv_bg,
             draw_params: None,
         }
@@ -753,7 +757,7 @@ impl Gpu {
         }
     }
 
-    pub fn write_cam(&self, cam: &Camera, aspect: f32, vp_h_px: f32, t: f32) {
+    pub fn write_cam(&mut self, cam: &Camera, aspect: f32, vp_h_px: f32, t: f32) {
         let vp = cam.view_proj(aspect);
         let eye = cam.eye();
         let fwd = (cam.target - eye).normalize_or(Vec3::Z);
@@ -770,6 +774,7 @@ impl Gpu {
             misc: [4.0, 1.0, t, 0.0],
             lod: [alpha_mul, keep as f32, 0.0, 0.0],
         };
+        self.cam_u = u;
         self.queue
             .write_buffer(&self.cam_buf, 0, bytemuck::bytes_of(&u));
     }
@@ -1012,6 +1017,13 @@ impl Gpu {
             return;
         }
         self.ensure_targets(vw.max(1), vh.max(1));
+        // Pick mode: vs_neuron fattens cubes when misc.w != 0, so thin
+        // neurons are clickable. The visible pass rewrites misc.w = 0
+        // every frame in `write_cam`, so this never shows on screen.
+        let mut u = self.cam_u;
+        u.misc[3] = 1.0;
+        self.queue
+            .write_buffer(&self.cam_buf, 0, bytemuck::bytes_of(&u));
         let pick = self.pick.as_ref().unwrap();
         let mut enc = self
             .device
