@@ -63,9 +63,35 @@ All controls at chance, detection threshold visible in the sweep. Fully
 deterministic: identical numbers on CPU and CUDA runs (streams come from
 `rng_stream`, a seeded counter-based Rust RNG, not the sim's noise channel).
 
+### Editor + screenshots (headless-verified)
+
+```
+editor --screenshot out.png --net examples/lsm.ne2 --after-ms 500
+editor --screenshot big.png  --net big.ne2 --no-synapses
+```
+
+- Worker thread owns `Network`+`Sim`+Rhai (`Env`); UI sends `Cmd`s over a
+  channel and reads immutable `Shared` snapshots — sim never blocks on UI.
+  `sim.run`/`run_steps` are chunked with progress callbacks so pause/abort
+  and live activity work during long scripts.
+- Verified headless: `--screenshot` renders the full 3D scene offscreen
+  (neurons instanced, synapse lines, group boxes, floor grid, inputs,
+  activity colours) → `docs/screenshots/*.png`.
+- Measured on 3090: 97,336 neurons + 1,119,357 synapses = **4.4 ms/scene
+  render** (neurons only 1.9 ms) — well over 60 fps territory. 512-neuron
+  liquid after 300 ms of live sim: activity colouring + spike particles work.
+- Gotcha found+fixed: `lcol` was inferred `Vec<[f64;4]>` → buffer held f64
+  bytes, shader read f32 → ghost-green synapses. Any all-literal `Vec` pushed
+  into `cast_slice` needs an explicit `f32` annotation.
+
 ## What does NOT work yet
 
-- The editor is a stub (`editor/src/main.rs`). No UI exists.
+- Interactive GUI not verified: miguel has no display; `--screenshot` is the
+  render-verification path. Picking/box-select/camera/drag code is written
+  but untested interactively (marked `[~]` in FEATURE-PARITY).
+- Missing vs original: cut/copy/paste, right-click context menus, samples
+  plot, readout-weights plot, `.nsamples` I/O, multiline script editor,
+  recent-files list, about dialog, REPL.
 - No `.neb` import (out of scope unless trivial).
 - STDP, AdEx/HH, dendritic compartments: out of scope by design.
 
@@ -90,13 +116,16 @@ deterministic: identical numbers on CPU and CUDA runs (streams come from
   (or vs CPU). For the seeded example this doesn't matter (streams are
   host-generated). Integer/fixed-point weights would fix it; noted as an
   option, not implemented.
-- **Sim threading for the editor**: plan is an in-process sim thread owning
-  `Sim`, stepping under a speed governor, publishing a spike-bitmap ring +
-  activity snapshot under a `RwLock`; UI never blocks sim. To be validated.
+- **Sim threading for the editor**: implemented as described — worker owns
+  `Env` (net+sim+Rhai), snapshots via `Arc<RwLock<Shared>>`; geometry only
+  re-uploaded on `net_version` change; activity/spikes every progress chunk.
 - `examples/lsm.ne2` is the tiny 2-population demo net from the Rhai smoke
   test; `lsm_hidden.rhai` builds its own liquid programmatically.
 
 ## Open FEATURE-PARITY items
 
-Everything under "Editor" in FEATURE-PARITY.md is open; all sim-core and
-script-API items are done (see checkboxes there).
+Editor core (3D view, selection, editing dialogs, plots, console, file I/O,
+screenshots, live sim) is implemented; interactive-only items are `[~]`
+pending a display test. Still open: clipboard ops, context menus, samples &
+readout-weight plots, `.nsamples` I/O, script editor pane, recent files,
+about, REPL, per-synapse τ.
