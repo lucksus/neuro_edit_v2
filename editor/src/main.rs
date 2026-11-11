@@ -39,6 +39,15 @@ struct Cli {
     /// CUDA: fixed-point synaptic ring → bitwise reproducible runs.
     #[arg(long)]
     int_weights: bool,
+    /// Screenshot camera overrides (applied after auto-framing).
+    #[arg(long)]
+    cam_dist: Option<f32>,
+    /// Screenshot camera yaw in degrees.
+    #[arg(long)]
+    cam_yaw: Option<f32>,
+    /// Screenshot camera pitch in degrees.
+    #[arg(long)]
+    cam_pitch: Option<f32>,
     #[arg(long, default_value_t = 1)]
     seed: u64,
 }
@@ -67,6 +76,9 @@ fn main() -> anyhow::Result<()> {
             seed: cli.seed,
             show_syn: !cli.no_synapses,
             int_weights: cli.int_weights,
+            cam_dist: cli.cam_dist,
+            cam_yaw: cli.cam_yaw,
+            cam_pitch: cli.cam_pitch,
         };
         return pollster::block_on(editor::shot::render_headless(opts));
     }

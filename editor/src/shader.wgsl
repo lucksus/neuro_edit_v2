@@ -9,6 +9,7 @@ struct Camera {
     right: vec4f,
     up: vec4f,
     misc: vec4f, // x: neuron size, y: activity glow, z: time, w: pick mode
+    lod: vec4f,  // x: synapse alpha multiplier, y: keep 1-of-N (<=1 draws all)
 }
 
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -119,12 +120,19 @@ struct LineOut {
 fn vs_syn(@builtin(vertex_index) vi: u32) -> LineOut {
     var o: LineOut;
     let si = vi >> 1u;          // synapse index
+    let keep = u32(cam.lod.y + 0.5);
+    if keep > 1u && (si % keep) != 0u {
+        // LOD-culled: degenerate line off-screen, zero fragments
+        o.clip = vec4f(2.0, 2.0, 2.0, 1.0);
+        o.color = vec4f(0.0);
+        return o;
+    }
     let end = vi & 1u;          // 0 = src, 1 = tgt
     let p = select(lpairs[si].x, lpairs[si].y, end == 1u);
     o.clip = cam.view_proj * vec4f(lpos[p].xyz, 1.0);
     let act = clamp(activity[p], 0.0, 1.0);
     let base = lcol[si];
-    o.color = vec4f(mix(base.rgb * 0.35, base.rgb, act), base.a);
+    o.color = vec4f(mix(base.rgb * 0.35, base.rgb, act), base.a * cam.lod.x);
     return o;
 }
 

@@ -21,6 +21,8 @@ pub struct CamU {
     right: [f32; 4],
     up: [f32; 4],
     misc: [f32; 4],
+    /// x: synapse alpha multiplier, y: draw 1-of-N synapses (<=1 draws all).
+    lod: [f32; 4],
 }
 
 #[repr(C)]
@@ -59,6 +61,12 @@ pub struct Scene {
     pairs_buf: wgpu::Buffer,
     lcol_buf: wgpu::Buffer,
     syn_verts: u32,
+    /// Mean nearest-neighbour scale: cbrt(bounds volume / neuron count).
+    avg_spacing: f32,
+    /// Mean synapse length in world units.
+    avg_edge_len: f32,
+    /// Bounds silhouette proxy: product of the two largest extents.
+    silhouette: f32,
     pub bounds: (Vec3, Vec3),
 }
 
@@ -597,6 +605,19 @@ impl Gpu {
             mx = Vec3::splat(100.0);
         }
 
+        // Stats for the screen-space synapse LOD in `syn_lod`.
+        let ext = (mx - mn).max(Vec3::splat(1.0));
+        let mut dims = [ext.x, ext.y, ext.z];
+        dims.sort_by(|a, b| b.total_cmp(a));
+        let silhouette = dims[0] * dims[1];
+        let avg_spacing = (ext.x * ext.y * ext.z / n.max(1) as f32).cbrt();
+        let mut edge_sum = 0.0f32;
+        for &(a, b) in &geo.syn {
+            edge_sum +=
+                (Vec3::from(geo.pos[b as usize]) - Vec3::from(geo.pos[a as usize])).length();
+        }
+        let avg_edge_len = edge_sum / geo.syn.len().max(1) as f32;
+
         self.scene = Some(Scene {
             n,
             entity_of_inst,
@@ -607,6 +628,9 @@ impl Gpu {
             pairs_buf,
             lcol_buf,
             syn_verts: (geo.syn.len() * 2) as u32,
+            avg_spacing,
+            avg_edge_len,
+            silhouette,
             bounds: (mn, mx),
         });
     }
@@ -708,12 +732,13 @@ impl Gpu {
         }
     }
 
-    pub fn write_cam(&self, cam: &Camera, aspect: f32, t: f32) {
+    pub fn write_cam(&self, cam: &Camera, aspect: f32, vp_h_px: f32, t: f32) {
         let vp = cam.view_proj(aspect);
         let eye = cam.eye();
         let fwd = (cam.target - eye).normalize_or(Vec3::Z);
         let right = fwd.cross(Vec3::Y).normalize_or(Vec3::X);
         let up = right.cross(fwd).normalize_or(Vec3::Y);
+        let (alpha_mul, keep) = self.syn_lod(cam, aspect, vp_h_px);
         let u = CamU {
             view_proj: vp.to_cols_array_2d(),
             cam_pos: [eye.x, eye.y, eye.z, 0.0],
@@ -722,9 +747,55 @@ impl Gpu {
             right: [right.x, right.y, right.z, 0.0],
             up: [up.x, up.y, up.z, 0.0],
             misc: [4.0, 1.0, t, 0.0],
+            lod: [alpha_mul, keep as f32, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.cam_buf, 0, bytemuck::bytes_of(&u));
+    }
+
+    /// Screen-space synapse LOD: returns (alpha multiplier, keep-1-of-N).
+    ///
+    /// Alpha: estimate mean line overdraw inside the projected silhouette —
+    /// drawn_lines × mean length px ÷ max(screen, silhouette px) — and pick a
+    /// per-line alpha that accumulates to a translucent volume instead of an
+    /// opaque slab. Sparse views keep alpha 1.
+    ///
+    /// Subsampling: once mean neuron spacing drops below a few pixels,
+    /// individual edges are unresolvable — the shader draws only every
+    /// `keep`-th synapse; the alpha calc uses the reduced count so total
+    /// coverage is preserved.
+    fn syn_lod(&self, cam: &Camera, aspect: f32, vp_h_px: f32) -> (f32, u32) {
+        let Some(sc) = &self.scene else {
+            return (1.0, 1);
+        };
+        let n_syn = (sc.syn_verts / 2) as f32;
+        if n_syn < 1.0 || vp_h_px <= 0.0 {
+            return (1.0, 1);
+        }
+        // vertical fov is 60° → px per world unit at the target depth
+        let px_per_unit = vp_h_px * 0.5 / (cam.dist * 0.577_350_3);
+        let screen_px = (vp_h_px * vp_h_px * aspect).max(1.0);
+
+        let spacing_px = sc.avg_spacing * px_per_unit;
+        let keep = if spacing_px < 3.0 {
+            ((3.0 / spacing_px.max(0.05)).powi(2).ceil() as u32).clamp(1, 64)
+        } else {
+            1
+        };
+
+        let drawn = n_syn / keep as f32;
+        let len_px = (sc.avg_edge_len * px_per_unit).max(1.0);
+        let sil_px = sc.silhouette * px_per_unit * px_per_unit;
+        let overdraw = drawn * len_px / screen_px.max(sil_px);
+        let alpha_mul = if overdraw > 1.0 {
+            // per-line alpha so k overlaps accumulate to ~55% coverage:
+            // a = 1 - (1-T)^(1/k), divided by the baked-in base alpha 0.25
+            const T: f32 = 0.55;
+            (1.0 - (1.0 - T).powf(1.0 / overdraw)) / 0.25
+        } else {
+            1.0
+        };
+        (alpha_mul.clamp(0.01, 1.0), keep)
     }
 
     /// Per-frame activity upload (one f32 per entity; extras zero).

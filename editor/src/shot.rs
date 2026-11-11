@@ -22,6 +22,10 @@ pub struct ShotOpts {
     pub seed: u64,
     pub show_syn: bool,
     pub int_weights: bool,
+    /// Optional camera overrides applied after auto-framing.
+    pub cam_dist: Option<f32>,
+    pub cam_yaw: Option<f32>,
+    pub cam_pitch: Option<f32>,
 }
 
 pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
@@ -101,7 +105,17 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
     let (mn, mx) = gpu.scene.as_ref().unwrap().bounds;
     let mut cam = Camera::default();
     cam.frame(mn, mx);
-    gpu.write_cam(&cam, w as f32 / h as f32, 0.0);
+    if let Some(d) = o.cam_dist {
+        cam.dist = d;
+    }
+    if let Some(y) = o.cam_yaw {
+        cam.yaw_deg = y;
+    }
+    if let Some(p) = o.cam_pitch {
+        cam.pitch_deg = p;
+    }
+    cam.clamp_above_floor();
+    gpu.write_cam(&cam, w as f32 / h as f32, h as f32, 0.0);
 
     // overlay: floor grid + group boxes
     let mut pvs = Vec::new();

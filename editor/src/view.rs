@@ -175,7 +175,12 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
             let pv_n = pvs.len() as u32;
             let show_syn = app.show_synapses;
             with_gpu(rs, |gpu| {
-                gpu.write_cam(&app.camera, aspect, ctx.input(|i| i.time) as f32);
+                gpu.write_cam(
+                    &app.camera,
+                    aspect,
+                    h_px as f32,
+                    ctx.input(|i| i.time) as f32,
+                );
                 gpu.write_activity(&act);
                 gpu.write_selection(&sel);
                 gpu.write_pv(&pvs);
