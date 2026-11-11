@@ -272,11 +272,10 @@ pub fn register_api(
         let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
             "add_neuron",
-            move |n: &mut NetHandle, x: f64, y: f64, z: f64| -> rhai::INT {
+            move |n: &mut NetHandle, x: Dynamic, y: Dynamic, z: Dynamic| -> rhai::INT {
                 invalidate(&s, &v);
-                n.borrow_mut()
-                    .add_neuron([x as f32, y as f32, z as f32], NeuronKind::Excitatory)
-                    as rhai::INT
+                let p = [d_f64(&x) as f32, d_f64(&y) as f32, d_f64(&z) as f32];
+                n.borrow_mut().add_neuron(p, NeuronKind::Excitatory) as rhai::INT
             },
         );
     }
@@ -298,22 +297,22 @@ pub fn register_api(
     });
     engine.register_fn(
         "connect",
-        |n: &mut NetHandle, a: rhai::INT, b: rhai::INT, w: f64| -> rhai::INT {
-            n.borrow_mut().connect(a as u32, b as u32, w as f32) as rhai::INT
+        |n: &mut NetHandle, a: rhai::INT, b: rhai::INT, w: Dynamic| -> rhai::INT {
+            n.borrow_mut().connect(a as u32, b as u32, d_f64(&w) as f32) as rhai::INT
         },
     );
     {
         let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
             "create_2d_grid",
-            move |n: &mut NetHandle, g: &str, w: rhai::INT, h: rhai::INT, d: f64| {
+            move |n: &mut NetHandle, g: &str, w: rhai::INT, h: rhai::INT, d: Dynamic| {
                 invalidate(&s, &v);
                 builders::create_2d_grid(
                     &mut n.borrow_mut(),
                     g,
                     w as usize,
                     h as usize,
-                    d as f32,
+                    d_f64(&d) as f32,
                     [0.0; 3],
                 );
             },
@@ -328,7 +327,7 @@ pub fn register_api(
                   w: rhai::INT,
                   h: rhai::INT,
                   dep: rhai::INT,
-                  d: f64| {
+                  d: Dynamic| {
                 invalidate(&s, &v);
                 builders::create_3d_grid(
                     &mut n.borrow_mut(),
@@ -336,7 +335,7 @@ pub fn register_api(
                     w as usize,
                     h as usize,
                     dep as usize,
-                    d as f32,
+                    d_f64(&d) as f32,
                     [0.0; 3],
                 );
             },
@@ -346,14 +345,14 @@ pub fn register_api(
         let (r, s, v) = (rng.clone(), sim.clone(), net_version.clone());
         engine.register_fn(
             "create_connections",
-            move |n: &mut NetHandle, g: &str, scaling: f64, lambda: f64, w: f64| {
+            move |n: &mut NetHandle, g: &str, scaling: Dynamic, lambda: Dynamic, w: Dynamic| {
                 invalidate(&s, &v);
                 builders::create_connections(
                     &mut n.borrow_mut(),
                     g,
-                    scaling,
-                    lambda,
-                    w as f32,
+                    d_f64(&scaling),
+                    d_f64(&lambda),
+                    d_f64(&w) as f32,
                     &mut r.borrow_mut(),
                 );
             },
@@ -363,13 +362,13 @@ pub fn register_api(
         let (r, s, v) = (rng.clone(), sim.clone(), net_version.clone());
         engine.register_fn(
             "set_synapse_weights",
-            move |n: &mut NetHandle, g: &str, mean: f64, sd: f64| {
+            move |n: &mut NetHandle, g: &str, mean: Dynamic, sd: Dynamic| {
                 invalidate(&s, &v);
                 builders::set_synapse_weights(
                     &mut n.borrow_mut(),
                     g,
-                    mean,
-                    sd,
+                    d_f64(&mean),
+                    d_f64(&sd),
                     &mut r.borrow_mut(),
                 );
             },
@@ -379,9 +378,9 @@ pub fn register_api(
         let (r, s, v) = (rng.clone(), sim.clone(), net_version.clone());
         engine.register_fn(
             "set_exc_inh",
-            move |n: &mut NetHandle, g: &str, frac: f64| {
+            move |n: &mut NetHandle, g: &str, frac: Dynamic| {
                 invalidate(&s, &v);
-                builders::set_exc_inh(&mut n.borrow_mut(), g, frac, &mut r.borrow_mut());
+                builders::set_exc_inh(&mut n.borrow_mut(), g, d_f64(&frac), &mut r.borrow_mut());
             },
         );
     }
@@ -389,13 +388,18 @@ pub fn register_api(
         let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
             "set_izh",
-            move |n: &mut NetHandle, id: rhai::INT, a: f64, b: f64, c: f64, d: f64| {
+            move |n: &mut NetHandle,
+                  id: rhai::INT,
+                  a: Dynamic,
+                  b: Dynamic,
+                  c: Dynamic,
+                  d: Dynamic| {
                 invalidate(&s, &v);
                 n.borrow_mut().neuron_mut(id as u32).model = net_format::NeuronModel::Izhikevich {
-                    a: a as f32,
-                    b: b as f32,
-                    c: c as f32,
-                    d: d as f32,
+                    a: d_f64(&a) as f32,
+                    b: d_f64(&b) as f32,
+                    c: d_f64(&c) as f32,
+                    d: d_f64(&d) as f32,
                 };
             },
         );
@@ -422,10 +426,11 @@ pub fn register_api(
         let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
             "set_pos",
-            move |n: &mut NetHandle, id: rhai::INT, x: f64, y: f64, z: f64| {
+            move |n: &mut NetHandle, id: rhai::INT, x: Dynamic, y: Dynamic, z: Dynamic| {
                 invalidate(&s, &v);
                 let mut g = n.borrow_mut();
-                g.neuron_mut(id as u32).pos = [x as f32, y as f32, z as f32];
+                g.neuron_mut(id as u32).pos =
+                    [d_f64(&x) as f32, d_f64(&y) as f32, d_f64(&z) as f32];
                 g.refresh_delays_of(id as u32);
             },
         );
@@ -588,9 +593,9 @@ pub fn register_api(
         let (p, pc) = (progress.clone(), progress_chunk.clone());
         engine.register_fn(
             "run",
-            move |_: &mut SimSlot, ms: f64| -> Result<(), Box<rhai::EvalAltResult>> {
+            move |_: &mut SimSlot, ms: Dynamic| -> Result<(), Box<rhai::EvalAltResult>> {
                 let h = ensure_sim(&s, &n, &c, backend)?;
-                let steps = (ms as f32 / c.borrow().dt_ms).round().max(0.0) as usize;
+                let steps = (d_f64(&ms) as f32 / c.borrow().dt_ms).round().max(0.0) as usize;
                 run_chunked(&h, steps, &p, &pc);
                 Ok(())
             },
@@ -720,13 +725,16 @@ pub fn register_api(
         let (s, n, c) = (sim.clone(), net.clone(), cfg.clone());
         engine.register_fn(
             "set_input",
-            move |_: &mut SimSlot, name: &str, x: f64| -> Result<(), Box<rhai::EvalAltResult>> {
+            move |_: &mut SimSlot,
+                  name: &str,
+                  x: Dynamic|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
                 let idx = match n.borrow().input_index(name) {
                     Some(i) => i,
                     None => return Ok(()),
                 };
                 let h = ensure_sim(&s, &n, &c, backend)?;
-                h.borrow_mut().set_input_constant(idx, x as f32);
+                h.borrow_mut().set_input_constant(idx, d_f64(&x) as f32);
                 Ok(())
             },
         );
@@ -756,40 +764,45 @@ pub fn register_api(
             "set_external",
             move |_: &mut SimSlot,
                   id: rhai::INT,
-                  amps: f64|
+                  amps: Dynamic|
                   -> Result<(), Box<rhai::EvalAltResult>> {
                 let h = ensure_sim(&s, &n, &c, backend)?;
-                h.borrow_mut().set_external(id as usize, amps as f32);
+                h.borrow_mut()
+                    .set_external(id as usize, d_f64(&amps) as f32);
                 Ok(())
             },
         );
     }
     {
         let (c, s) = (cfg.clone(), sim.clone());
-        engine.register_fn("set_noise", move |_: &mut SimSlot, hz: f64, kick: f64| {
-            c.borrow_mut().noise_rate_hz = hz as f32;
-            c.borrow_mut().noise_kick_mv = kick as f32;
-            if let Some(h) = s.borrow().as_ref() {
-                h.borrow_mut().set_noise(hz as f32, kick as f32);
-            }
+        engine.register_fn(
+            "set_noise",
+            move |_: &mut SimSlot, hz: Dynamic, kick: Dynamic| {
+                let (hz, kick) = (d_f64(&hz) as f32, d_f64(&kick) as f32);
+                c.borrow_mut().noise_rate_hz = hz;
+                c.borrow_mut().noise_kick_mv = kick;
+                if let Some(h) = s.borrow().as_ref() {
+                    h.borrow_mut().set_noise(hz, kick);
+                }
+            },
+        );
+    }
+    {
+        let c = cfg.clone();
+        engine.register_fn("set_synapse_tau", move |_: &mut SimSlot, tau: Dynamic| {
+            c.borrow_mut().synapse_tau_ms = d_f64(&tau) as f32;
         });
     }
     {
         let c = cfg.clone();
-        engine.register_fn("set_synapse_tau", move |_: &mut SimSlot, tau: f64| {
-            c.borrow_mut().synapse_tau_ms = tau as f32;
-        });
-    }
-    {
-        let c = cfg.clone();
-        engine.register_fn("set_readout_tau", move |_: &mut SimSlot, tau: f64| {
-            c.borrow_mut().readout_tau_ms = tau as f32;
+        engine.register_fn("set_readout_tau", move |_: &mut SimSlot, tau: Dynamic| {
+            c.borrow_mut().readout_tau_ms = d_f64(&tau) as f32;
         });
     }
     {
         let (c, s) = (cfg.clone(), sim.clone());
-        engine.register_fn("set_dt", move |_: &mut SimSlot, dt: f64| {
-            c.borrow_mut().dt_ms = dt as f32;
+        engine.register_fn("set_dt", move |_: &mut SimSlot, dt: Dynamic| {
+            c.borrow_mut().dt_ms = d_f64(&dt) as f32;
             *s.borrow_mut() = None; // ring depth depends on dt
         });
     }
@@ -809,8 +822,8 @@ pub fn register_api(
         let r = rng.clone();
         engine.register_fn(
             "init_random",
-            move |ro: &mut DeltaReadout, lo: f64, hi: f64| {
-                ro.init_weights_random(lo as f32, hi as f32, &mut r.borrow_mut());
+            move |ro: &mut DeltaReadout, lo: Dynamic, hi: Dynamic| {
+                ro.init_weights_random(d_f64(&lo) as f32, d_f64(&hi) as f32, &mut r.borrow_mut());
             },
         );
     }
@@ -823,9 +836,9 @@ pub fn register_api(
     );
     engine.register_fn(
         "learn",
-        |ro: &mut DeltaReadout, trace: rhai::Array, target: f64, rate: f64| {
+        |ro: &mut DeltaReadout, trace: rhai::Array, target: Dynamic, rate: Dynamic| {
             let t: Vec<f32> = trace.iter().map(|d| d_f64(d) as f32).collect();
-            ro.learn(&t, target as f32, rate as f32);
+            ro.learn(&t, d_f64(&target) as f32, d_f64(&rate) as f32);
         },
     );
     engine.register_fn("set_proper", |ro: &mut DeltaReadout, p: rhai::INT| {
@@ -840,11 +853,17 @@ pub fn register_api(
          n_rows: rhai::INT,
          n_feat: rhai::INT,
          y: rhai::Array,
-         lambda: f64|
+         lambda: Dynamic|
          -> rhai::Array {
             let xf: Vec<f32> = x.iter().map(|d| d_f64(d) as f32).collect();
             let yf: Vec<f32> = y.iter().map(|d| d_f64(d) as f32).collect();
-            let w = fit_ridge(&xf, n_rows as usize, n_feat as usize, &yf, lambda as f32);
+            let w = fit_ridge(
+                &xf,
+                n_rows as usize,
+                n_feat as usize,
+                &yf,
+                d_f64(&lambda) as f32,
+            );
             w.iter().map(|&v| dyn_f64(v)).collect()
         },
     );
@@ -870,14 +889,14 @@ pub fn register_api(
     // ---- RNG ----
     {
         let r = rng.clone();
-        engine.register_fn("rand", move |lo: f64, hi: f64| -> f64 {
-            r.borrow_mut().uniform(lo, hi)
+        engine.register_fn("rand", move |lo: Dynamic, hi: Dynamic| -> f64 {
+            r.borrow_mut().uniform(d_f64(&lo), d_f64(&hi))
         });
     }
     {
         let r = rng.clone();
-        engine.register_fn("gauss", move |m: f64, s: f64| -> f64 {
-            r.borrow_mut().gauss(m, s)
+        engine.register_fn("gauss", move |m: Dynamic, s: Dynamic| -> f64 {
+            r.borrow_mut().gauss(d_f64(&m), d_f64(&s))
         });
     }
     {
@@ -890,8 +909,8 @@ pub fn register_api(
     // ---- RNG bit-stream generator (hidden-signal source) ----
     engine.register_fn(
         "rng_stream",
-        |seed: rhai::INT, n_src: rhai::INT, p: f64| -> RngStream {
-            RngStream::new(seed as u64, n_src as usize, p as f32)
+        |seed: rhai::INT, n_src: rhai::INT, p: Dynamic| -> RngStream {
+            RngStream::new(seed as u64, n_src as usize, d_f64(&p) as f32)
         },
     );
     engine.register_fn(
@@ -900,7 +919,7 @@ pub fn register_api(
          steps: rhai::INT,
          label: rhai::INT,
          pairs: rhai::Array,
-         strength: f64|
+         strength: Dynamic|
          -> rhai::Array {
             let mut pair_idx = Vec::new();
             for p in pairs {
@@ -910,7 +929,12 @@ pub fn register_api(
                     }
                 }
             }
-            let m = rs.window(steps as usize, label != 0, &pair_idx, strength as f32);
+            let m = rs.window(
+                steps as usize,
+                label != 0,
+                &pair_idx,
+                d_f64(&strength) as f32,
+            );
             m.iter()
                 .map(|row| {
                     row.iter()

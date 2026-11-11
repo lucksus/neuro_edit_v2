@@ -71,6 +71,8 @@ pub struct EditorApp {
     pub status: String,
     /// Last subnet JSON we copied (for the Paste menu without OS access).
     clipboard: Option<String>,
+    /// Original neuro_edit artwork, loaded on first frame.
+    icons: Option<crate::icons::Icons>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -213,6 +215,7 @@ impl EditorApp {
             watch_sent: Vec::new(),
             status: String::new(),
             clipboard: None,
+            icons: None,
         }
     }
 
@@ -411,6 +414,17 @@ impl EditorApp {
     // ---------------- panels ----------------
 
     fn toolbar(&mut self, ctx: &egui::Context) {
+        let (ic_play, ic_pause, ic_add, ic_conn, ic_load, ic_save) = match &self.icons {
+            Some(i) => (
+                i.play.clone(),
+                i.pause.clone(),
+                i.add_neuron.clone(),
+                i.connect.clone(),
+                i.load.clone(),
+                i.save.clone(),
+            ),
+            None => return,
+        };
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.menu_button("File", |ui| {
@@ -420,7 +434,10 @@ impl EditorApp {
                         self.net_path = None;
                         ui.close();
                     }
-                    if ui.button("Load…").clicked() {
+                    if ui
+                        .add(egui::Button::image_and_text(&ic_load, "Load…"))
+                        .clicked()
+                    {
                         self.dlg = Some(Dialog::Load {
                             path: self.net_path.clone().unwrap_or_default(),
                         });
@@ -438,7 +455,10 @@ impl EditorApp {
                             }
                         }
                     });
-                    if ui.button("Save").clicked() {
+                    if ui
+                        .add(egui::Button::image_and_text(&ic_save, "Save"))
+                        .clicked()
+                    {
                         match &self.net_path {
                             Some(p) => {
                                 self.send(Cmd::Eval(format!("net.save({p:?})")));
@@ -453,7 +473,10 @@ impl EditorApp {
                         }
                         ui.close();
                     }
-                    if ui.button("Save as…").clicked() {
+                    if ui
+                        .add(egui::Button::image_and_text(&ic_save, "Save as…"))
+                        .clicked()
+                    {
                         self.dlg = Some(Dialog::SaveAs {
                             path: self.net_path.clone().unwrap_or("net.ne2".into()),
                         });
@@ -590,8 +613,15 @@ impl EditorApp {
                 });
                 ui.separator();
                 // sim controls
-                let run_label = if self.running { "⏸ Pause" } else { "▶ Run" };
-                if ui.button(run_label).clicked() {
+                let (run_icon, run_label) = if self.running {
+                    (ic_pause, " Pause")
+                } else {
+                    (ic_play, " Run")
+                };
+                if ui
+                    .add(egui::Button::image_and_text(&run_icon, run_label))
+                    .clicked()
+                {
                     if self.running {
                         self.send(Cmd::Abort);
                         self.send(Cmd::AutoRun(false));
@@ -654,8 +684,24 @@ impl EditorApp {
             });
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.mode, Mode::Navigate, "Navigate");
-                ui.selectable_value(&mut self.mode, Mode::Insert, "Insert");
-                ui.selectable_value(&mut self.mode, Mode::Connect, "Connect");
+                if ui
+                    .add(
+                        egui::Button::image_and_text(&ic_add, "Insert")
+                            .selected(self.mode == Mode::Insert),
+                    )
+                    .clicked()
+                {
+                    self.mode = Mode::Insert;
+                }
+                if ui
+                    .add(
+                        egui::Button::image_and_text(&ic_conn, "Connect")
+                            .selected(self.mode == Mode::Connect),
+                    )
+                    .clicked()
+                {
+                    self.mode = Mode::Connect;
+                }
                 ui.selectable_value(&mut self.mode, Mode::Move, "Move");
                 ui.separator();
                 ui.label("plane");
@@ -1283,7 +1329,7 @@ impl EditorApp {
                         if ui.button("Create").clicked() {
                             let (g, sc, la, ww) = (group.clone(), *scaling, *lambda, *w);
                             self.send(Cmd::Eval(format!(
-                                "net.create_connections({g:?}, {sc}, {la}, {ww})"
+                                "net.create_connections({g:?}, {sc:?}, {la:?}, {ww:?})"
                             )));
                             keep = false;
                         }
@@ -1302,7 +1348,7 @@ impl EditorApp {
                         if ui.button("Apply").clicked() {
                             let (g, m, s) = (group.clone(), *mean, *sd);
                             self.send(Cmd::Eval(format!(
-                                "net.set_synapse_weights({g:?}, {m}, {s})"
+                                "net.set_synapse_weights({g:?}, {m:?}, {s:?})"
                             )));
                             keep = false;
                         }
@@ -1319,7 +1365,7 @@ impl EditorApp {
                         ui.add(egui::Slider::new(frac, 0.0..=1.0).text("inh frac"));
                         if ui.button("Apply").clicked() {
                             let (g, f) = (group.clone(), *frac);
-                            self.send(Cmd::Eval(format!("net.set_exc_inh({g:?}, {f})")));
+                            self.send(Cmd::Eval(format!("net.set_exc_inh({g:?}, {f:?})")));
                             keep = false;
                         }
                     });
@@ -1458,6 +1504,9 @@ impl EditorApp {
                 egui::Window::new("About neuro_edit v2")
                     .open(&mut open)
                     .show(ctx, |ui| {
+                        if let Some(i) = &self.icons {
+                            ui.image(&i.about);
+                        }
                         ui.heading("neuro_edit v2");
                         ui.label("Izhikevich spiking-network simulator and 3D editor.");
                         ui.label("Rust + CUDA (cudarc/NVRTC) + egui/wgpu + Rhai.");
@@ -1481,6 +1530,8 @@ impl eframe::App for EditorApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.icons
+            .get_or_insert_with(|| crate::icons::Icons::load(ctx));
         // GPU lives in egui-wgpu callback resources; we need it here for
         // scene updates + picking. Get it via render_state.
         let rs = frame.wgpu_render_state().expect("wgpu render state");
