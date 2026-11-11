@@ -96,10 +96,27 @@ editor --screenshot big.png  --net big.ne2 --no-synapses
   and live activity work during long scripts.
 - Verified headless: `--screenshot` renders the full 3D scene offscreen
   (neurons instanced, synapse lines, group boxes, floor grid, inputs,
-  activity colours) → `docs/screenshots/*.png`.
+  activity colours) → `docs/screenshots/*.png`. Extra flags:
+  `--cam-dist/--cam-yaw/--cam-pitch` override the auto-framed camera.
 - Measured on 3090: 97,336 neurons + 1,119,357 synapses = **4.4 ms/scene
   render** (neurons only 1.9 ms) — well over 60 fps territory. 512-neuron
   liquid after 300 ms of live sim: activity colouring + spike particles work.
+- **Dense-net overdraw fixed (run 2).** At wide zoom the fixed alpha=0.25
+  per synapse turned 1.1M lines into an opaque slab (old liquid_97k.png).
+  `Gpu::syn_lod` now computes per-frame (a) a deterministic 1-of-`keep`
+  synapse subset in `vs_syn` once mean neuron spacing drops below ~3 px,
+  and (b) a density-aware alpha: mean line overdraw inside the projected
+  silhouette (`n_drawn·len_px / max(screen_px, silhouette_px)`) is folded
+  into a per-line alpha that accumulates to ~55 % coverage — zooming into
+  a sparse region restores full alpha automatically (overdraw < 1 ⇒ mul 1).
+  Re-rendered on a rebuilt 46³/1.15M-synapse liquid (`create_3d_grid` +
+  `create_connections(0.7, 90)` ≈ the original 1.12M): translucent volume
+  with surface neurons readable instead of a slab; verified at dist
+  1400–14000 and unchanged on sparse nets (alpha_mul = keep = 1).
+- **Camera floor clamp.** `Camera::clamp_above_floor` runs in every camera
+  mutator: pitch is capped so `eye().y ≥ 2`, and a target dragged below the
+  floor is lifted. Verified `--cam-pitch 85` renders level, not under-floor;
+  unit tests cover orbit/pan/high-target cases.
 - Gotcha found+fixed: `lcol` was inferred `Vec<[f64;4]>` → buffer held f64
   bytes, shader read f32 → ghost-green synapses. Any all-literal `Vec` pushed
   into `cast_slice` needs an explicit `f32` annotation.
