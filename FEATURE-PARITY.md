@@ -48,14 +48,14 @@ Checked against the C++ source at `~/code/neuro_edit-ref` (commit 8c4e7ce), 2026
 | # | Original feature | v2 |
 |---|------------------|----|
 | 3.1 | 3D rendering of all objects: neuron (box/frustum), axon node, dendrite node, axon (line + travelling spike dots), synapse (cone), current inducer (cone), samples (cube), linear discriminator (cube), LD connection (line), group (handle/box) | [~] v2 draws neurons, synapse lines w/ spike dots, inputs, groups, readouts; node-level trees `[-]` |
-| 3.2 | Camera: right-drag orbit (azimuth/elevation clamp ±90), wheel zoom (70–10000), WASD pan (x/z), double-click smooth-center on object | [~] implemented (orbit/zoom/pan/frame); interactive feel unverified headless |
-| 3.3 | Colour-buffer picking for object_under_cursor; box (rubber-band) selection; shift-add to selection; selection markers (corner brackets) | [~] GPU ID pick + box select implemented; unverified headless |
-| 3.4 | Move selected objects on a work plane; Shift/Ctrl switch plane (x-z default, x-y, y-z); drawn plane grid | [~] implemented |
-| 3.5 | Insert mode: new objects follow mouse on plane, click to place, Esc abort | [~] implemented |
-| 3.6 | Connect mode: drag from emitter to receiver, live line overlay; allowed pairs (axon→dendrite/axon-node, samples→inducer/group/LD, LD→LD/samples) | [~] v2 pairs: neuron→neuron synapse, input→group, readout→group |
+| 3.2 | Camera: right-drag orbit (azimuth/elevation clamp ±90), wheel zoom (70–10000), WASD pan (x/z), double-click smooth-center on object | [~] orbit + wheel zoom verified via Xvfb scripted input; WASD pan + dbl-click implemented, not exercised; eye clamped above floor grid |
+| 3.3 | Colour-buffer picking for object_under_cursor; box (rubber-band) selection; shift-add to selection; selection markers (corner brackets) | [x] verified via Xvfb scripted input: click-pick single neurons, box select 205/252 objects; shift-add untested |
+| 3.4 | Move selected objects on a work plane; Shift/Ctrl switch plane (x-z default, x-y, y-z); drawn plane grid | [x] verified via Xvfb: neuron dragged on x-z plane, inspector pos updated |
+| 3.5 | Insert mode: new objects follow mouse on plane, click to place, Esc abort | [x] verified via Xvfb: click placed a neuron at reported coords |
+| 3.6 | Connect mode: drag from emitter to receiver, live line overlay; allowed pairs (axon→dendrite/axon-node, samples→inducer/group/LD, LD→LD/samples) | [x] verified via Xvfb: neuron→neuron synapse created (count +1); v2 pairs: neuron→neuron, input→group, readout→group |
 | 3.7 | Floor grid (x-z, step 20, ±1000) | [x] visible in screenshots |
-| 3.8 | Detail levels for neurons/axons/synapses (GuiSettings) — v2: LOD + toggle layers | [~] |
-| 3.9 | Live visual feedback while sim runs: neuron colour by membrane potential, axon spikes travelling, synapse activity | [x] activity colouring + travelling spike particles; synapse glow |
+| 3.8 | Detail levels for neurons/axons/synapses (GuiSettings) — v2: LOD + toggle layers | [x] density-aware synapse alpha + screen-space LOD subsampling + layer toggles |
+| 3.9 | Live visual feedback while sim runs: neuron colour by membrane potential, axon spikes travelling, synapse activity | [x] activity colouring + travelling spike particles verified live on Xvfb |
 | 3.10 | ≥100k neurons rendered smoothly (new requirement; original could not) | [x] 97k neurons + 1.1M syn = 4.4 ms/frame measured |
 
 ## 4. Editing actions (mainwindow + menus)
@@ -64,9 +64,9 @@ Checked against the C++ source at `~/code/neuro_edit-ref` (commit 8c4e7ce), 2026
 |---|------------------|----|
 | 4.1 | Insert: Single Neuron, Axon Node, Dendrite Node, Synapse, Current Inducer, Samples, Linear Discriminator, Group | [x] neuron, grids, input-on-selection, samples node, readout-on-selection, group; node-level insert `[-]` |
 | 4.2 | Cut / Copy / Paste (serialize to clipboard, insert-moved) | [x] JSON subnet roundtrip via `Network::subnet`/`insert_subnet`; menu + Ctrl+C/X/V + OS clipboard |
-| 4.3 | Delete selected (with cascade: group members, incoming axons/synapses, inducers) | [x] `delete_neuron` reindexes synapses, group members, input targets, readout units |
+| 4.3 | Delete selected (with cascade: group members, incoming axons/synapses, inducers) | [x] `delete_neuron` reindexes synapses, group members, input targets, readout units; verified via Xvfb (Del key, count −1) |
 | 4.4 | Connect (from §3.6) | [x] |
-| 4.5 | Selection menu: Add to Group; right-click per-object user actions | [~] Add-to-Group + right-click context menu (hover pick); unverified headless |
+| 4.5 | Selection menu: Add to Group; right-click per-object user actions | [x] Add-to-Group + right-click context menu verified via Xvfb (neuron + empty-space menus, "Watch v(t)" activated) |
 | 4.6 | File: New, Load (.neb/.js), Save, Save as, Export/Import XML, Recent files, Close, Quit | [~] new/load/save/save-as/recent/quit; .ne2 only (XML `[-]`) |
 | 4.7 | Edit menu enabled/disable by selection context (axon node ⇒ axon node/synapse, etc.) | [x] copy/cut/delete/add-to-group/readout disabled with empty selection; paste disabled on empty clipboard |
 
@@ -98,12 +98,12 @@ Checked against the C++ source at `~/code/neuro_edit-ref` (commit 8c4e7ce), 2026
 
 | # | Original feature | v2 |
 |---|------------------|----|
-| 7.1 | Neuron membrane potential plot (live v(t) trace) | [~] implemented (watch selected neurons); unverified headless |
+| 7.1 | Neuron membrane potential plot (live v(t) trace) | [x] verified via Xvfb: 8 watched neurons, live traces incl. spikes under noise drive |
 | 7.2 | Izhikevich system-state plot (v–u phase portrait) | [~] v/u shown in inspector; phase plot optional |
 | 7.3 | Samples plot via Visualizer2D (time series window) | [x] samples tab in plots panel |
 | 7.4 | ReadOut weights visualization | [x] readouts tab, per-readout bar chart |
 | 7.5 | MLP visualization | [-] out of scope |
-| 7.6 | Spike raster / network activity view | [~] implemented; unverified headless |
+| 7.6 | Spike raster / network activity view | [x] verified via Xvfb: live raster fills during a noisy run (required record_spikes fix in worker cfg) |
 
 ## 8. Scripting
 

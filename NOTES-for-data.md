@@ -123,9 +123,10 @@ editor --screenshot big.png  --net big.ne2 --no-synapses
 
 ## What does NOT work yet
 
-- Interactive GUI not verified: miguel has no display; `--screenshot` is the
-  render-verification path. Picking/box-select/camera/drag code is written
-  but untested interactively (marked `[~]` in FEATURE-PARITY).
+- Interactive GUI verified via user-space Xvfb (see §"Interactive
+  verification"); what remains unexercised there: WASD/QE pan, double-click
+  focus, shift-add selection, cut/copy/paste keys, save/load dialogs,
+  plane switching during Move. `--screenshot` remains the render CI path.
 - Missing vs original: XML .nex export/import, syntax highlighting in the
   script editor, per-synapse τ (v2 uses one global `synapse_tau_ms`), and
   the axon/dendrite *node* objects the original could place individually
@@ -166,14 +167,61 @@ editor --screenshot big.png  --net big.ne2 --no-synapses
 - `examples/lsm.ne2` is the tiny 2-population demo net from the Rhai smoke
   test; `lsm_hidden.rhai` builds its own liquid programmatically.
 
+## Interactive verification (Xvfb, run 2)
+
+No display/no sudo on miguel, but `apt download xvfb` + deps works without
+root. Xvfb ran on `:99` (1600x1000x24); the editor renders through lavapipe
+(`libvulkan_lvp.so`) — DRI3 warnings are harmless. Input driven with
+`xdotool` (focus the window first, `windowfocus`; no WM so `windowactivate`
+fails), captures via `ffmpeg -f x11grab` or `xwd` + PIL.
+
+Verified with real input events (not code review):
+- Click-pick neuron → inspector shows it (several neurons).
+- Box select via incremental drag → 252 / 205 objects selected. (A drag
+  teleported in one step yields a zero-area box — egui's drag threshold
+  starts the box at the destination; must move in steps.)
+- Right-click context menu on empty space and on a neuron; "Watch v(t)"
+  → "watching 1 neuron".
+- Run/pause, `sim.set_noise(15.0, 25.0)` via console → rate ~10 Hz.
+- v(t) plot: 8 watched neurons, live traces with real spikes.
+- raster tab: dense live raster.
+- readouts tab: trained ridge weights bar chart (from lsm.ne2).
+- Connect mode (`c`): click 445, click 413 → synapse created
+  (`net.synapse_count()` 2256→2257; edit bumps net_version → sim rebuilds,
+  t resets as designed).
+- Move mode (`m`): drag on x-z plane, neuron #429 (60,60,120) →
+  (−556.9,60,474.7).
+- Insert (`i`) + click → neuron placed; Del deletes (512→511).
+- Esc/shortcut keys work; typing in the console no longer fires them.
+
+Four GUI-only bugs found + fixed along the way:
+- **Blit surface format**: `Gpu::new` hardcoded `Rgba8UnormSrgb` but the
+  egui surface is `Bgra8Unorm` → instant panic on first frame. Now takes
+  the real `target_format` (headless still uses Rgba8UnormSrgb).
+- **Click-pick starvation**: the every-frame hover pick kept the single
+  pick slot busy, so click picks were silently dropped ~half the time.
+  `viewport()` now polls the completed pick before issuing requests, so a
+  completed hover pick frees the slot for the click pick in the same frame.
+- **Shortcuts while typing**: global single-letter keys (`i`/`c`/`m`/WASD/QE)
+  fired while a text field had focus (`i` in "sim." switched to Insert).
+  `keys()` + camera pan now return early on `wants_keyboard_input()`.
+- **Raster/particles permanently empty**: the worker overwrote the script
+  env's `record_spikes: true` with `SimConfig::default()` (false), so
+  `spike_counts` always returned zeros. Worker now forces `record_spikes`
+  + a `COUNTS_WINDOW`-deep ring. Also replaced the sliding-window diff
+  (underflowed to 0 when the ring slid between publishes) with a direct
+  interval sum `spike_counts(steps_since_last_publish)` tracked by
+  `Pub::prev_step`.
+
 ## Open FEATURE-PARITY items
 
-Editor core is implemented: 3D view, selection (click/box/GPU pick + hover
-pick), move/insert/connect/delete, copy/cut/paste subnet JSON (menu +
+Editor core is implemented and the interactive list above is verified:
+3D view, selection (click/box/GPU pick + hover pick),
+move/insert/connect/delete, copy/cut/paste subnet JSON (menu +
 Ctrl+C/X/V + OS clipboard), right-click context menu, groups/grids/weights
 dialogs, property inspector, run/step/pause/speed/dt/noise controls, v(t)
 + raster + readout-weights + samples plots, Rhai console + multiline
 script editor (scripts saved into .ne2), new/load/save/recent/quit,
-headless screenshots, live worker sim. Interactive-only items are `[~]`
-pending a display test. Still open: XML I/O, syntax highlighting,
-per-synapse τ, node-level axon/dendrite objects (`[-]` by design).
+headless screenshots, live worker sim. Still open: XML I/O, syntax
+highlighting, per-synapse τ, node-level axon/dendrite objects (`[-]` by
+design).
