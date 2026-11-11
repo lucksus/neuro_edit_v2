@@ -247,8 +247,17 @@ fn keys(app: &mut EditorApp, ui: &mut egui::Ui) {
         if i.key_pressed(egui::Key::M) {
             app.mode = Mode::Move;
         }
-        if i.key_pressed(egui::Key::V) {
+        if i.key_pressed(egui::Key::V) && !i.modifiers.ctrl {
             app.mode = Mode::Navigate;
+        }
+        if i.modifiers.ctrl && i.key_pressed(egui::Key::C) {
+            app.copy_selection(false);
+        }
+        if i.modifiers.ctrl && i.key_pressed(egui::Key::X) {
+            app.copy_selection(true);
+        }
+        if i.modifiers.ctrl && i.key_pressed(egui::Key::V) {
+            app.paste(None);
         }
     });
 }

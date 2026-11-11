@@ -191,6 +191,12 @@ pub struct Particles {
 const MAX_PARTICLES: usize = 60_000;
 const PART_DOT: f32 = 1.6;
 
+impl Default for Particles {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Particles {
     pub fn new() -> Self {
         Self {

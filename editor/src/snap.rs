@@ -73,6 +73,9 @@ pub struct Shared {
     pub console: VecDeque<String>,
     /// Worker noticed the backend failed and fell back.
     pub notice: Option<String>,
+    /// JSON subnet staged by a copy/cut command for the UI to put on the
+    /// system clipboard.
+    pub clipboard: Option<String>,
 }
 
 impl Default for Shared {
@@ -85,6 +88,7 @@ impl Default for Shared {
             busy: false,
             console: VecDeque::with_capacity(512),
             notice: None,
+            clipboard: None,
         }
     }
 }

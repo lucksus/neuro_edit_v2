@@ -73,6 +73,16 @@ pub fn load_json(path: impl AsRef<Path>) -> Result<Network, LoadError> {
     serde_json::from_str(&s).map_err(|e| LoadError::Decode(e.to_string()))
 }
 
+/// Serialize to a JSON string (clipboard, network transport).
+pub fn to_json(net: &Network) -> io::Result<String> {
+    serde_json::to_string(net).map_err(io::Error::other)
+}
+
+/// Parse a JSON string produced by `to_json`.
+pub fn from_json(s: &str) -> Result<Network, LoadError> {
+    serde_json::from_str(s).map_err(|e| LoadError::Decode(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -396,4 +396,110 @@ impl Network {
             self.delete_neuron(id);
         }
     }
+
+    /// Extract the given neurons (with synapses and group membership inside
+    /// the set) as a standalone sub-network — the clipboard format for
+    /// copy/paste.
+    pub fn subnet(&self, ids: &std::collections::HashSet<u32>) -> Network {
+        let mut sub = Network::new();
+        let mut map = std::collections::HashMap::new();
+        let mut ids: Vec<u32> = ids.iter().copied().collect();
+        ids.sort_unstable();
+        for id in ids {
+            if (id as usize) >= self.neurons.len() {
+                continue;
+            }
+            map.insert(id, sub.neurons.len() as u32);
+            sub.neurons.push(self.neurons[id as usize].clone());
+        }
+        for s in &self.synapses {
+            if let (Some(&a), Some(&b)) = (map.get(&s.src), map.get(&s.tgt)) {
+                sub.synapses.push(Synapse {
+                    src: a,
+                    tgt: b,
+                    ..*s
+                });
+            }
+        }
+        for g in &self.groups {
+            let members: Vec<u32> = g
+                .members
+                .iter()
+                .filter_map(|m| map.get(m).copied())
+                .collect();
+            if !members.is_empty() {
+                sub.groups.push(Group {
+                    name: g.name.clone(),
+                    members,
+                });
+            }
+        }
+        sub
+    }
+
+    /// Merge a sub-network (from `subnet`) into this one at `offset`; returns
+    /// the new ids in `src` order. Delays of pasted synapses are kept as-is.
+    pub fn insert_subnet(&mut self, src: &Network, offset: [f32; 3]) -> Vec<u32> {
+        let map: Vec<u32> = src
+            .neurons
+            .iter()
+            .map(|neu| {
+                let mut neu = neu.clone();
+                neu.pos[0] += offset[0];
+                neu.pos[1] += offset[1];
+                neu.pos[2] += offset[2];
+                self.neurons.push(neu);
+                self.neurons.len() as u32 - 1
+            })
+            .collect();
+        for s in &src.synapses {
+            self.synapses.push(Synapse {
+                src: map[s.src as usize],
+                tgt: map[s.tgt as usize],
+                ..*s
+            });
+        }
+        for g in &src.groups {
+            let i = self.add_group(&g.name);
+            let members: Vec<u32> = g.members.iter().map(|&m| map[m as usize]).collect();
+            self.groups[i].members.extend(members);
+        }
+        map
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subnet_insert_roundtrip() {
+        let mut net = Network::new();
+        for i in 0..5 {
+            net.add_neuron([i as f32 * 10.0, 0.0, 0.0], NeuronKind::Excitatory);
+        }
+        net.connect(0, 1, 2.0);
+        net.connect(1, 2, 3.0);
+        net.connect(3, 4, 4.0);
+        let g = net.add_group("g");
+        net.groups[g].members = vec![0, 1, 2];
+
+        // copy {1,2} — internal synapse (1→2) kept, group clipped to members
+        let ids = [1u32, 2].into_iter().collect();
+        let sub = net.subnet(&ids);
+        assert_eq!(sub.neurons.len(), 2);
+        assert_eq!(sub.synapses.len(), 1);
+        assert_eq!((sub.synapses[0].src, sub.synapses[0].tgt), (0, 1));
+        assert_eq!(sub.groups[0].members, vec![0, 1]);
+
+        // paste at +100 x-offset: new ids appended, remapped synapse + group
+        let map = net.insert_subnet(&sub, [100.0, 0.0, 0.0]);
+        assert_eq!(net.neurons.len(), 7);
+        assert_eq!(net.synapses.len(), 4);
+        let pasted = net.synapses[3];
+        assert_eq!((pasted.src, pasted.tgt), (map[0], map[1]));
+        assert_eq!(net.neurons[map[0] as usize].pos[0], 110.0);
+        let g2 = net.group("g").unwrap();
+        assert_eq!(g2.members, vec![0, 1, 2, map[0], map[1]]);
+    }
 }

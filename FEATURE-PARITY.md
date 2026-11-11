@@ -63,7 +63,7 @@ Checked against the C++ source at `~/code/neuro_edit-ref` (commit 8c4e7ce), 2026
 | # | Original feature | v2 |
 |---|------------------|----|
 | 4.1 | Insert: Single Neuron, Axon Node, Dendrite Node, Synapse, Current Inducer, Samples, Linear Discriminator, Group | [~] neuron, input, samples/stream, readout, group; node-level insert `[-]` |
-| 4.2 | Cut / Copy / Paste (serialize to clipboard, insert-moved) | [ ] |
+| 4.2 | Cut / Copy / Paste (serialize to clipboard, insert-moved) | [x] JSON subnet roundtrip via `Network::subnet`/`insert_subnet`; menu + Ctrl+C/X/V + OS clipboard |
 | 4.3 | Delete selected (with cascade: group members, incoming axons/synapses, inducers) | [~] delete_selection drops neurons+their synapses; no cascade to groups/inputs yet |
 | 4.4 | Connect (from §3.6) | [x] |
 | 4.5 | Selection menu: Add to Group; right-click per-object user actions | [~] Add-to-Group dialog; no right-click context menus yet |
@@ -92,7 +92,7 @@ Checked against the C++ source at `~/code/neuro_edit-ref` (commit 8c4e7ce), 2026
 | 6.3 | Simulation settings widget: simulation_step, real_step, time display | [x] toolbar: dt, speed, noise, time |
 | 6.4 | Settings dialog (GUI settings, detail levels) | [~] view/perf options |
 | 6.5 | Log window | [x] console bottom panel shows log lines |
-| 6.6 | About dialog | [ ] |
+| 6.6 | About dialog | [x] Help → About |
 
 ## 7. Plots / visualization (Visualizer/ + widgets)
 
@@ -120,7 +120,7 @@ Checked against the C++ source at `~/code/neuro_edit-ref` (commit 8c4e7ce), 2026
 
 | # | Original feature | v2 |
 |---|------------------|----|
-| 9.1 | `NeuroRunner` binary: eval each argv as script, or interactive console (REPL) | [~] `sim --script`/`--net`; no REPL yet |
+| 9.1 | `NeuroRunner` binary: eval each argv as script, or interactive console (REPL) | [x] `sim` bare → REPL; `--script`, repeated `--eval` |
 | 9.2 | Loads .neb in scripts (Controller.load_simulation) | [x] net.load/save .ne2 |
 | 9.3 | Cluster-job files (.pjob) | [-] superseded by plain CLI |
 

@@ -41,11 +41,10 @@ fn worker_builds_runs_and_publishes() {
     assert!(!geo.syn.is_empty(), "expected synapses in geo snapshot");
 
     // The run must publish snapshots (time advances, spikes counted).
-    let snap_ok = wait_for(Duration::from_secs(10), || {
+    wait_for(Duration::from_secs(10), || {
         let s = ctl.shared.read().ok()?;
         (s.snap.time_ms > 0.0).then_some(())
     });
-    let _ = snap_ok;
     let s = ctl.shared.read().unwrap();
     assert!(
         s.snap.time_ms >= 99.9,
@@ -96,7 +95,7 @@ fn worker_cuda_smoke() {
     ));
     wait_for(Duration::from_secs(15), || {
         let s = ctl.shared.read().ok()?;
-        (s.snap.time_ms >= 49.9 && s.geo.as_ref().map_or(false, |g| g.pos.len() == 64))
+        (s.snap.time_ms >= 49.9 && s.geo.as_ref().is_some_and(|g| g.pos.len() == 64))
             .then_some(())
     });
 }

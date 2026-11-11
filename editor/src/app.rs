@@ -57,6 +57,8 @@ pub struct EditorApp {
     dlg: Option<Dialog>,
     watch_sent: Vec<u32>,
     pub status: String,
+    /// Last subnet JSON we copied (for the Paste menu without OS access).
+    clipboard: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -122,6 +124,7 @@ pub enum Dialog {
     Load {
         path: String,
     },
+    About,
 }
 
 impl EditorApp {
@@ -165,6 +168,7 @@ impl EditorApp {
             dlg: None,
             watch_sent: Vec::new(),
             status: String::new(),
+            clipboard: None,
         }
     }
 
@@ -342,6 +346,25 @@ impl EditorApp {
                     }
                 });
                 ui.menu_button("Edit", |ui| {
+                    if ui.button("Copy (Ctrl+C)").clicked() {
+                        self.copy_selection(false);
+                        ui.close();
+                    }
+                    if ui.button("Cut (Ctrl+X)").clicked() {
+                        self.copy_selection(true);
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            self.clipboard.is_some(),
+                            egui::Button::new("Paste (Ctrl+V)"),
+                        )
+                        .clicked()
+                    {
+                        self.paste(None);
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui.button("Delete selected (Del)").clicked() {
                         self.delete_selection();
                         ui.close();
@@ -382,6 +405,12 @@ impl EditorApp {
                             name: "input".into(),
                             weight: 20.0,
                         });
+                        ui.close();
+                    }
+                });
+                ui.menu_button("Help", |ui| {
+                    if ui.button("About").clicked() {
+                        self.dlg = Some(Dialog::About);
                         ui.close();
                     }
                 });
@@ -656,6 +685,50 @@ impl EditorApp {
         }
         self.edit_net(move |n| n.delete_neurons(ids.clone()));
         self.selection.clear();
+    }
+
+    /// Serialize the selected neurons (+ internal synapses/groups) to JSON on
+    /// the worker; the UI picks it up via `Shared::clipboard` next frame.
+    pub fn copy_selection(&mut self, cut: bool) {
+        let ids: std::collections::HashSet<u32> = self
+            .selection
+            .iter()
+            .filter_map(|&i| match self.entity(i) {
+                Some(Entity::Neuron(n)) => Some(n),
+                _ => None,
+            })
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let sh = self.ctl.shared.clone();
+        let ids2 = ids.clone();
+        self.edit_net(move |n| {
+            let sub = n.subnet(&ids2);
+            if let Ok(txt) = net_format::io::to_json(&sub) {
+                if let Ok(mut w) = sh.write() {
+                    w.clipboard = Some(txt);
+                }
+            }
+        });
+        if cut {
+            self.delete_selection();
+        }
+    }
+
+    /// Paste a subnet JSON (`text` wins over the internal clipboard).
+    pub fn paste(&mut self, text: Option<String>) {
+        let Some(txt) = text.or_else(|| self.clipboard.clone()) else {
+            return;
+        };
+        match net_format::io::from_json(&txt) {
+            Ok(sub) => {
+                self.edit_net(move |n| {
+                    n.insert_subnet(&sub, [30.0, 0.0, 30.0]);
+                });
+            }
+            Err(e) => self.status = format!("paste: {e}"),
+        }
     }
 
     fn console(&mut self, ctx: &egui::Context) {
@@ -999,6 +1072,17 @@ impl EditorApp {
                         }
                     });
             }
+            Dialog::About => {
+                egui::Window::new("About neuro_edit v2")
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        ui.heading("neuro_edit v2");
+                        ui.label("Izhikevich spiking-network simulator and 3D editor.");
+                        ui.label("Rust + CUDA (cudarc/NVRTC) + egui/wgpu + Rhai.");
+                        ui.label("Rewrite of the C++/Qt4 neuro_edit (2011–2012).");
+                        ui.label("License: GPL-3.0");
+                    });
+            }
         }
         if open && keep {
             self.dlg = Some(d);
@@ -1020,6 +1104,24 @@ impl eframe::App for EditorApp {
         }
         crate::view::with_gpu(rs, |gpu| self.sync_shared(gpu));
         self.update_watch();
+
+        // clipboard staged by the worker → OS clipboard + internal copy
+        let staged = self
+            .ctl
+            .shared
+            .write()
+            .ok()
+            .and_then(|mut w| w.clipboard.take());
+        if let Some(txt) = staged {
+            ctx.copy_text(txt.clone());
+            self.clipboard = Some(txt);
+        }
+        // system paste events (Ctrl+V when no text field owns it)
+        for ev in ctx.input(|i| i.events.clone()) {
+            if let egui::Event::Paste(txt) = ev {
+                self.paste(Some(txt.clone()));
+            }
+        }
 
         self.toolbar(ctx);
         self.status_bar(ctx);
