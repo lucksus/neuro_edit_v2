@@ -1,0 +1,11 @@
+//! Library surface for the neuro_edit v2 editor (modules shared with the binary
+//! and integration tests).
+
+pub mod app;
+pub mod camera;
+pub mod gpu;
+pub mod scene;
+pub mod shot;
+pub mod simctl;
+pub mod snap;
+pub mod view;

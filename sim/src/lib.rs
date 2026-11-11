@@ -32,6 +32,20 @@ pub enum Sim {
     Cuda(Box<cuda::CudaSim>),
 }
 
+/// True when a CUDA device is usable (feature `cuda` + driver + device 0).
+pub fn cuda_available() -> bool {
+    #[cfg(feature = "cuda")]
+    {
+        let mut n = Network::new();
+        n.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
+        cuda::CudaSim::new(&n, SimConfig::default()).is_ok()
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        false
+    }
+}
+
 impl Sim {
     pub fn new(net: &Network, cfg: SimConfig, kind: BackendKind) -> anyhow::Result<Sim> {
         match kind {

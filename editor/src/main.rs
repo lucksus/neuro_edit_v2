@@ -4,15 +4,6 @@
 //! Headless: `editor --screenshot out.png [--net file.ne2] [--script x.rhai]
 //!           [--after-ms 500] [--size 1280x800]`
 
-mod app;
-mod camera;
-mod gpu;
-mod scene;
-mod shot;
-mod simctl;
-mod snap;
-mod view;
-
 use clap::Parser;
 use eframe::egui;
 use sim::BackendKind;
@@ -62,7 +53,7 @@ fn main() -> anyhow::Result<()> {
     let backend = backend_of(&cli);
 
     if let Some(out) = &cli.screenshot {
-        let opts = shot::ShotOpts {
+        let opts = editor::shot::ShotOpts {
             net_path: cli.net.clone(),
             script: cli.script.clone(),
             after_ms: cli.after_ms,
@@ -73,7 +64,7 @@ fn main() -> anyhow::Result<()> {
             seed: cli.seed,
             show_syn: !cli.no_synapses,
         };
-        return pollster::block_on(shot::render_headless(opts));
+        return pollster::block_on(editor::shot::render_headless(opts));
     }
 
     // GUI mode
@@ -84,10 +75,10 @@ fn main() -> anyhow::Result<()> {
         }),
         None => net_format::Network::new(),
     };
-    let ctl = simctl::SimCtl::start(net, backend, cli.seed);
+    let ctl = editor::simctl::SimCtl::start(net, backend, cli.seed);
     if let Some(s) = &cli.script {
         let code = std::fs::read_to_string(s)?;
-        ctl.send(simctl::Cmd::Eval(code));
+        ctl.send(editor::simctl::Cmd::Eval(code));
     }
     let net_path = cli.net.clone();
 
@@ -101,7 +92,7 @@ fn main() -> anyhow::Result<()> {
         "neuro_edit v2",
         native,
         Box::new(move |cc| {
-            let mut app = app::EditorApp::new(ctl);
+            let mut app = editor::app::EditorApp::new(ctl);
             app.net_path = net_path;
             // dark theme
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
