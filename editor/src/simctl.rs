@@ -76,7 +76,9 @@ struct Watch {
 /// Mutable publish state shared by the progress callback and the cmd loop.
 struct Pub {
     watch: Watch,
-    prev_counts: Vec<u32>,
+    /// `sim.step_count()` at the previous publish — `counts` covers the
+    /// interval since then.
+    prev_step: u64,
     sps: f32,
 }
 
@@ -135,14 +137,22 @@ fn worker(
         }
     });
     let mut env = Env::with_print(net, backend, seed, print);
-    *env.cfg.borrow_mut() = SimConfig { seed, ..cfg };
+    // The worker's whole job is publishing snapshots; raster, particles and
+    // the activity counts all need the rolling spike bitmap, so force it on
+    // regardless of the caller's cfg.
+    *env.cfg.borrow_mut() = SimConfig {
+        record_spikes: true,
+        spike_record_steps: cfg.spike_record_steps.max(COUNTS_WINDOW),
+        seed,
+        ..cfg
+    };
 
     let pub_rc = Rc::new(std::cell::RefCell::new(Pub {
         watch: Watch {
             ids: Vec::new(),
             ring: Vec::new(),
         },
-        prev_counts: Vec::new(),
+        prev_step: 0,
         sps: 0.0,
     }));
 
@@ -236,7 +246,7 @@ fn worker(
                         h.borrow_mut().reset_state();
                     }
                     let mut p = pub_rc.borrow_mut();
-                    p.prev_counts.clear();
+                    p.prev_step = 0;
                     publish_env(&env, &shared, &mut p);
                 }
                 Cmd::Watch(ids) => {
@@ -341,17 +351,15 @@ fn publish_env(env: &Env, shared: &SharedRef, p: &mut Pub) {
 /// Publish dynamic state read back from `sim` into `shared`.
 fn publish_sim(sim: &Sim, shared: &SharedRef, p: &mut Pub) {
     let activity = sim.trace();
-    // Counts since previous publish: cumulative window then diff.
-    let all = sim.spike_counts(COUNTS_WINDOW);
-    let counts = if p.prev_counts.len() == all.len() {
-        all.iter()
-            .zip(p.prev_counts.iter())
-            .map(|(a, b)| a.saturating_sub(*b))
-            .collect()
-    } else {
-        all.clone()
-    };
-    p.prev_counts = all;
+    // Counts since previous publish: sum the record-ring rows covering the
+    // elapsed steps. Intervals longer than the ring depth undercount the
+    // oldest steps, which is fine for raster/particles.
+    let back = sim
+        .step_count()
+        .saturating_sub(p.prev_step)
+        .min(COUNTS_WINDOW as u64) as usize;
+    let counts = sim.spike_counts(back);
+    p.prev_step = sim.step_count();
 
     let mut watched_v = Vec::new();
     if !p.watch.ids.is_empty() {
