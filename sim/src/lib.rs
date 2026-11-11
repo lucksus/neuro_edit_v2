@@ -136,6 +136,15 @@ impl Sim {
         }
     }
 
+    /// Per-neuron spike counts over the last `rows` recorded steps.
+    pub fn spike_counts(&self, rows: usize) -> Vec<u32> {
+        match self {
+            Sim::Cpu(s) => s.spike_counts(rows),
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.spike_counts(rows),
+        }
+    }
+
     /// Spike bitmap for `back` steps ago (u64 words), if recording.
     pub fn spike_row(&self, back: usize) -> Option<Vec<u64>> {
         match self {

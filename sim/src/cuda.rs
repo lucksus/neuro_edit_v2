@@ -356,6 +356,36 @@ impl CudaSim {
         out
     }
 
+    /// Per-neuron spike counts over the last `rows` recorded steps; one dtoh
+    /// copy of the record ring, then a host-side popcount.
+    pub fn spike_counts(&self, rows: usize) -> Vec<u32> {
+        let mut counts = vec![0u32; self.n];
+        if !self.cfg.record_spikes || self.t == 0 || self.record_rows == 0 {
+            return counts;
+        }
+        let rows = rows.min(self.record_rows).min(self.t as usize);
+        let all = self.stream.clone_dtoh(&self.spk_bits).unwrap();
+        for k in 0..rows {
+            let t = self.t as usize - 1 - k;
+            let row = t % self.record_rows;
+            for (wi, &w) in all[row * self.words..(row + 1) * self.words]
+                .iter()
+                .enumerate()
+            {
+                let mut w = w;
+                while w != 0 {
+                    let b = w.trailing_zeros() as usize;
+                    w &= w - 1;
+                    let i = wi * 64 + b;
+                    if i < self.n {
+                        counts[i] += 1;
+                    }
+                }
+            }
+        }
+        counts
+    }
+
     pub fn set_input_constant(&mut self, input: usize, value: f32) {
         self.stimulus.constants[input] = value;
     }

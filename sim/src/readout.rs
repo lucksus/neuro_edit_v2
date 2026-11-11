@@ -13,6 +13,9 @@ pub struct DeltaReadout {
     pub weights: Vec<f32>,
     pub bias: f32,
     pub bias_weight: f32,
+    /// false = the original's update (input is w_i·f_i — vanishes at small
+    /// weights); true = the corrected delta rule (input is f_i).
+    pub proper: bool,
 }
 
 impl DeltaReadout {
@@ -21,6 +24,7 @@ impl DeltaReadout {
             weights: vec![0.0; n_units],
             bias: 1.0,
             bias_weight: 1.0,
+            proper: false,
         }
     }
 
@@ -46,11 +50,12 @@ impl DeltaReadout {
 
     /// One delta-rule step. `learn(target, rate)` in the original.
     /// d = (target - output) * σ'(membrane); w_i += rate·d·(w_i·f_i).
+    /// With `proper` set, the weight sees the bare trace f_i instead.
     pub fn learn(&mut self, trace: &[f32], target: f32, rate: f32) {
         let m = self.membrane(trace);
         let d = (target - self.output(trace)) * sigmoid_deriv(m);
         for (w, f) in self.weights.iter_mut().zip(trace) {
-            *w += rate * d * (*w * f);
+            *w += rate * d * if self.proper { *f } else { *w * f };
         }
         self.bias_weight += rate * d * self.bias;
     }

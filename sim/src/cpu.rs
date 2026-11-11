@@ -224,6 +224,32 @@ impl CpuSim {
         units.iter().map(|&i| self.trace[i as usize]).collect()
     }
 
+    /// Per-neuron spike counts over the last `rows` recorded steps.
+    pub fn spike_counts(&self, rows: usize) -> Vec<u32> {
+        let mut counts = vec![0u32; self.n];
+        if !self.cfg.record_spikes || self.t == 0 {
+            return counts;
+        }
+        let rows = rows.min(self.spike_counts.len()).min(self.t as usize);
+        for back in 0..rows {
+            let Some(row) = self.spike_row(back) else {
+                break;
+            };
+            for (wi, &w) in row.iter().enumerate() {
+                let mut w = w;
+                while w != 0 {
+                    let b = w.trailing_zeros() as usize;
+                    w &= w - 1;
+                    let i = wi * 64 + b;
+                    if i < self.n {
+                        counts[i] += 1;
+                    }
+                }
+            }
+        }
+        counts
+    }
+
     pub fn set_input_constant(&mut self, input: usize, value: f32) {
         self.stimulus.constants[input] = value;
     }

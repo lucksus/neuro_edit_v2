@@ -83,7 +83,7 @@ fn synapse_arrives_after_delay_and_decays() {
             break;
         }
     }
-    let t_spike = first_spike_t.unwrap();
+    let _t_spike = first_spike_t.unwrap();
     sim.set_external(0, 0.0);
     // B's synaptic current must be 0 for delay-1 steps, then jump by w
     sim.run_steps(1); // t_spike+1: still in flight (arrives at t_spike+2)

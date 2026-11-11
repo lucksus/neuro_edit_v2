@@ -549,6 +549,33 @@ pub fn register_api(
             .map(|h| h.borrow().v()[id as usize] as f64)
             .unwrap_or(0.0)
     });
+    engine.register_fn(
+        "spike_counts",
+        |s: &mut SimSlot, rows: rhai::INT| -> rhai::Array {
+            s.borrow()
+                .as_ref()
+                .map(|h| {
+                    h.borrow()
+                        .spike_counts(rows as usize)
+                        .into_iter()
+                        .map(|f| dyn_f64(f as f64))
+                        .collect()
+                })
+                .unwrap_or_default()
+        },
+    );
+    engine.register_fn(
+        "spike_counts_of",
+        |s: &mut SimSlot, rows: rhai::INT, ids: rhai::Array| -> rhai::Array {
+            let Some(h) = s.borrow().as_ref().cloned() else {
+                return Vec::new();
+            };
+            let c = h.borrow().spike_counts(rows as usize);
+            ids.iter()
+                .map(|d| dyn_f64(c[d_i64(d) as usize] as f64))
+                .collect()
+        },
+    );
     engine.register_fn("vs", |s: &mut SimSlot| -> rhai::Array {
         s.borrow()
             .as_ref()
@@ -666,6 +693,9 @@ pub fn register_api(
             ro.learn(&t, target as f32, rate as f32);
         },
     );
+    engine.register_fn("set_proper", |ro: &mut DeltaReadout, p: rhai::INT| {
+        ro.proper = p != 0;
+    });
     engine.register_fn("weights", |ro: &mut DeltaReadout| -> rhai::Array {
         ro.weights.iter().map(|&w| dyn_f64(w as f64)).collect()
     });

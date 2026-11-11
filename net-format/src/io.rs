@@ -133,9 +133,11 @@ mod tests {
 
     #[test]
     fn interpolation() {
-        let mut s = crate::Samples::default();
-        s.times = vec![0.0, 10.0, 20.0];
-        s.values = vec![0.0, 100.0, 0.0];
+        let s = crate::Samples {
+            times: vec![0.0, 10.0, 20.0],
+            values: vec![0.0, 100.0, 0.0],
+            ..Default::default()
+        };
         assert_eq!(s.value_at(-5.0), 0.0);
         assert_eq!(s.value_at(0.0), 0.0);
         assert_eq!(s.value_at(5.0), 50.0);
