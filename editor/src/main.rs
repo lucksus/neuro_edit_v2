@@ -106,10 +106,18 @@ fn main() -> anyhow::Result<()> {
     }
     let net_path = cli.net.clone();
 
+    let icon_img = image::load_from_memory(include_bytes!("../assets/icon_256.png"))
+        .expect("icon")
+        .to_rgba8();
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1440.0, 900.0])
-            .with_title("neuro_edit v2"),
+            .with_title("neuro_edit v2")
+            .with_icon(egui::IconData {
+                rgba: icon_img.to_vec(),
+                width: icon_img.width(),
+                height: icon_img.height(),
+            }),
         ..Default::default()
     };
     eframe::run_native(
