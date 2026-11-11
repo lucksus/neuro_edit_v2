@@ -3,7 +3,7 @@
 //! plus a 3D grid (new) and input wiring helpers.
 
 use crate::rng::Rng;
-use crate::{Group, Network, NeuronKind};
+use crate::{Network, NeuronKind};
 
 /// `Group::create_2d_grid(width, height, distance)` — a w×h grid in the y–z
 /// plane centred on `center`, like the original

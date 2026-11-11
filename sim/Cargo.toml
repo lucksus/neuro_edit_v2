@@ -4,10 +4,14 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 
+[features]
+default = ["cuda"]
+cuda = ["dep:cudarc"]
+
 [dependencies]
 net-format = { path = "../net-format" }
 rhai = "1"
 serde = { version = "1", features = ["derive"] }
-cudarc = { version = "0.19", features = ["nvrtc"] }
+cudarc = { version = "0.19", features = ["nvrtc", "cuda-12090"], optional = true }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
