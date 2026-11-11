@@ -1,0 +1,9 @@
+[package]
+name = "editor"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+net-format = { path = "../net-format" }
+sim = { path = "../sim" }

@@ -1,0 +1,13 @@
+[package]
+name = "sim"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+net-format = { path = "../net-format" }
+rhai = "1"
+serde = { version = "1", features = ["derive"] }
+cudarc = { version = "0.19", features = ["nvrtc"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
