@@ -151,6 +151,41 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
     }
     gpu.queue.submit([enc.finish()]);
 
+    // time the scene render alone (re-render into the same target)
+    let t0 = std::time::Instant::now();
+    {
+        let mut enc2 = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("t") });
+        {
+            let mut rpass = enc2.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("timed"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            gpu.render(&mut rpass, pv_count, part_count, o.show_syn);
+        }
+        gpu.queue.submit([enc2.finish()]);
+        let _ = gpu.device.poll(wgpu::PollType::Wait);
+    }
+    let frame_ms = t0.elapsed().as_secs_f64() * 1e3;
+    eprintln!("scene render: {frame_ms:.2} ms");
+
     // ---- readback ----
     let rb_size = (w * h * 4) as u64;
     let rb = gpu.device.create_buffer(&wgpu::BufferDescriptor {
