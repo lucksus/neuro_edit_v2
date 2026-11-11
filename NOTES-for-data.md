@@ -89,9 +89,10 @@ editor --screenshot big.png  --net big.ne2 --no-synapses
 - Interactive GUI not verified: miguel has no display; `--screenshot` is the
   render-verification path. Picking/box-select/camera/drag code is written
   but untested interactively (marked `[~]` in FEATURE-PARITY).
-- Missing vs original: right-click context menus, samples
-  plot, readout-weights plot, `.nsamples` I/O, multiline script editor,
-  recent-files list, delete-cascade into groups/inputs.
+- Missing vs original: XML .nex export/import, syntax highlighting in the
+  script editor, per-synapse τ (v2 uses one global `synapse_tau_ms`), and
+  the axon/dendrite *node* objects the original could place individually
+  (v2 collapses trees to one delay per synapse pair, by design).
 - No `.neb` import (out of scope unless trivial).
 - STDP, AdEx/HH, dendritic compartments: out of scope by design.
 
@@ -124,9 +125,12 @@ editor --screenshot big.png  --net big.ne2 --no-synapses
 
 ## Open FEATURE-PARITY items
 
-Editor core (3D view, selection, editing dialogs, plots, console, file I/O,
-screenshots, live sim, copy/cut/paste of subnet JSON via menu + Ctrl+C/X/V +
-OS clipboard, Help→About) is implemented; interactive-only items are `[~]`
-pending a display test. Still open: context menus, samples &
-readout-weight plots, `.nsamples` I/O, script editor pane, recent files,
-per-synapse τ, delete-cascade into groups/inputs.
+Editor core is implemented: 3D view, selection (click/box/GPU pick + hover
+pick), move/insert/connect/delete, copy/cut/paste subnet JSON (menu +
+Ctrl+C/X/V + OS clipboard), right-click context menu, groups/grids/weights
+dialogs, property inspector, run/step/pause/speed/dt/noise controls, v(t)
++ raster + readout-weights + samples plots, Rhai console + multiline
+script editor (scripts saved into .ne2), new/load/save/recent/quit,
+headless screenshots, live worker sim. Interactive-only items are `[~]`
+pending a display test. Still open: XML I/O, syntax highlighting,
+per-synapse τ, node-level axon/dendrite objects (`[-]` by design).

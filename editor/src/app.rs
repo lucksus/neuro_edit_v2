@@ -135,6 +135,12 @@ pub enum Dialog {
         name: String,
         weight: f32,
     },
+    NewSamples {
+        name: String,
+    },
+    NewReadout {
+        name: String,
+    },
     AddToGroup {
         name: String,
     },
@@ -459,11 +465,18 @@ impl EditorApp {
                     }
                 });
                 ui.menu_button("Edit", |ui| {
-                    if ui.button("Copy (Ctrl+C)").clicked() {
+                    let sel = !self.selection.is_empty();
+                    if ui
+                        .add_enabled(sel, egui::Button::new("Copy (Ctrl+C)"))
+                        .clicked()
+                    {
                         self.copy_selection(false);
                         ui.close();
                     }
-                    if ui.button("Cut (Ctrl+X)").clicked() {
+                    if ui
+                        .add_enabled(sel, egui::Button::new("Cut (Ctrl+X)"))
+                        .clicked()
+                    {
                         self.copy_selection(true);
                         ui.close();
                     }
@@ -478,11 +491,17 @@ impl EditorApp {
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Delete selected (Del)").clicked() {
+                    if ui
+                        .add_enabled(sel, egui::Button::new("Delete selected (Del)"))
+                        .clicked()
+                    {
                         self.delete_selection();
                         ui.close();
                     }
-                    if ui.button("Add selection to group…").clicked() {
+                    if ui
+                        .add_enabled(sel, egui::Button::new("Add selection to group…"))
+                        .clicked()
+                    {
                         self.dlg = Some(Dialog::AddToGroup {
                             name: "group".into(),
                         });
@@ -518,6 +537,22 @@ impl EditorApp {
                             name: "input".into(),
                             weight: 20.0,
                         });
+                        ui.close();
+                    }
+                    if ui.button("Samples…").clicked() {
+                        self.dlg = Some(Dialog::NewSamples {
+                            name: "samples".into(),
+                        });
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            !self.selection.is_empty(),
+                            egui::Button::new("Readout from selection…"),
+                        )
+                        .clicked()
+                    {
+                        self.dlg = Some(Dialog::NewReadout { name: "ro".into() });
                         ui.close();
                     }
                 });
@@ -1305,6 +1340,50 @@ impl EditorApp {
                             let tw: Vec<(u32, f32)> = targets.iter().map(|&t| (t, wt)).collect();
                             self.edit_net(move |net| {
                                 net.add_input(&n2, tw, [0.0; 3]);
+                            });
+                            keep = false;
+                        }
+                    });
+            }
+            Dialog::NewSamples { name } => {
+                egui::Window::new("New samples node")
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("name");
+                            ui.text_edit_singleline(name);
+                        });
+                        ui.label("empty (t,value) series — fill via net.samples_write");
+                        if ui.button("Create").clicked() {
+                            let n2 = name.clone();
+                            self.edit_net(move |net| {
+                                net.samples_mut(&n2);
+                            });
+                            keep = false;
+                        }
+                    });
+            }
+            Dialog::NewReadout { name } => {
+                egui::Window::new("New readout on selection")
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("name");
+                            ui.text_edit_singleline(name);
+                        });
+                        let units: Vec<u32> = self
+                            .selection
+                            .iter()
+                            .filter_map(|&i| match self.entity(i) {
+                                Some(Entity::Neuron(n)) => Some(n),
+                                _ => None,
+                            })
+                            .collect();
+                        ui.label(format!("{} units (from selection)", units.len()));
+                        if ui.button("Create").clicked() && !units.is_empty() {
+                            let n2 = name.clone();
+                            self.edit_net(move |net| {
+                                net.add_readout(&n2, units.clone());
                             });
                             keep = false;
                         }

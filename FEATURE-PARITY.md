@@ -62,13 +62,13 @@ Checked against the C++ source at `~/code/neuro_edit-ref` (commit 8c4e7ce), 2026
 
 | # | Original feature | v2 |
 |---|------------------|----|
-| 4.1 | Insert: Single Neuron, Axon Node, Dendrite Node, Synapse, Current Inducer, Samples, Linear Discriminator, Group | [~] neuron, input, samples/stream, readout, group; node-level insert `[-]` |
+| 4.1 | Insert: Single Neuron, Axon Node, Dendrite Node, Synapse, Current Inducer, Samples, Linear Discriminator, Group | [x] neuron, grids, input-on-selection, samples node, readout-on-selection, group; node-level insert `[-]` |
 | 4.2 | Cut / Copy / Paste (serialize to clipboard, insert-moved) | [x] JSON subnet roundtrip via `Network::subnet`/`insert_subnet`; menu + Ctrl+C/X/V + OS clipboard |
 | 4.3 | Delete selected (with cascade: group members, incoming axons/synapses, inducers) | [x] `delete_neuron` reindexes synapses, group members, input targets, readout units |
 | 4.4 | Connect (from §3.6) | [x] |
 | 4.5 | Selection menu: Add to Group; right-click per-object user actions | [~] Add-to-Group + right-click context menu (hover pick); unverified headless |
 | 4.6 | File: New, Load (.neb/.js), Save, Save as, Export/Import XML, Recent files, Close, Quit | [~] new/load/save/save-as/recent/quit; .ne2 only (XML `[-]`) |
-| 4.7 | Edit menu enabled/disable by selection context (axon node ⇒ axon node/synapse, etc.) | [~] menu always enabled; actions no-op without selection |
+| 4.7 | Edit menu enabled/disable by selection context (axon node ⇒ axon node/synapse, etc.) | [x] copy/cut/delete/add-to-group/readout disabled with empty selection; paste disabled on empty clipboard |
 
 ## 5. Object user actions (right-click menus)
 
