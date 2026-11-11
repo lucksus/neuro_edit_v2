@@ -138,7 +138,14 @@ struct PendingPick {
 }
 
 impl Gpu {
-    pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Gpu {
+    /// `surface_format` must match the render target `blit` writes into —
+    /// the egui surface in GUI mode (Bgra8Unorm on many drivers), the
+    /// internal Rgba8UnormSrgb texture headless.
+    pub fn new(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+    ) -> Gpu {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scene"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
@@ -386,7 +393,11 @@ impl Gpu {
                 module: &shader,
                 entry_point: Some("fs_blit"),
                 compilation_options: Default::default(),
-                targets: &[Some(col(true))],
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
             primitive: Default::default(),
             depth_stencil: None,

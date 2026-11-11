@@ -79,7 +79,7 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
         .request_device(&wgpu::DeviceDescriptor::default())
         .await?;
 
-    let mut gpu = Gpu::new(device, queue);
+    let mut gpu = Gpu::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
     gpu.set_scene(&geo);
     gpu.write_activity(&activity);
 

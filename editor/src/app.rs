@@ -1479,8 +1479,11 @@ impl eframe::App for EditorApp {
         {
             let mut res = rs.renderer.write();
             if res.callback_resources.get::<Gpu>().is_none() {
-                res.callback_resources
-                    .insert(Gpu::new(rs.device.clone(), rs.queue.clone()));
+                res.callback_resources.insert(Gpu::new(
+                    rs.device.clone(),
+                    rs.queue.clone(),
+                    rs.target_format,
+                ));
             }
         }
         crate::view::with_gpu(rs, |gpu| self.sync_shared(gpu));
