@@ -3,6 +3,9 @@
 
 use glam::{Mat4, Vec3};
 
+/// The floor grid sits at y=0; keep the eye a little above it.
+const MIN_EYE_Y: f32 = 2.0;
+
 pub struct Camera {
     pub target: Vec3,
     pub yaw_deg: f32,
@@ -38,10 +41,12 @@ impl Camera {
     pub fn orbit(&mut self, dx: f32, dy: f32) {
         self.yaw_deg += dx * 0.25;
         self.pitch_deg = (self.pitch_deg + dy * 0.25).clamp(-89.0, 89.0);
+        self.clamp_above_floor();
     }
 
     pub fn zoom(&mut self, wheel: f32) {
         self.dist = (self.dist * (1.0 - wheel * 0.001)).clamp(70.0, 10_000.0);
+        self.clamp_above_floor();
     }
 
     /// Pan in the camera's right/up plane (WASD + QE), scaled by distance.
@@ -51,6 +56,7 @@ impl Camera {
         let s = self.dist * 0.6 * dt;
         self.target += right_v * (right * s) + fwd_v * (fwd * s) + Vec3::Y * (up * s);
         self.anim = None;
+        self.clamp_above_floor();
     }
 
     /// Double-click: glide the target toward `p`.
@@ -71,6 +77,7 @@ impl Camera {
                 self.anim = Some((goal, t));
             }
         }
+        self.clamp_above_floor();
     }
 
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
@@ -86,5 +93,65 @@ impl Camera {
         self.target = c;
         self.dist = (r * 0.9).clamp(70.0, 10_000.0);
         self.anim = None;
+        self.clamp_above_floor();
+    }
+
+    /// Keep `eye().y >= MIN_EYE_Y`: cap the pitch (looking up pushes the eye
+    /// down) and lift the target when even level flight can't stay above.
+    /// Called by every mutator; also public so manual field tweaks (e.g. the
+    /// screenshot camera overrides) can re-apply it.
+    pub fn clamp_above_floor(&mut self) {
+        let sin_max = ((self.target.y - MIN_EYE_Y) / self.dist).clamp(-1.0, 1.0);
+        let pitch_max = sin_max.asin().to_degrees();
+        if self.pitch_deg > pitch_max {
+            self.pitch_deg = pitch_max;
+        }
+        let below = MIN_EYE_Y - self.eye().y;
+        if below > 0.0 {
+            self.target.y += below;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn orbit_stays_above_floor() {
+        let mut c = Camera {
+            target: Vec3::ZERO,
+            pitch_deg: -20.0,
+            dist: 200.0,
+            ..Default::default()
+        };
+        // drag hard upward: pitch would go to +89 and sink the eye to -200
+        c.orbit(0.0, 400.0);
+        assert!(c.eye().y >= MIN_EYE_Y - 1e-4);
+        assert!(c.pitch_deg <= 0.0);
+    }
+
+    #[test]
+    fn pan_below_floor_lifts_target() {
+        let mut c = Camera {
+            target: Vec3::new(0.0, 5.0, 0.0),
+            pitch_deg: -90.0 + 1.0,
+            dist: 100.0,
+            ..Default::default()
+        };
+        c.pan(0.0, 0.0, -10.0, 1.0); // push the target far below the floor
+        assert!(c.eye().y >= MIN_EYE_Y - 1e-4);
+    }
+
+    #[test]
+    fn high_target_is_unrestricted() {
+        let mut c = Camera {
+            target: Vec3::new(0.0, 900.0, 0.0),
+            pitch_deg: 60.0,
+            dist: 100.0,
+            ..Default::default()
+        };
+        c.orbit(0.0, 0.0);
+        assert!((c.pitch_deg - 60.0).abs() < 1e-4);
     }
 }
