@@ -8,4 +8,5 @@ pub mod scene;
 pub mod shot;
 pub mod simctl;
 pub mod snap;
+pub mod syntax;
 pub mod view;

@@ -110,7 +110,7 @@ Checked against the C++ source at `~/code/neuro_edit-ref` (commit 8c4e7ce), 2026
 | # | Original feature | v2 |
 |---|------------------|----|
 | 8.1 | Embedded script engine (QtScript→**Rhai**), same API in GUI console and headless runner | [x] |
-| 8.2 | Script window: multi-line editor (QScintilla w/ JS highlighting), Run, output pane, Clear, load/save .js, script list from file, history up/down on command line | [x] script editor window (multiline, Ctrl+Enter run, open/save .rhai, script list in .ne2) + console history; no syntax highlighting |
+| 8.2 | Script window: multi-line editor (QScintilla w/ JS highlighting), Run, output pane, Clear, load/save .js, script list from file, history up/down on command line | [x] script editor window (multiline, Ctrl+Enter run, open/save .rhai, script list in .ne2) + console history; Rhai syntax highlighting (keywords/globals/strings/comments/numbers) |
 | 8.3 | Constructors: Neuron, Group, Point, Samples, CurrentInducer, ReadOut, MLP, MNISTData, PhotossSignalImporter | [~] neuron/group/point/samples/input/readout; MLP/MNIST/PHOTOSS `[-]` |
 | 8.4 | Globals: print, show, simulation(), load(file), write_to_file(file, …), Controller, RandomGenerator | [~] print/sim/load/write_to_file/rng; show→panels `[-]` |
 | 8.5 | Script debugger (QScriptEngineDebugger) | [-] Rhai has none |

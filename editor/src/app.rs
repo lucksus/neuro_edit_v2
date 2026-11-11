@@ -945,10 +945,14 @@ impl EditorApp {
                         }
                     });
                 ui.horizontal(|ui| {
+                    let mut lay = |ui: &egui::Ui, s: &dyn egui::TextBuffer, wrap: f32| {
+                        crate::syntax::highlight(ui, s.as_str(), wrap)
+                    };
                     let te = egui::TextEdit::multiline(&mut self.console_input)
                         .desired_rows(2)
                         .desired_width(ui.available_width() - 60.0)
-                        .font(egui::TextStyle::Monospace);
+                        .font(egui::TextStyle::Monospace)
+                        .layouter(&mut lay);
                     let r = ui.add(te);
                     // history
                     if r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
@@ -1048,11 +1052,15 @@ impl EditorApp {
                 }
                 ui.separator();
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    let mut lay = |ui: &egui::Ui, s: &dyn egui::TextBuffer, wrap: f32| {
+                        crate::syntax::highlight(ui, s.as_str(), wrap)
+                    };
                     let r = ui.add(
                         egui::TextEdit::multiline(&mut self.script_text)
                             .code_editor()
                             .desired_width(f32::INFINITY)
-                            .desired_rows(16),
+                            .desired_rows(16)
+                            .layouter(&mut lay),
                     );
                     let run = r.has_focus()
                         && ui.input(|i| {
