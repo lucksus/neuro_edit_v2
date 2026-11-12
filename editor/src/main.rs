@@ -14,6 +14,10 @@ struct Cli {
     /// Network file to open (.ne2).
     #[arg(long)]
     net: Option<String>,
+    /// Attach to a running `server` over WebSocket instead of a local
+    /// worker. `host:port`; scripts and files then run server-side.
+    #[arg(long)]
+    connect: Option<String>,
     /// Rhai script to run on the worker at startup.
     #[arg(long)]
     script: Option<String>,
@@ -97,22 +101,35 @@ fn main() -> anyhow::Result<()> {
     }
 
     // GUI mode
-    let net = match &cli.net {
-        Some(p) => net_format::io::load(p).unwrap_or_else(|e| {
-            eprintln!("load {p}: {e} — starting empty");
-            net_format::Network::new()
-        }),
-        None => net_format::Network::new(),
+    let ctl = match &cli.connect {
+        Some(addr) => {
+            if cli.net.is_some() {
+                eprintln!("--net ignored with --connect (the server owns the network)");
+            }
+            if cli.cpu || cli.cuda || cli.int_weights {
+                eprintln!("--cpu/--cuda/--int-weights ignored with --connect (server's backend)");
+            }
+            editor::simctl::SimCtl::connect(addr)?
+        }
+        None => {
+            let net = match &cli.net {
+                Some(p) => net_format::io::load(p).unwrap_or_else(|e| {
+                    eprintln!("load {p}: {e} — starting empty");
+                    net_format::Network::new()
+                }),
+                None => net_format::Network::new(),
+            };
+            editor::simctl::SimCtl::start_cfg(
+                net,
+                backend,
+                cli.seed,
+                sim::SimConfig {
+                    int_weights: cli.int_weights,
+                    ..Default::default()
+                },
+            )
+        }
     };
-    let ctl = editor::simctl::SimCtl::start_cfg(
-        net,
-        backend,
-        cli.seed,
-        sim::SimConfig {
-            int_weights: cli.int_weights,
-            ..Default::default()
-        },
-    );
     if let Some(s) = &cli.script {
         let code = std::fs::read_to_string(s)?;
         ctl.send(proto::ClientMsg::Eval { code });
@@ -125,7 +142,10 @@ fn main() -> anyhow::Result<()> {
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1440.0, 900.0])
-            .with_title("neuro_edit v2")
+            .with_title(match &cli.connect {
+                Some(a) => format!("neuro_edit v2 — {a}"),
+                None => "neuro_edit v2".to_string(),
+            })
             .with_icon(egui::IconData {
                 rgba: icon_img.to_vec(),
                 width: icon_img.width(),

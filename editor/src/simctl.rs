@@ -92,6 +92,55 @@ impl SimCtl {
         ctl
     }
 
+    /// Remote transport: the same protocol over WebSocket. `addr` is a
+    /// `server` process's bind address (`host:port`). The UI sees the
+    /// same `Shared` — nothing downstream knows the sim is remote.
+    pub fn connect(addr: &str) -> anyhow::Result<SimCtl> {
+        let shared: SharedRef = Arc::new(RwLock::new(Shared::default()));
+        let abort = Arc::new(AtomicBool::new(false));
+        let conn = server::ClientConn::connect(addr)
+            .map_err(|e| anyhow::anyhow!("connect ws://{addr}: {e}"))?;
+        let (mut wsend, mut wrecv) = conn.into_split()?;
+
+        let (tx, rx) = mpsc::channel::<(u64, ClientMsg)>();
+        let writer = std::thread::Builder::new()
+            .name("sim-ws-tx".into())
+            .spawn(move || {
+                for (_, c) in rx {
+                    let bye = matches!(c, ClientMsg::Bye);
+                    if wsend.send(&c).is_err() || bye {
+                        break;
+                    }
+                }
+            })
+            .expect("spawn ws writer");
+
+        let sh = shared.clone();
+        let reader = std::thread::Builder::new()
+            .name("sim-ws-rx".into())
+            .spawn(move || {
+                let mut fold = Fold::default();
+                while let Ok(m) = wrecv.recv() {
+                    if let Ok(mut w) = sh.write() {
+                        fold.apply(&mut w, m);
+                    }
+                }
+            })
+            .expect("spawn ws reader");
+
+        let ctl = SimCtl {
+            tx,
+            shared,
+            abort,
+            worker: Some(writer),
+            pump: Some(reader),
+        };
+        ctl.send(ClientMsg::Hello {
+            proto: proto::PROTO_VERSION,
+        });
+        Ok(ctl)
+    }
+
     pub fn send(&self, c: ClientMsg) {
         let _ = self.tx.send((0, c));
     }

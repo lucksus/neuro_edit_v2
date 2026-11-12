@@ -1,0 +1,16 @@
+[package]
+name = "server"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+net-format = { path = "../net-format" }
+proto = { path = "../proto" }
+sim = { path = "../sim" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tungstenite = "0.29"
+
+[features]
+default = ["sim/cuda"]
