@@ -1398,3 +1398,91 @@ shots show the example nets rather than the lsm wall):
   bug.
 - `pick_click` TTL is 800 ms — a compromise between starving picks and
   responsiveness; watch for long-frame hitches on weak GPUs.
+
+## Stage 13B — polish pass (admin UX, manual layout, glyph coverage, palette)
+
+### A. `server admin add` password input (commit `3a54353`)
+
+Bug: `stdin().read_to_string` waited for EOF — on a TTY the command
+"hung" (really waiting for Ctrl+D), and the password echoed on screen.
+
+Fix (`server/src/main.rs` + `server/src/lib.rs`):
+- TTY (`IsTerminal`): `rpassword::prompt_password("Password: ")` →
+  12-char minimum → `prompt_password("Repeat password: ")` → mismatch
+  aborts. Echo disabled both times.
+- Non-TTY: `first_password_line()` reads ONLY the first line via
+  `BufRead::read_line`, strips `\r\n` — multi-line paste can't smuggle
+  a second password in, and `echo pw | server admin add` scripts keep
+  working.
+- Test: `piped_password_reads_first_line_only` (lib).
+- Live-verified both paths: piped multi-line input takes line 1 only;
+  under a real pty the prompts show and typing is hidden.
+- `docs/deploy.md` updated (prompt behaviour + min length + piping).
+
+### B. Manual window layout (`92f1940`, `30612fc`, `edf70b4`)
+
+Bug: body text ran off the window's right edge.
+
+Two REAL bugs behind it (found by reproducing the window headlessly):
+1. `ScrollArea` inside `ui.horizontal` claims the row's *unbounded* x
+   extent → window resized to content each frame (~+200px/frame until
+   it hit the screen edge). Headless probe: clip x2 grew 857→1161.
+2. `Label::wrap()` inside `horizontal_wrapped` squeezes into the row's
+   leftover sliver → word-per-line columns.
+
+Fix: body column is now `allocate_ui_with_layout(vec2(w,h),
+Layout::top_down)` with `w = (clip_w - 150).clamp(80, 480)` — bounded
+and stable; each md line renders as ONE `LayoutJob` (bold/code inline
+formats) that wraps as a whole paragraph. Default window 640×520.
+
+Tests (`manual::layout_tests`):
+- `body_text_wraps_to_window` — every embedded page, painted-text
+  width ≤ 340px in a 360px window (was failing: text ran off).
+- `manual_window_width_is_stable` — frame-over-frame growth regression.
+- Verified in browser: `review/stage13b_manual_1440.png` (1440×900) and
+  `review/stage13b_manual_800.png` (800×700) — list left, wrapped
+  scrollable body right.
+
+### C. Tofu glyphs (`47500eb`)
+
+Probe (`Fonts::has_glyph` vs `FontDefinitions::default()`) showed the
+bundled proportional font lacks: → (U+2192) ▾ ⇑ ✕ — all rendered as
+boxes in proportional text (monospace is fine, console unaffected).
+
+Replacements: `→`→`->` (empty-plot hint, file-rename status, manual
+pages), `▾` dropped ("Examples" menu already draws its own arrow),
+`↑`→`^` (Files up-button), `✕`→`x`, `⇒`→`=>` in docs.
+
+Regression test `ui_strings_stay_in_font_coverage` scans every
+string-bearing line of `editor/src/*.rs` + all manual pages against
+the real `Fonts` — any future uncovered glyph fails the build.
+
+### D. Manual colour legend (`480e7bd`)
+
+The legend claimed "orange = excitatory, blue = inhibitory" — wrong on
+both counts. Actual palette (now shared constants in `scene.rs`):
+- Neurons: `NEURON_EXC` light blue `[0.55,0.8,1.0]`, `NEURON_INH` pale
+  purple `[0.85,0.6,1.0]` — both flash `SPIKE_FLASH` orange on spike.
+- Synapses: `SYN_EXC` salmon, `SYN_INH` blue, `SYN_SELECTED` golden.
+- Spike dots: `DOT_EXC` yellow, `DOT_INH` light blue.
+
+`gpu.rs` uniforms now use the constants; `palette_matches_shader` test
+asserts each `vec3f(...)` literal in shader.wgsl still matches (wgsl
+can't share Rust consts — the test pins them). getting-started.md
+rewritten. All other manual pages checked — no other colour claims.
+
+### E. Leftover Stage-12 items (verification only, no code)
+
+- L (effective quota): done in `801d84a` — admin shows effective
+  values, raw-0 rows marked `(default)`.
+- M (disable kills sessions): already implemented —
+  `MultiServer::disable` calls `set_status` + `delete_user_sessions` +
+  `runs.drop_user`; `UserRun::stop` shuts down live sockets; test
+  `disable_kills_session_and_ws` proves the WS dies and the old cookie
+  redirects; `session_user` gates on `status=="active"`.
+
+### Screenshots
+
+- `stage13b_manual_1440` / `stage13b_manual_800` — Manual at 1440×900
+  and 800×700: page list left, wrapped body right, new colour legend
+  visible, ASCII arrows in the empty-plot hint.
