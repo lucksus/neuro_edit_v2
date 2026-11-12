@@ -110,6 +110,9 @@ pub struct EditorApp {
     saved_version: u64,
     watch_sent: Vec<u32>,
     pub status: String,
+    /// Mode as of last frame — a change clears `status` (stale
+    /// mode-scoped messages like "connect: missed" shouldn't stick).
+    last_mode: Mode,
     /// Last subnet JSON we copied (for the Paste menu without OS access).
     clipboard: Option<String>,
     /// Original neuro_edit artwork, loaded on first frame.
@@ -295,6 +298,7 @@ impl EditorApp {
             saved_version: 0,
             watch_sent: Vec::new(),
             status: String::new(),
+            last_mode: Mode::Navigate,
             clipboard: None,
             icons: None,
         }
@@ -1405,7 +1409,7 @@ impl EditorApp {
                         self.send(ClientMsg::Eval { code });
                     }
                 });
-                ui.small("Ctrl+Enter runs · ↑/↓ history · `net`, `sim`, `rng` in scope");
+                ui.small("Ctrl+Enter runs · up/down = history · `net`, `sim`, `rng` in scope");
             });
     }
 
@@ -2201,6 +2205,10 @@ impl eframe::App for EditorApp {
         }
         crate::view::with_gpu(rs, |gpu| self.sync_shared(gpu));
         self.update_watch();
+        if self.mode != self.last_mode {
+            self.status.clear();
+            self.last_mode = self.mode;
+        }
 
         // clipboard staged by the worker → OS clipboard + internal copy
         let staged = self

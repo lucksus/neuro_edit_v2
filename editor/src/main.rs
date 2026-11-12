@@ -172,8 +172,10 @@ fn main() -> anyhow::Result<()> {
             if let Some(p) = &net_path {
                 app.push_recent(p.clone());
             }
-            // dark theme
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            // dark theme — set_theme, not set_visuals: eframe applies the
+            // system light scheme AFTER the app creator, which would undo
+            // a bare set_visuals(dark) on light desktops/browser OS themes
+            cc.egui_ctx.set_theme(egui::Theme::Dark);
             Ok(Box::new(app))
         }),
     )
@@ -225,7 +227,7 @@ fn main() {
                 Box::new(move |cc| {
                     let ctl = editor::simctl::SimCtl::connect(&host)
                         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
-                    cc.egui_ctx.set_visuals(eframe::egui::Visuals::dark());
+                    cc.egui_ctx.set_theme(eframe::egui::Theme::Dark);
                     Ok(Box::new(editor::app::EditorApp::new(ctl, cc.storage)))
                 }),
             )
