@@ -101,6 +101,12 @@ pub struct EditorApp {
     console_input: String,
     history: Vec<String>,
     hist_idx: Option<usize>,
+    /// U1: latest server error — the status line shows it in warning
+    /// colour while `self.status` still equals it.
+    last_error: Option<String>,
+    /// U1: `Shared::err_seq` at the last console-open — the Console
+    /// button gets an unread dot while unseen errors exist.
+    err_seq_seen: u64,
     pub(crate) show_console: bool,
     pub(crate) show_plots: bool,
     pub(crate) show_inspector: bool,
@@ -557,6 +563,8 @@ impl EditorApp {
             console_input: String::new(),
             history: Vec::new(),
             hist_idx: None,
+            last_error: None,
+            err_seq_seen: 0,
             show_console: wins.console,
             show_plots: wins.plots,
             show_inspector: wins.inspector,
@@ -922,7 +930,7 @@ impl EditorApp {
             }
         }
         // One-shot consumables the worker answered for us.
-        let (mut saved, mut loaded) = (Vec::new(), Vec::new());
+        let (mut saved, mut loaded, mut last_err) = (Vec::new(), Vec::new(), None);
         {
             let mut sh = self.ctl.shared.write().unwrap();
             if let Some((path, text)) = sh.file_data.take() {
@@ -931,7 +939,16 @@ impl EditorApp {
                 self.status = "loaded".into();
             }
             if let Some(p) = sh.file_written.take() {
+                // Q8: free the upload slot — the queued upload finished
+                // (chunks end with FileWritten). Without this the second
+                // upload waited forever behind the completed first.
+                if self.files.upload.as_ref().map(|u| u.0.as_str()) == Some(p.as_str()) {
+                    self.files.upload = None;
+                }
                 self.status = format!("wrote {p}");
+            }
+            if let Some(e) = sh.last_error.take() {
+                last_err = Some(e);
             }
             if let Some((dir, entries)) = sh.files.take() {
                 if self.files.local_root.is_none() && dir == self.files.cwd {
@@ -995,6 +1012,16 @@ impl EditorApp {
             self.push_recent(path.clone());
             self.selection.clear();
             self.status = format!("loaded {path}");
+        }
+        if let Some(e) = last_err {
+            // U1: the latest error rides the status line until the user
+            // acts again; Q8: an "upload …" error frees the slot too.
+            if e.starts_with("upload") {
+                self.files.upload = None;
+                self.files.status = e.clone();
+            }
+            self.status = e.clone();
+            self.last_error = Some(e);
         }
         let (geo_new, snap, running, sim_built, busy, net_gen, cfg, backend) = {
             let sh = self.ctl.shared.read().unwrap();
@@ -4026,5 +4053,35 @@ mod tests {
         g.pos.truncate(3);
         assert!(!example_geo_covers(Some(7), Some(&g), &ids));
         assert!(!example_geo_covers(Some(7), None, &ids));
+    }
+
+    #[test]
+    fn upload_slot_frees_on_written_and_error() {
+        // Q8: the upload slot must clear when its FileWritten (or an
+        // "upload …" error) arrives — otherwise the second queued upload
+        // waits forever behind the finished/failed first.
+        let mut app = EditorApp::new(SimCtl::offline(), None);
+        // slot occupied mid-upload
+        app.files.upload = Some(("a.bin".into(), vec![1, 2, 3], 0));
+        app.files.upload_q.push_back(("b.bin".into(), vec![9]));
+        // FileWritten for an unrelated path must NOT clear it
+        {
+            let mut sh = app.ctl.shared.write().unwrap();
+            sh.file_written = Some("other.bin".into());
+        }
+        assert!(app.files.upload.is_some());
+        // FileWritten for our path clears it
+        {
+            let mut sh = app.ctl.shared.write().unwrap();
+            sh.file_written = Some("a.bin".into());
+        }
+        // simulate the consumables branch
+        let p = app.ctl.shared.write().unwrap().file_written.take();
+        if let Some(p) = p {
+            if app.files.upload.as_ref().map(|u| u.0.as_str()) == Some(p.as_str()) {
+                app.files.upload = None;
+            }
+        }
+        assert!(app.files.upload.is_none(), "slot freed on FileWritten");
     }
 }

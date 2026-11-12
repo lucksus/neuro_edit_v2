@@ -172,6 +172,12 @@ pub struct Shared {
     /// Q7: latest `NetLoaded` ack — (path, version). `net_path` and the
     /// recent list move only when this lands, not on the request.
     pub loaded_ack: Option<(String, u64)>,
+    /// Latest `ServerMsg::Error` — consumed by the app for the status
+    /// bar (U1) and for clearing a stalled upload slot (Q8).
+    pub last_error: Option<String>,
+    /// Unread-console indicator: bumped on Errors; the app clears it
+    /// when the console is opened (U1).
+    pub err_seq: u64,
 }
 
 /// Snapshot of an `OpenJob` reply for the jobs panel.
@@ -212,6 +218,8 @@ impl Default for Shared {
             dirty_seq: 0,
             saved_ack: None,
             loaded_ack: None,
+            last_error: None,
+            err_seq: 0,
         }
     }
 }
@@ -412,6 +420,8 @@ impl Fold {
                 if e.starts_with("edit refused:") {
                     sh.edits_in_flight = sh.edits_in_flight.saturating_sub(1);
                 }
+                sh.last_error = Some(e.clone());
+                sh.err_seq += 1;
                 sh.log(format!("! {e}"));
             }
             proto::ServerMsg::Saved { path, version } => {
