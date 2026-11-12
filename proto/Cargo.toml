@@ -7,4 +7,5 @@ version.workspace = true
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
+flate2 = "1"
 net-format = { path = "../net-format" }

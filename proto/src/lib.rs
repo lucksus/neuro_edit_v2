@@ -122,7 +122,7 @@ pub struct Geo {
     /// Grid groups with members in texel order.
     pub grids: Vec<Grid>,
     /// Neuron ids not covered by any grid group — the index space
-    /// `Activity::spike_bits`/`non_grid_glow` are coded against.
+    /// `Activity::non_grid_spiked` is coded against.
     pub non_grid: Vec<u32>,
     pub dt_ms: f32,
 }
@@ -323,13 +323,6 @@ pub enum ClientMsg {
     Bye,
 }
 
-/// Sparse u8 texel update for one grid plane: (texel index, new value).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct GridDelta {
-    pub grid: u32,
-    pub texels: Vec<(u32, u8)>,
-}
-
 /// The per-publish dynamic frame — rate-limited by the server
 /// (≤ ~30 Hz). All large fields are sparse or quantized so a
 /// 1M-neuron grid stays inside a few MB/s.
@@ -344,16 +337,14 @@ pub struct Activity {
     pub steps_per_sec: f32,
     /// Bit i set ⇔ neuron id `i` spiked since the previous Activity.
     /// Covers the whole id space — clients fold it into their raster /
-    /// particle spike views; grid members' *glow* still rides the texel
-    /// deltas (`grid_delta`), so a decay isn't confused with a spike.
+    /// particle spike views AND their glow accumulators: the decay laws
+    /// (`exp(-Δms / PLANE_TAU)` for plane texels, `(1-dt/tau_r)` per step
+    /// for per-neuron glow) are deterministic, so a spiked texel/neuron
+    /// just gets stamped 1.0 client-side instead of shipping every fading
+    /// value over the wire each frame.
     pub spike_bits: Vec<u8>,
-    /// u8-quantized activity glow for non-grid neurons (same indexing as
-    /// `spike_bits`).
-    pub non_grid_glow: Vec<u8>,
-    /// New v samples for watched neurons: (neuron id, samples).
+    /// New v samples for watched neurons, per id.
     pub watched_v: Vec<(u32, Vec<f32>)>,
-    /// Per-grid u8 texel changes since the previous Activity.
-    pub grid_delta: Vec<GridDelta>,
     /// Live constant drive per input (same order as `Geo.inputs`).
     pub input_values: Vec<f32>,
 }
@@ -421,14 +412,49 @@ impl ServerEvent {
 // codec
 // ---------------------------------------------------------------------------
 
+/// Wire payloads are bincode; payloads above `COMPRESS_OVER` travel
+/// deflated behind a 1-byte tag — a 1M-neuron `Activity` bitmap would
+/// otherwise cost ~125 KB raw. Small messages stay raw (tag `0`).
+const COMPRESS_OVER: usize = 256;
+const TAG_RAW: u8 = 0;
+const TAG_DEFLATE: u8 = 1;
+
 /// Encode a message as one WebSocket binary frame's payload.
 pub fn encode<T: Serialize>(m: &T) -> Vec<u8> {
-    bincode::serialize(m).expect("proto encode")
+    use std::io::Write;
+    let raw = bincode::serialize(m).expect("proto encode");
+    if raw.len() <= COMPRESS_OVER {
+        let mut out = Vec::with_capacity(raw.len() + 1);
+        out.push(TAG_RAW);
+        out.extend_from_slice(&raw);
+        return out;
+    }
+    let mut e = flate2::write::DeflateEncoder::new(
+        Vec::with_capacity(raw.len() / 4),
+        flate2::Compression::fast(),
+    );
+    e.write_all(&raw).expect("deflate");
+    let z = e.finish().expect("deflate finish");
+    let mut out = Vec::with_capacity(z.len() + 1);
+    out.push(TAG_DEFLATE);
+    out.extend_from_slice(&z);
+    out
 }
 
 /// Decode one payload. `Err` on malformed bytes or trailing data.
 pub fn decode<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, bincode::Error> {
-    bincode::deserialize(bytes)
+    use std::io::Read;
+    match bytes.split_first() {
+        Some((&TAG_RAW, raw)) => bincode::deserialize(raw),
+        Some((&TAG_DEFLATE, z)) => {
+            let mut raw = Vec::new();
+            flate2::read::DeflateDecoder::new(z)
+                .read_to_end(&mut raw)
+                .map_err(|e| Box::new(bincode::ErrorKind::Io(e)))?;
+            bincode::deserialize(&raw)
+        }
+        _ => Err(Box::new(bincode::ErrorKind::Custom("empty frame".into()))),
+    }
 }
 
 #[cfg(test)]
@@ -644,12 +670,7 @@ mod tests {
                 rate_hz: 55.5,
                 steps_per_sec: 1234.0,
                 spike_bits: vec![0b101],
-                non_grid_glow: vec![0, 200, 90],
                 watched_v: vec![(3, vec![-70.0, -55.0])],
-                grid_delta: vec![GridDelta {
-                    grid: 0,
-                    texels: vec![(5, 255), (9, 12)],
-                }],
                 input_values: vec![0.7],
             })),
             ServerMsg::GridTraces {

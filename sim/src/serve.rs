@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use net_format::Network;
 use proto::{
-    Activity, Backend, ClientMsg, Config, Geo, GeoDelta, Grid, GridDelta, Input, NetEdit,
-    NeuronRow, ServerEvent, ServerMsg, SynRow,
+    Activity, Backend, ClientMsg, Config, Geo, GeoDelta, Grid, Input, NetEdit, NeuronRow,
+    ServerEvent, ServerMsg, SynRow,
 };
 
 use crate::script::{Env, NetHandle, ProgressFn};
@@ -561,6 +561,8 @@ struct Pub {
     /// `sim.step_count()` at the previous publish — `counts` covers the
     /// interval since then.
     prev_step: u64,
+    /// `sim.time_ms()` at the previous publish — the plane-decay window.
+    prev_time_ms: f64,
     sps: f32,
     /// net version the cached grid member lists were built from.
     grid_ver: u64,
@@ -585,6 +587,7 @@ impl Default for Pub {
         Self {
             watch: Vec::new(),
             prev_step: 0,
+            prev_time_ms: 0.0,
             sps: 0.0,
             grid_ver: u64::MAX,
             grid_lists: Vec::new(),
@@ -616,6 +619,7 @@ impl Pub {
     fn reset_dyn(&mut self, gen: u64) {
         self.net_gen = gen;
         self.prev_step = 0;
+        self.prev_time_ms = 0.0;
         self.sps = 0.0;
         self.sim_built = false;
         // planes describe the replaced net — drop them; `trace_snapshot`
@@ -647,7 +651,6 @@ fn publish_sim(net: &NetHandle, net_ver: u64, sim: &mut Sim, p: &mut Pub, emit: 
     }
     p.next_pub = Instant::now() + Duration::from_millis(MIN_ACTIVITY_MS);
 
-    let activity = sim.trace();
     // Counts since previous publish: sum the record-ring rows covering the
     // elapsed steps. Intervals longer than the ring depth undercount the
     // oldest steps, which is fine for raster/particles.
@@ -657,6 +660,11 @@ fn publish_sim(net: &NetHandle, net_ver: u64, sim: &mut Sim, p: &mut Pub, emit: 
         .min(COUNTS_WINDOW as u64) as usize;
     let counts = sim.spike_counts(back).unwrap_or_default();
     p.prev_step = sim.step_count();
+    // Sim-time covered by this frame — the client decays its planes by
+    // the same factor, so the mirror stays faithful.
+    let dms = (sim.time_ms() - p.prev_time_ms).max(0.0);
+    p.prev_time_ms = sim.time_ms();
+    let f_decay = (-dms / PLANE_TAU_MS as f64).exp();
 
     // Refresh cached non-grid index on geo bumps.
     if p.grid_ver != net_ver {
@@ -675,11 +683,7 @@ fn publish_sim(net: &NetHandle, net_ver: u64, sim: &mut Sim, p: &mut Pub, emit: 
             bits[id / 8] |= 1 << (id % 8);
         }
     }
-    let non_grid_glow: Vec<u8> = p
-        .non_grid
-        .iter()
-        .map(|&id| quantize(activity.get(id as usize).copied().unwrap_or(0.0)))
-        .collect();
+    let bit = |id: u32| bits[id as usize / 8] >> (id as usize % 8) & 1 == 1;
 
     // per-step v recording happens in the sim; (re)apply the watch list
     // every publish so a rebuilt sim gets it back, then drain the samples
@@ -693,43 +697,31 @@ fn publish_sim(net: &NetHandle, net_ver: u64, sim: &mut Sim, p: &mut Pub, emit: 
     }
 
     // Grid-plane traces: (re)apply the watch lists after a rebuild, then
-    // emit sparse u8 deltas against the client's accumulators.
+    // update `p.trace_u8` — the mirror of what clients display. The wire
+    // carries NO texel data per-frame: clients decay their planes by
+    // `f_decay` (same LUT) and stamp 255 on texels whose member spiked —
+    // derivable from `spike_bits` + `Geo.grids[].members`.
     sim.set_grid_watches(&p.grid_lists);
     let traces = sim.grid_traces(PLANE_TAU_MS).unwrap_or_default();
     if p.trace_u8.len() != traces.len() {
         p.trace_u8 = vec![Vec::new(); traces.len()];
     }
-    let mut grid_delta = Vec::with_capacity(traces.len());
+    let plane_lut: [u8; 256] = std::array::from_fn(|v| (v as f64 * f_decay).round() as u8);
+    let mut resync = false;
     for (gi, tr) in traces.iter().enumerate() {
         if p.trace_u8[gi].len() != tr.len() {
-            // resized/new plane → full resync through the delta channel
-            let mut texels = Vec::with_capacity(tr.len());
-            let mut buf = vec![0u8; tr.len()];
-            for (i, &v) in tr.iter().enumerate() {
-                let q = quantize(v);
-                buf[i] = q;
-                texels.push((i as u32, q));
-            }
-            p.trace_u8[gi] = buf;
-            grid_delta.push(GridDelta {
-                grid: gi as u32,
-                texels,
-            });
+            // resized/new plane → resync from sim truth after the frame
+            p.trace_u8[gi] = tr.iter().map(|&v| quantize(v)).collect();
+            resync = true;
             continue;
         }
-        let mut texels = Vec::new();
-        for (i, &v) in tr.iter().enumerate() {
-            let q = quantize(v);
-            if q != p.trace_u8[gi][i] {
-                p.trace_u8[gi][i] = q;
-                texels.push((i as u32, q));
-            }
+        for v in p.trace_u8[gi].iter_mut() {
+            *v = plane_lut[*v as usize];
         }
-        if !texels.is_empty() {
-            grid_delta.push(GridDelta {
-                grid: gi as u32,
-                texels,
-            });
+        for (k, &m) in p.grid_lists[gi].iter().enumerate() {
+            if bit(m) {
+                p.trace_u8[gi][k] = 255;
+            }
         }
     }
 
@@ -745,12 +737,19 @@ fn publish_sim(net: &NetHandle, net_ver: u64, sim: &mut Sim, p: &mut Pub, emit: 
             rate_hz: sim.mean_rate_hz(),
             steps_per_sec: p.sps,
             spike_bits: bits,
-            non_grid_glow,
             watched_v,
-            grid_delta,
             input_values: sim.input_values(),
         })),
     );
+    if resync {
+        emit_b(
+            emit,
+            ServerMsg::GridTraces {
+                base_seq: p.seq,
+                grids: p.trace_u8.clone(),
+            },
+        );
+    }
 }
 
 fn quantize(v: f32) -> u8 {

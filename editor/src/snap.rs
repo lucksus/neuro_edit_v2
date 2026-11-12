@@ -156,14 +156,22 @@ pub type SharedRef = Arc<RwLock<Shared>>;
 /// the non-grid index space).
 #[derive(Default)]
 pub struct Fold {
-    /// Per-grid u8 trace planes — updated by `GridTraces` (full) and
-    /// `Activity::grid_delta` (sparse).
+    /// Per-grid u8 trace planes — `GridTraces` sets them whole, each
+    /// `Activity` decays them by `exp(-Δms / PLANE_TAU)` and stamps the
+    /// spiked texels' absolute values (`grid_delta`).
     trace_u8: Vec<Vec<u8>>,
     /// Per-source display edges — regenerated into `GeoSnap`'s flat
     /// `disp_edges`/`disp_ptr` on every `disp_changed`.
     disp: Vec<Vec<(u32, u16)>>,
-    /// `Geo.non_grid` — index space of `Activity::non_grid_glow`.
+    /// `Geo.non_grid` — index space of `Activity::non_grid_spiked`.
     non_grid: Vec<u32>,
+    /// u8 spike-trace glow per neuron id — decays by `(1-dt/tau_r)^Δsteps`
+    /// per frame; `non_grid_spiked` stamps absolute values; grid members
+    /// read their texel instead.
+    act_u8: Vec<u8>,
+    /// `Activity` anchors for the decay windows.
+    last_time_ms: f64,
+    last_t_steps: u64,
 }
 
 impl Fold {
@@ -195,6 +203,9 @@ impl Fold {
                     .iter()
                     .map(|gr| vec![0u8; gr.members.len()])
                     .collect();
+                self.act_u8 = vec![0u8; g.pos.len()];
+                self.last_time_ms = 0.0;
+                self.last_t_steps = 0;
                 sh.geo = Some(Arc::new(geo_snap_from(&g)));
                 sh.net_version = g.version;
                 sh.net_gen = g.gen;
@@ -257,37 +268,70 @@ impl Fold {
     }
 
     fn fold_activity(&mut self, sh: &mut Shared, a: proto::Activity) {
-        // texel deltas first so the glow map sees them
-        for gd in &a.grid_delta {
-            let gi = gd.grid as usize;
-            if gi >= self.trace_u8.len() {
-                self.trace_u8.resize_with(gi + 1, Vec::new);
+        let n = sh.geo.as_ref().map(|g| g.pos.len()).unwrap_or(0);
+        // ---- client-side decay (the wire only carries spiked entries) ----
+        let dms = (a.time_ms - self.last_time_ms).max(0.0);
+        let dsteps = a.t_steps.saturating_sub(self.last_t_steps);
+        self.last_time_ms = a.time_ms;
+        self.last_t_steps = a.t_steps;
+        let f_plane = (-dms / crate::simctl::PLANE_TAU_MS as f64).exp();
+        let f_act = {
+            let dt = sh.cfg.dt_ms.max(1e-6) as f64;
+            let tau = sh.cfg.readout_tau_ms.max(1e-6) as f64;
+            (1.0 - dt / tau).powi(dsteps as i32)
+        };
+        let lut = |f: f64| -> [u8; 256] { std::array::from_fn(|v| (v as f64 * f).round() as u8) };
+        let (plane_lut, act_lut) = (lut(f_plane), lut(f_act));
+        for t in self.trace_u8.iter_mut() {
+            for v in t.iter_mut() {
+                *v = plane_lut[*v as usize];
             }
-            let t = &mut self.trace_u8[gi];
-            for &(i, v) in &gd.texels {
-                let i = i as usize;
-                if i >= t.len() {
-                    t.resize(i + 1, 0);
+        }
+        if self.act_u8.len() < n {
+            self.act_u8.resize(n, 0);
+        }
+        for v in self.act_u8.iter_mut() {
+            *v = act_lut[*v as usize];
+        }
+
+        // ---- stamp spiked texels/neurons (derivable from spike_bits) ----
+        let bit = |id: u32| {
+            let i = id as usize;
+            i / 8 < a.spike_bits.len() && a.spike_bits[i / 8] >> (i % 8) & 1 == 1
+        };
+        if let Some(g) = &sh.geo {
+            for (gi, gr) in g.grids.iter().enumerate() {
+                if let Some(t) = self.trace_u8.get_mut(gi) {
+                    for (k, &m) in gr.members.iter().enumerate() {
+                        if bit(m) {
+                            t[k] = 255;
+                        }
+                    }
                 }
-                t[i] = v;
+            }
+        }
+        for &id in &self.non_grid {
+            if bit(id) {
+                if let Some(dst) = self.act_u8.get_mut(id as usize) {
+                    *dst = 255;
+                }
             }
         }
 
-        let n = a.spike_bits.len() * 8;
-        let mut counts = vec![0u32; n.min(sh.geo.as_ref().map(|g| g.pos.len()).unwrap_or(n),)];
+        let nb = a.spike_bits.len() * 8;
+        let mut counts = vec![0u32; nb];
         for (i, c) in counts.iter_mut().enumerate() {
             if a.spike_bits[i / 8] >> (i % 8) & 1 == 1 {
                 *c = 1;
             }
         }
 
-        // per-neuron glow: non-grid slots from the wire; grid members
-        // decode from their texel
+        // per-neuron glow: non-grid slots from the client-side decay +
+        // stamped spikes; grid members decode from their texel
         let mut activity = vec![0f32; counts.len()];
-        for (slot, &id) in self.non_grid.iter().enumerate() {
-            if let (Some(v), Some(dst)) = (a.non_grid_glow.get(slot), activity.get_mut(id as usize))
-            {
-                *dst = *v as f32 / 255.0;
+        for (id, &q) in self.act_u8.iter().enumerate() {
+            if let Some(dst) = activity.get_mut(id) {
+                *dst = q as f32 / 255.0;
             }
         }
         if let Some(g) = &sh.geo {
