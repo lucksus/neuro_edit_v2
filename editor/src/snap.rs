@@ -141,9 +141,22 @@ pub type SharedRef = Arc<RwLock<Shared>>;
 
 impl Shared {
     pub fn log(&mut self, s: impl Into<String>) {
+        let mut s = s.into();
+        // Eval results like `net.neurons_of("g")` can return multi-KB
+        // arrays — shorten the line and keep the tail count honest.
+        const MAX: usize = 400;
+        if s.len() > MAX {
+            let extra = s.len() - MAX;
+            s.truncate(MAX);
+            // don't leave half a UTF-8 char at the cut point
+            while !s.is_char_boundary(s.len()) {
+                s.pop();
+            }
+            s.push_str(&format!(" … ({extra} chars truncated)"));
+        }
         if self.console.len() >= 500 {
             self.console.pop_front();
         }
-        self.console.push_back(s.into());
+        self.console.push_back(s);
     }
 }

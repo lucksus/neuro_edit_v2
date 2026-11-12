@@ -378,7 +378,7 @@ impl EditorApp {
         self.edit_net(move |n| {
             n.connect(a, b, 6.0);
         });
-        self.status = format!("connected {a} → {b}");
+        self.status = format!("connected {a} -> {b}");
     }
 
     /// Apply a finished move drag (delta on the work plane).
@@ -798,12 +798,6 @@ impl EditorApp {
                         ui.close();
                     }
                 });
-                ui.menu_button("Help", |ui| {
-                    if ui.button("About").clicked() {
-                        self.dlg = Some(Dialog::About);
-                        ui.close();
-                    }
-                });
                 ui.menu_button("Group", |ui| {
                     if ui.button("Create connections…").clicked() {
                         self.dlg = Some(Dialog::Connections {
@@ -827,6 +821,12 @@ impl EditorApp {
                             group: "grid".into(),
                             frac: 0.2,
                         });
+                        ui.close();
+                    }
+                });
+                ui.menu_button("Help", |ui| {
+                    if ui.button("About").clicked() {
+                        self.dlg = Some(Dialog::About);
                         ui.close();
                     }
                 });
@@ -1023,7 +1023,7 @@ impl EditorApp {
                         None => String::new(),
                     };
                     if !label.is_empty() {
-                        ui.label(format!("⦿ {label}"));
+                        ui.label(label);
                     }
                 }
                 if self.busy {
@@ -1273,7 +1273,7 @@ impl EditorApp {
         }
         egui::TopBottomPanel::bottom("console")
             .resizable(true)
-            .default_height(160.0)
+            .default_height(240.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.heading("Script console (Rhai)");
@@ -1284,11 +1284,14 @@ impl EditorApp {
                     }
                 });
                 let lines = self.console_lines();
+                // Fill the panel minus the input row (~70px): the old fixed
+                // 90px cap left most of a tall console blank.
+                let out_h = (ui.available_height() - 70.0).max(40.0);
                 egui::ScrollArea::vertical()
                     .id_salt("conout")
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
-                    .max_height(90.0)
+                    .max_height(out_h)
                     .show(ui, |ui| {
                         for l in &lines {
                             ui.label(egui::RichText::new(l).monospace().size(11.0));

@@ -482,7 +482,7 @@ fn mode_input(
                         let delta = hit - md.plane_pt;
                         app.preview_delta = Some(delta);
                         app.status =
-                            format!("move Δ({:.0},{:.0},{:.0})", delta.x, delta.y, delta.z);
+                            format!("move d({:.0},{:.0},{:.0})", delta.x, delta.y, delta.z);
                     }
                 }
             }
@@ -649,6 +649,17 @@ fn overlay_2d(app: &EditorApp, ui: &mut egui::Ui, rect: egui::Rect, aspect: f32)
                 }
             }
         }
+    }
+    // Empty scene: a centered hint so a first launch isn't a blank void.
+    let empty = app.geo.as_ref().map_or(true, |g| g.pos.is_empty());
+    if empty {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "empty network\n\nFile > Load a .ne2, or build one in the console below:\nnet.create_2d_grid(\"g\", 100, 100, 5)",
+            egui::FontId::monospace(14.0),
+            egui::Color32::from_gray(150),
+        );
     }
     let hint = match app.mode {
         Mode::Navigate => "navigate: click select · drag = box select · right-drag orbit · wheel zoom · WASD/QE pan · dbl-click focus · I insert · C connect · M move · Del delete",
