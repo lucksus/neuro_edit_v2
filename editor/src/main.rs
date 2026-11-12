@@ -115,7 +115,7 @@ fn main() -> anyhow::Result<()> {
     );
     if let Some(s) = &cli.script {
         let code = std::fs::read_to_string(s)?;
-        ctl.send(editor::simctl::Cmd::Eval(code));
+        ctl.send(proto::ClientMsg::Eval { code });
     }
     let net_path = cli.net.clone();
 

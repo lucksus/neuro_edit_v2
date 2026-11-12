@@ -21,5 +21,8 @@ fn set_scene_accepts_empty_network() {
     let (device, queue) =
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
     let mut gpu = Gpu::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-    gpu.set_scene(&geo_from_net(&Network::new(), 0.1));
+    gpu.set_scene(&editor::snap::geo_snap_from(&geo_from_net(
+        &Network::new(),
+        0.1,
+    )));
 }

@@ -10,7 +10,7 @@
 //! MB/s for million-neuron nets. Data is never lost — the publish folds
 //! the whole interval (counts window, drained v samples, trace deltas).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -301,7 +301,8 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                     // sim.* calls inside the eval (set_input, set_noise…)
                     // leave state the UI shows — push one snapshot, but
                     // only when a sim exists (don't build one for a
-                    // read-only `net.*` eval).
+                    // read-only `net.*` eval). The rate limiter may have
+                    // skipped the run's tail — force the window closed.
                     if env.existing_sim().is_some() {
                         let mut p = pub_rc.borrow_mut();
                         publish_env(&env, &mut p, &emit);
@@ -573,9 +574,8 @@ struct Pub {
     sim_built: bool,
     /// Activity sequence counter.
     seq: u64,
-    /// Non-grid neuron ids (Geo.non_grid order) + id→slot map.
+    /// Non-grid neuron ids (Geo.non_grid order) for the glow vector.
     non_grid: Vec<u32>,
-    non_grid_idx: HashMap<u32, u32>,
     /// Rate-limit clock for Activity publishes.
     next_pub: Instant,
 }
@@ -593,7 +593,6 @@ impl Default for Pub {
             sim_built: false,
             seq: 0,
             non_grid: Vec::new(),
-            non_grid_idx: HashMap::new(),
             next_pub: Instant::now(),
         }
     }
@@ -625,8 +624,11 @@ impl Pub {
     }
 }
 
+/// Publish a snapshot NOW — callers use this at command/eval boundaries
+/// where the rate-limited progress hook may have skipped the tail.
 fn publish_env(env: &Env, p: &mut Pub, emit: &Emit) {
     if let Ok(h) = env.sim_handle() {
+        p.next_pub = Instant::now();
         publish_sim(
             &env.net,
             env.net_version.get(),
@@ -660,24 +662,17 @@ fn publish_sim(net: &NetHandle, net_ver: u64, sim: &mut Sim, p: &mut Pub, emit: 
     if p.grid_ver != net_ver {
         p.grid_lists = grid_member_lists(&net.borrow());
         p.non_grid = non_grid(&net.borrow());
-        p.non_grid_idx = p
-            .non_grid
-            .iter()
-            .enumerate()
-            .map(|(i, &id)| (id, i as u32))
-            .collect();
         p.grid_ver = net_ver;
     }
 
-    // spike bitmap over non_grid ids (grid members' spikes ride the
-    // texel deltas instead)
-    let n_ng = p.non_grid.len();
-    let mut bits = vec![0u8; n_ng.div_ceil(8)];
+    // spike bitmap over the whole neuron-id space — raster and particles
+    // need per-id spikes including grid members (whose glow rides the
+    // texel deltas instead, which can't distinguish spikes from decay).
+    let n = net.borrow().neurons.len();
+    let mut bits = vec![0u8; n.div_ceil(8)];
     for (id, &c) in counts.iter().enumerate() {
         if c > 0 {
-            if let Some(&slot) = p.non_grid_idx.get(&(id as u32)) {
-                bits[slot as usize / 8] |= 1 << (slot % 8);
-            }
+            bits[id / 8] |= 1 << (id % 8);
         }
     }
     let non_grid_glow: Vec<u8> = p

@@ -6,6 +6,7 @@ version.workspace = true
 
 [dependencies]
 net-format = { path = "../net-format" }
+proto = { path = "../proto" }
 sim = { path = "../sim" }
 anyhow = "1"
 bytemuck = { version = "1", features = ["derive"] }

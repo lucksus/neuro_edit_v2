@@ -98,6 +98,12 @@ pub struct Shared {
     /// Net-replacement generation (New / load / `net.clear()`) — the UI
     /// resets selection, watches and plots when this changes.
     pub net_gen: u64,
+    /// Last net version the server confirmed (Geo / GeoDelta) — the base
+    /// for `ClientMsg::Edit`.
+    pub net_version: u64,
+    /// Edits sent but not yet confirmed — `send_edit` bases are
+    /// `net_version + edits_in_flight`.
+    pub edits_in_flight: u64,
     pub snap: Snap,
     /// Worker is in continuous run mode.
     pub running: bool,
@@ -124,6 +130,8 @@ impl Default for Shared {
         Self {
             geo: None,
             net_gen: 0,
+            net_version: 0,
+            edits_in_flight: 0,
             snap: Snap::default(),
             running: false,
             sim_built: false,
@@ -138,6 +146,344 @@ impl Default for Shared {
 }
 
 pub type SharedRef = Arc<RwLock<Shared>>;
+
+// ---------------------------------------------------------------------------
+// ServerMsg → Shared folding (the local transport's read model)
+// ---------------------------------------------------------------------------
+
+/// Client-side fold state: things the wire sends incrementally but the UI
+/// keeps as whole values (u8 trace accumulators, per-source display edges,
+/// the non-grid index space).
+#[derive(Default)]
+pub struct Fold {
+    /// Per-grid u8 trace planes — updated by `GridTraces` (full) and
+    /// `Activity::grid_delta` (sparse).
+    trace_u8: Vec<Vec<u8>>,
+    /// Per-source display edges — regenerated into `GeoSnap`'s flat
+    /// `disp_edges`/`disp_ptr` on every `disp_changed`.
+    disp: Vec<Vec<(u32, u16)>>,
+    /// `Geo.non_grid` — index space of `Activity::non_grid_glow`.
+    non_grid: Vec<u32>,
+}
+
+impl Fold {
+    /// Apply one `ServerMsg` to `Shared`. `to:` routing is ignored — the
+    /// local client is the only subscriber.
+    pub fn apply(&mut self, sh: &mut Shared, msg: proto::ServerMsg) {
+        match msg {
+            proto::ServerMsg::Hello {
+                proto,
+                net_version,
+                net_gen,
+            } => {
+                if proto != proto::PROTO_VERSION {
+                    sh.log(format!(
+                        "! protocol mismatch: server speaks {proto}, we speak {}",
+                        proto::PROTO_VERSION
+                    ));
+                }
+                sh.net_version = net_version;
+                sh.net_gen = net_gen;
+                sh.edits_in_flight = 0;
+            }
+            proto::ServerMsg::Geo(g) => {
+                self.disp = split_disp(&g.disp_ptr, &g.disp_edges);
+                self.non_grid = g.non_grid.clone();
+                // planes re-arrive via GridTraces; until then, zeros
+                self.trace_u8 = g
+                    .grids
+                    .iter()
+                    .map(|gr| vec![0u8; gr.members.len()])
+                    .collect();
+                sh.geo = Some(Arc::new(geo_snap_from(&g)));
+                sh.net_version = g.version;
+                sh.net_gen = g.gen;
+                sh.edits_in_flight = 0;
+            }
+            proto::ServerMsg::GeoDelta(d) => {
+                if let Some(g) = sh.geo.as_deref().cloned() {
+                    let mut g = g;
+                    apply_delta(&mut g, &mut self.disp, &mut self.non_grid, *d);
+                    sh.geo = Some(Arc::new(g));
+                }
+                if let Some(g) = &sh.geo {
+                    sh.net_version = g.version;
+                }
+                sh.edits_in_flight = 0;
+            }
+            proto::ServerMsg::Status {
+                running,
+                busy,
+                sim_built,
+                backend,
+                cfg,
+                notice,
+            } => {
+                sh.running = running;
+                sh.busy = busy;
+                sh.sim_built = sim_built;
+                sh.backend = match backend {
+                    proto::Backend::Cpu => sim::BackendKind::Cpu,
+                    proto::Backend::Cuda => sim::BackendKind::Cuda,
+                };
+                sh.cfg = sim::SimConfig {
+                    dt_ms: cfg.dt_ms,
+                    synapse_tau_ms: cfg.synapse_tau_ms,
+                    readout_tau_ms: cfg.readout_tau_ms,
+                    noise_rate_hz: cfg.noise_rate_hz,
+                    noise_kick_mv: cfg.noise_kick_mv,
+                    seed: cfg.seed,
+                    int_weights: cfg.int_weights,
+                    ..Default::default()
+                };
+                sh.notice = notice;
+            }
+            proto::ServerMsg::Console(s) => sh.log(s),
+            proto::ServerMsg::Activity(a) => self.fold_activity(sh, *a),
+            proto::ServerMsg::GridTraces { grids, .. } => {
+                self.trace_u8 = grids;
+                sh.snap.grid_traces = self.traces_f32();
+            }
+            proto::ServerMsg::Clipboard(txt) => sh.clipboard = Some(txt),
+            proto::ServerMsg::Error(e) => sh.log(format!("! {e}")),
+        }
+    }
+
+    fn traces_f32(&self) -> Vec<Arc<Vec<f32>>> {
+        self.trace_u8
+            .iter()
+            .map(|t| Arc::new(t.iter().map(|&v| v as f32 / 255.0).collect()))
+            .collect()
+    }
+
+    fn fold_activity(&mut self, sh: &mut Shared, a: proto::Activity) {
+        // texel deltas first so the glow map sees them
+        for gd in &a.grid_delta {
+            let gi = gd.grid as usize;
+            if gi >= self.trace_u8.len() {
+                self.trace_u8.resize_with(gi + 1, Vec::new);
+            }
+            let t = &mut self.trace_u8[gi];
+            for &(i, v) in &gd.texels {
+                let i = i as usize;
+                if i >= t.len() {
+                    t.resize(i + 1, 0);
+                }
+                t[i] = v;
+            }
+        }
+
+        let n = a.spike_bits.len() * 8;
+        let mut counts = vec![0u32; n.min(sh.geo.as_ref().map(|g| g.pos.len()).unwrap_or(n),)];
+        for (i, c) in counts.iter_mut().enumerate() {
+            if a.spike_bits[i / 8] >> (i % 8) & 1 == 1 {
+                *c = 1;
+            }
+        }
+
+        // per-neuron glow: non-grid slots from the wire; grid members
+        // decode from their texel
+        let mut activity = vec![0f32; counts.len()];
+        for (slot, &id) in self.non_grid.iter().enumerate() {
+            if let (Some(v), Some(dst)) = (a.non_grid_glow.get(slot), activity.get_mut(id as usize))
+            {
+                *dst = *v as f32 / 255.0;
+            }
+        }
+        if let Some(g) = &sh.geo {
+            for (gi, gr) in g.grids.iter().enumerate() {
+                let Some(t) = self.trace_u8.get(gi) else {
+                    continue;
+                };
+                for (k, &m) in gr.members.iter().enumerate() {
+                    if let (Some(&v), Some(dst)) = (t.get(k), activity.get_mut(m as usize)) {
+                        *dst = v as f32 / 255.0;
+                    }
+                }
+            }
+        }
+
+        sh.snap = Snap {
+            seq: a.seq,
+            t_steps: a.t_steps,
+            time_ms: a.time_ms,
+            spikes_total: a.spikes_total,
+            rate_hz: a.rate_hz,
+            activity: Arc::new(activity),
+            counts: Arc::new(counts),
+            watched_v: a
+                .watched_v
+                .into_iter()
+                .map(|(id, v)| (id, Arc::new(v)))
+                .collect(),
+            grid_traces: self.traces_f32(),
+            input_values: Arc::new(a.input_values),
+            steps_per_sec: a.steps_per_sec,
+        };
+        sh.sim_built = true;
+    }
+}
+
+fn split_disp(ptr: &[u32], edges: &[(u32, u16)]) -> Vec<Vec<(u32, u16)>> {
+    ptr.windows(2)
+        .map(|w| edges[w[0] as usize..w[1] as usize].to_vec())
+        .collect()
+}
+
+fn flatten_disp(disp: &[Vec<(u32, u16)>]) -> (Vec<(u32, u16)>, Vec<u32>) {
+    let mut edges = Vec::new();
+    let mut ptr = Vec::with_capacity(disp.len() + 1);
+    for d in disp {
+        ptr.push(edges.len() as u32);
+        edges.extend_from_slice(d);
+    }
+    ptr.push(edges.len() as u32);
+    (edges, ptr)
+}
+
+/// Wire `Geo` → the UI's `GeoSnap` (identical fields, editor-side types).
+pub fn geo_snap_from(g: &proto::Geo) -> GeoSnap {
+    GeoSnap {
+        version: g.version,
+        pos: g.pos.clone(),
+        kind: g.kind.clone(),
+        names: g.names.clone(),
+        syn: g.syn.clone(),
+        syn_delay_steps: g.syn_delay_steps.clone(),
+        disp_edges: g.disp_edges.clone(),
+        disp_ptr: g.disp_ptr.clone(),
+        groups: g.groups.clone(),
+        inputs: g
+            .inputs
+            .iter()
+            .map(|i| InputSnap {
+                name: i.name.clone(),
+                pos: i.pos,
+                targets: i.targets.clone(),
+            })
+            .collect(),
+        readouts: g.readouts.clone(),
+        samples: g.samples.clone(),
+        scripts: g.scripts.clone(),
+        grids: g
+            .grids
+            .iter()
+            .map(|gr| GridSnap {
+                group: gr.group,
+                dims: gr.dims,
+                axes: gr.axes,
+                origin: gr.origin,
+                spacing: gr.spacing,
+                members: gr.members.clone(),
+            })
+            .collect(),
+        dt_ms: g.dt_ms,
+    }
+}
+
+/// Apply a wire `GeoDelta` to a `GeoSnap` in place. `disp`/`non_grid` are
+/// the per-source edge list and index space this fold maintains —
+/// `disp_changed` patches `disp` which is then re-flattened into the
+/// snapshot.
+fn apply_delta(
+    g: &mut GeoSnap,
+    disp: &mut Vec<Vec<(u32, u16)>>,
+    non_grid: &mut Vec<u32>,
+    d: proto::GeoDelta,
+) {
+    g.version = d.version;
+    if !d.non_grid.is_empty() {
+        *non_grid = d.non_grid;
+    }
+
+    for r in d.neurons_added {
+        // appended ids must line up — a gap means we missed a Geo
+        debug_assert_eq!(r.id as usize, g.pos.len());
+        g.pos.push(r.pos);
+        g.kind.push(r.kind);
+        g.names.push(r.name);
+        disp.push(Vec::new());
+    }
+    for r in d.neurons_changed {
+        let i = r.id as usize;
+        if i < g.pos.len() {
+            g.pos[i] = r.pos;
+            g.kind[i] = r.kind;
+            g.names[i] = r.name;
+        }
+    }
+    for s in d.syn_added {
+        g.syn.push((s.src, s.tgt));
+        g.syn_delay_steps.push(s.delay_steps);
+    }
+    for (src, tgt) in d.syn_removed {
+        if let Some(i) = g.syn.iter().position(|&(a, b)| a == src && b == tgt) {
+            g.syn.remove(i);
+            g.syn_delay_steps.remove(i);
+        }
+    }
+    for (i, steps) in d.syn_delays {
+        if let Some(ds) = g.syn_delay_steps.get_mut(i as usize) {
+            *ds = steps;
+        }
+    }
+    for (src, edges) in d.disp_changed {
+        if let Some(slot) = disp.get_mut(src as usize) {
+            *slot = edges;
+        }
+    }
+    let (edges, ptr) = flatten_disp(disp);
+    g.disp_edges = edges;
+    g.disp_ptr = ptr;
+    for (i, name, members) in d.groups_added {
+        let i = i as usize;
+        if i <= g.groups.len() {
+            g.groups.insert(i, (name, members));
+        }
+    }
+    for (i, name, members) in d.groups_changed {
+        if let Some(gr) = g.groups.get_mut(i as usize) {
+            *gr = (name, members);
+        }
+    }
+    for rem in d.grids_removed {
+        g.grids.retain(|gr| gr.group != rem as usize);
+    }
+    for gr in d.grids_changed {
+        let snap = GridSnap {
+            group: gr.group,
+            dims: gr.dims,
+            axes: gr.axes,
+            origin: gr.origin,
+            spacing: gr.spacing,
+            members: gr.members,
+        };
+        match g.grids.iter_mut().find(|x| x.group == snap.group) {
+            Some(slot) => *slot = snap,
+            None => g.grids.push(snap),
+        }
+    }
+    if let Some(v) = d.inputs {
+        g.inputs = v
+            .into_iter()
+            .map(|i| InputSnap {
+                name: i.name,
+                pos: i.pos,
+                targets: i.targets,
+            })
+            .collect();
+    }
+    if let Some(v) = d.readouts {
+        g.readouts = v;
+    }
+    if let Some(v) = d.samples {
+        g.samples = v;
+    }
+    if let Some(v) = d.scripts {
+        g.scripts = v;
+    }
+    g.dt_ms = d.dt_ms;
+}
 
 impl Shared {
     pub fn log(&mut self, s: impl Into<String>) {

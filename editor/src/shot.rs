@@ -53,7 +53,7 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
     }
 
     // ---- run the sim a bit so the frame shows activity ----
-    let geo: GeoSnap = geo_from_net(&net, 0.1);
+    let geo: GeoSnap = crate::snap::geo_snap_from(&geo_from_net(&net, 0.1));
     let dt = 0.1f32;
     let mut sim = Sim::new(
         &net,

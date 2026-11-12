@@ -1,8 +1,9 @@
 //! Headless integration test of the editor's sim worker:
 //! commands in → immutable snapshots out. This is the same path the UI uses.
 
-use editor::simctl::{Cmd, SimCtl};
+use editor::simctl::SimCtl;
 use net_format::Network;
+use proto::ClientMsg as Cmd;
 use sim::BackendKind;
 use std::time::{Duration, Instant};
 
@@ -22,8 +23,8 @@ fn worker_builds_runs_and_publishes() {
     let ctl = SimCtl::start(Network::new(), BackendKind::Cpu, 1);
 
     // Build a small liquid via the same Rhai API the console uses.
-    ctl.send(Cmd::Eval(
-        r#"
+    ctl.send(Cmd::Eval {
+        code: r#"
         net.create_2d_grid("g", 10, 10, 30.0);
         net.create_connections("g", 0.3, 100.0, 8.0);
         sim.set_noise(200.0, 5.0);
@@ -31,7 +32,7 @@ fn worker_builds_runs_and_publishes() {
         print("done t=" + sim.time());
         "#
         .to_string(),
-    ));
+    });
 
     // Geometry snapshot should appear (net_version bumped by the edits).
     let geo = wait_for(Duration::from_secs(10), || {
@@ -58,14 +59,18 @@ fn worker_builds_runs_and_publishes() {
     drop(s);
 
     // A run_ms command works too.
-    ctl.send(Cmd::Eval("sim.run(50.0)".to_string()));
+    ctl.send(Cmd::Eval {
+        code: "sim.run(50.0)".to_string(),
+    });
     wait_for(Duration::from_secs(10), || {
         let s = ctl.shared.read().ok()?;
         (s.snap.time_ms >= 149.9).then_some(())
     });
 
     // Pause/abort path: start a long run then abort — time must stop early.
-    ctl.send(Cmd::Eval("sim.run(100000.0)".to_string()));
+    ctl.send(Cmd::Eval {
+        code: "sim.run(100000.0)".to_string(),
+    });
     std::thread::sleep(Duration::from_millis(80));
     ctl.send(Cmd::Abort);
     std::thread::sleep(Duration::from_millis(200));
@@ -83,7 +88,9 @@ fn abort_stops_an_infinite_script() {
     use std::sync::atomic::Ordering;
 
     let ctl = SimCtl::start(Network::new(), BackendKind::Cpu, 1);
-    ctl.send(Cmd::Eval("let x = 0; while true { x += 1; }".into()));
+    ctl.send(Cmd::Eval {
+        code: "let x = 0; while true { x += 1; }".into(),
+    });
     // Give the eval a moment to spin up, then flip the flag exactly like
     // the pause button does via SimCtl::abort_now.
     std::thread::sleep(Duration::from_millis(100));
@@ -108,7 +115,9 @@ fn abort_stops_an_infinite_script() {
         );
     }
     // The worker must still be alive: a follow-up eval answers.
-    ctl.send(Cmd::Eval("sim.time()".into()));
+    ctl.send(Cmd::Eval {
+        code: "sim.time()".into(),
+    });
     wait_for(Duration::from_secs(10), || {
         let s = ctl.shared.read().ok()?;
         s.console.iter().any(|l| l.starts_with("= ")).then_some(())
@@ -120,15 +129,15 @@ fn abort_stops_an_infinite_script() {
 #[test]
 fn worker_publishes_grid_traces() {
     let ctl = SimCtl::start(Network::new(), BackendKind::Cpu, 1);
-    ctl.send(Cmd::Eval(
-        r#"
+    ctl.send(Cmd::Eval {
+        code: r#"
         net.create_2d_grid("g", 8, 8, 30.0);
         net.create_connections("g", 0.3, 100.0, 8.0);
         sim.set_noise(500.0, 20.0);
         sim.run(80.0);
         "#
         .to_string(),
-    ));
+    });
     let (geo, snap) = wait_for(Duration::from_secs(10), || {
         let s = ctl.shared.read().ok()?;
         let g = s.geo.clone()?;
@@ -157,15 +166,15 @@ fn worker_publishes_grid_traces() {
 #[test]
 fn worker_publishes_input_values() {
     let ctl = SimCtl::start(Network::new(), BackendKind::Cpu, 1);
-    ctl.send(Cmd::Eval(
-        r#"
+    ctl.send(Cmd::Eval {
+        code: r#"
         net.create_2d_grid("g", 4, 4, 30.0);
         net.add_input("src0", [[0, 12.0], [1, 12.0]]);
         sim.set_input("src0", 0.7);
         sim.run(20.0);
         "#
         .to_string(),
-    ));
+    });
     let vals = wait_for(Duration::from_secs(10), || {
         let s = ctl.shared.read().ok()?;
         let v = s.snap.input_values.clone();
@@ -194,15 +203,15 @@ fn worker_cuda_smoke() {
         return;
     }
     let ctl = SimCtl::start(Network::new(), BackendKind::Cuda, 1);
-    ctl.send(Cmd::Eval(
-        r#"
+    ctl.send(Cmd::Eval {
+        code: r#"
         net.create_2d_grid("g", 8, 8, 30.0);
         net.create_connections("g", 0.3, 100.0, 8.0);
         sim.set_noise(200.0, 5.0);
         sim.run(50.0);
         "#
         .to_string(),
-    ));
+    });
     wait_for(Duration::from_secs(15), || {
         let s = ctl.shared.read().ok()?;
         (s.snap.time_ms >= 49.9 && s.geo.as_ref().is_some_and(|g| g.pos.len() == 64)).then_some(())

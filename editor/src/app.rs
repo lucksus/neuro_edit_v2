@@ -10,8 +10,9 @@ use egui_plot::{Line, PlotPoints};
 use crate::camera::Camera;
 use crate::gpu::{Entity, Gpu};
 use crate::scene::{Particles, Plane};
-use crate::simctl::{Cmd, SimCtl};
+use crate::simctl::SimCtl;
 use crate::snap::GeoSnap;
+use proto::{ClientMsg, NetEdit};
 
 #[allow(dead_code)]
 pub struct EditorApp {
@@ -274,12 +275,14 @@ impl EditorApp {
         }
     }
 
-    fn send(&self, c: Cmd) {
+    fn send(&self, c: ClientMsg) {
         self.ctl.send(c);
     }
 
-    fn edit_net(&self, f: impl FnOnce(&mut net_format::Network) + Send + 'static) {
-        self.send(Cmd::EditNet(Box::new(f)));
+    /// Apply a structured edit — versioned, delta-able, and expressible
+    /// on the wire (unlike the old closure path).
+    fn edit_net(&self, e: NetEdit) {
+        self.ctl.send_edit(e);
     }
 
     /// Context-menu helper: watch a neuron's v(t) by selecting it (the
@@ -290,7 +293,7 @@ impl EditorApp {
 
     /// Context-menu helper: delete one neuron.
     pub fn delete_entity(&mut self, id: u32) {
-        self.edit_net(move |n| n.delete_neurons(vec![id]));
+        self.edit_net(NetEdit::DeleteNeurons { ids: vec![id] });
     }
 
     /// Context-menu helper: select an input so its value slider shows in
@@ -325,7 +328,7 @@ impl EditorApp {
 
     /// Load a file through the worker and remember it in recents.
     pub fn load_net(&mut self, path: String) {
-        self.send(Cmd::LoadNet(path.clone()));
+        self.send(ClientMsg::LoadNet { path: path.clone() });
         self.net_path = Some(path.clone());
         self.push_recent(path);
         self.selection.clear();
@@ -350,7 +353,7 @@ impl EditorApp {
             .collect();
         if ids != self.watch_sent {
             self.watch_sent = ids.clone();
-            self.send(Cmd::Watch(ids));
+            self.send(ClientMsg::Watch(ids));
             self.v_hist.retain(|k, _| self.watch_sent.contains(k));
         }
     }
@@ -363,8 +366,9 @@ impl EditorApp {
 
     /// Place a neuron on the work plane (insert mode).
     pub fn insert_neuron(&mut self, p: glam::Vec3) {
-        self.edit_net(move |n| {
-            n.add_neuron([p.x, p.y, p.z], net_format::NeuronKind::Excitatory);
+        self.edit_net(NetEdit::AddNeuron {
+            pos: [p.x, p.y, p.z],
+            kind: proto::NeuronKind::Excitatory,
         });
         self.status = format!("placed neuron at ({:.0},{:.0},{:.0})", p.x, p.y, p.z);
     }
@@ -375,8 +379,10 @@ impl EditorApp {
             self.status = format!("can't connect neuron {a} to itself");
             return;
         }
-        self.edit_net(move |n| {
-            n.connect(a, b, 6.0);
+        self.edit_net(NetEdit::Connect {
+            from: a,
+            to: b,
+            w: 6.0,
         });
         self.status = format!("connected {a} -> {b}");
     }
@@ -392,15 +398,7 @@ impl EditorApp {
                 _ => None,
             })
             .collect();
-        self.edit_net(move |net| {
-            for (id, pos) in &moves {
-                net.neuron_mut(*id).pos = *pos;
-            }
-            for (id, _) in &moves {
-                net.refresh_delays_of(*id);
-            }
-            net.invalidate_grids();
-        });
+        self.edit_net(NetEdit::MoveNeurons { items: moves });
     }
 
     /// True when the published net has edits since the last save.
@@ -421,7 +419,7 @@ impl EditorApp {
     fn do_pending(&mut self, ctx: &egui::Context, act: PendingAction) {
         match act {
             PendingAction::New => {
-                self.send(Cmd::NewNet);
+                self.send(ClientMsg::NewNet);
                 self.net_path = None;
             }
             PendingAction::Load(p) => self.load_net(p),
@@ -443,7 +441,7 @@ impl EditorApp {
         self.pick_click = None;
         if !self.watch_sent.is_empty() {
             self.watch_sent.clear();
-            self.send(Cmd::Watch(Vec::new()));
+            self.send(ClientMsg::Watch(Vec::new()));
         }
         self.v_hist.clear();
         self.raster.clear();
@@ -670,7 +668,9 @@ impl EditorApp {
                     {
                         match &self.net_path {
                             Some(p) => {
-                                self.send(Cmd::Eval(format!("net.save({p:?})")));
+                                self.send(ClientMsg::Eval {
+                                    code: format!("net.save({p:?})"),
+                                });
                                 self.saved_version = self
                                     .ctl
                                     .shared
@@ -846,19 +846,19 @@ impl EditorApp {
                 {
                     if live {
                         self.ctl.abort_now();
-                        self.send(Cmd::AutoRun(false));
+                        self.send(ClientMsg::AutoRun(false));
                     } else {
-                        self.send(Cmd::AutoRun(true));
+                        self.send(ClientMsg::AutoRun(true));
                     }
                 }
                 if ui.button("Step 10ms").clicked() {
-                    self.send(Cmd::RunMs(10.0));
+                    self.send(ClientMsg::RunMs(10.0));
                 }
                 if ui.button("Step 100ms").clicked() {
-                    self.send(Cmd::RunMs(100.0));
+                    self.send(ClientMsg::RunMs(100.0));
                 }
                 if ui.button("Reset").clicked() {
-                    self.send(Cmd::Reset);
+                    self.send(ClientMsg::Reset);
                     self.raster.clear();
                     self.v_hist.clear();
                 }
@@ -866,7 +866,7 @@ impl EditorApp {
                     .add(egui::Slider::new(&mut self.speed, 0.05..=20.0).logarithmic(true))
                     .changed()
                 {
-                    self.send(Cmd::SetSpeed(self.speed));
+                    self.send(ClientMsg::SetSpeed(self.speed));
                 }
                 // One speed display: requested realtime factor + the best
                 // this machine has reached (peak steps/s → realtime).
@@ -885,10 +885,10 @@ impl EditorApp {
                     })
                     .show_ui(ui, |ui| {
                         if ui.button("cuda").clicked() {
-                            self.send(Cmd::SetBackend(sim::BackendKind::Cuda));
+                            self.send(ClientMsg::SetBackend(proto::Backend::Cuda));
                         }
                         if ui.button("cpu").clicked() {
-                            self.send(Cmd::SetBackend(sim::BackendKind::Cpu));
+                            self.send(ClientMsg::SetBackend(proto::Backend::Cpu));
                         }
                     });
                 ui.label("dt");
@@ -900,7 +900,7 @@ impl EditorApp {
                     )
                     .changed()
                 {
-                    self.send(Cmd::SetDtMs(self.dt_ms));
+                    self.send(ClientMsg::SetDtMs(self.dt_ms));
                 }
                 ui.label("noise Hz");
                 if ui
@@ -911,7 +911,10 @@ impl EditorApp {
                     )
                     .changed()
                 {
-                    self.send(Cmd::SetNoise(self.noise_hz, self.noise_kick));
+                    self.send(ClientMsg::SetNoise {
+                        hz: self.noise_hz,
+                        kick: self.noise_kick,
+                    });
                 }
             });
             ui.horizontal(|ui| {
@@ -1115,7 +1118,7 @@ impl EditorApp {
                             // field must show what the sim is doing
                             let mut v = self.input_values.get(k).copied().unwrap_or(0.0);
                             if ui.add(egui::DragValue::new(&mut v).speed(0.5)).changed() {
-                                self.send(Cmd::SetInputConst {
+                                self.send(ClientMsg::SetInputConst {
                                     name: inp.name.clone(),
                                     value: v,
                                 });
@@ -1148,7 +1151,7 @@ impl EditorApp {
                 ui.label(format!("neuron #{id}"));
                 let mut name = g.names[i].clone();
                 if ui.text_edit_singleline(&mut name).changed() {
-                    self.edit_net(move |n| n.neuron_mut(id).name = name.clone());
+                    self.edit_net(NetEdit::SetNeuronName { id, name });
                 }
                 let mut p = g.pos[i];
                 ui.horizontal(|ui| {
@@ -1158,11 +1161,7 @@ impl EditorApp {
                         changed |= ui.add(egui::DragValue::new(pv).speed(1.0)).changed();
                     }
                     if changed {
-                        self.edit_net(move |n| {
-                            n.neuron_mut(id).pos = p;
-                            n.refresh_delays_of(id);
-                            n.invalidate_grids();
-                        });
+                        self.edit_net(NetEdit::SetNeuronPos { id, pos: p });
                     }
                 });
                 ui.label(format!(
@@ -1185,7 +1184,7 @@ impl EditorApp {
                     .add(egui::Slider::new(&mut v, -50.0..=50.0).text("value"))
                     .changed()
                 {
-                    self.send(Cmd::SetInputConst {
+                    self.send(ClientMsg::SetInputConst {
                         name: inp.name.clone(),
                         value: v,
                     });
@@ -1219,7 +1218,7 @@ impl EditorApp {
         if ids.is_empty() {
             return;
         }
-        self.edit_net(move |n| n.delete_neurons(ids.clone()));
+        self.edit_net(NetEdit::DeleteNeurons { ids });
         self.selection.clear();
     }
 
@@ -1237,15 +1236,8 @@ impl EditorApp {
         if ids.is_empty() {
             return;
         }
-        let sh = self.ctl.shared.clone();
-        let ids2 = ids.clone();
-        self.edit_net(move |n| {
-            let sub = n.subnet(&ids2);
-            if let Ok(txt) = net_format::io::to_json(&sub) {
-                if let Ok(mut w) = sh.write() {
-                    w.clipboard = Some(txt);
-                }
-            }
+        self.send(ClientMsg::CopySubnet {
+            ids: ids.into_iter().collect(),
         });
         if cut {
             self.delete_selection();
@@ -1257,14 +1249,10 @@ impl EditorApp {
         let Some(txt) = text.or_else(|| self.clipboard.clone()) else {
             return;
         };
-        match net_format::io::from_json(&txt) {
-            Ok(sub) => {
-                self.edit_net(move |n| {
-                    n.insert_subnet(&sub, [30.0, 0.0, 30.0]);
-                });
-            }
-            Err(e) => self.status = format!("paste: {e}"),
-        }
+        self.edit_net(NetEdit::InsertSubnetJson {
+            json: txt,
+            offset: [30.0, 0.0, 30.0],
+        });
     }
 
     fn console(&mut self, ctx: &egui::Context) {
@@ -1341,7 +1329,7 @@ impl EditorApp {
                         self.history.push(code.clone());
                         self.hist_idx = None;
                         self.console_input.clear();
-                        self.send(Cmd::Eval(code));
+                        self.send(ClientMsg::Eval { code });
                     }
                 });
                 ui.small("Ctrl+Enter runs · ↑/↓ history · `net`, `sim`, `rng` in scope");
@@ -1364,13 +1352,15 @@ impl EditorApp {
                     ui.text_edit_singleline(&mut self.script_name);
                     if ui.button("Run").clicked() {
                         let code = self.script_text.clone();
-                        self.send(Cmd::Eval(code));
+                        self.send(ClientMsg::Eval { code });
                     }
                     if ui.button("Save to net").clicked() {
-                        self.send(Cmd::Eval(format!(
-                            "net.script_add({:?}, {:?})",
-                            self.script_name, self.script_text
-                        )));
+                        self.send(ClientMsg::Eval {
+                            code: format!(
+                                "net.script_add({:?}, {:?})",
+                                self.script_name, self.script_text
+                            ),
+                        });
                         self.status = format!("script {:?} saved to net", self.script_name);
                     }
                 });
@@ -1422,7 +1412,7 @@ impl EditorApp {
                         });
                     if run && !self.script_text.trim().is_empty() {
                         let code = self.script_text.clone();
-                        self.send(Cmd::Eval(code));
+                        self.send(ClientMsg::Eval { code });
                     }
                 });
             });
@@ -1636,15 +1626,12 @@ impl EditorApp {
                         });
                         if ui.button("Create").clicked() {
                             let (g, w2, h2, d2) = (group.clone(), *w, *h, *dist);
-                            self.edit_net(move |n| {
-                                net_format::builders::create_2d_grid(
-                                    n,
-                                    &g,
-                                    w2.max(1) as usize,
-                                    h2.max(1) as usize,
-                                    d2,
-                                    [0.0; 3],
-                                );
+                            self.edit_net(NetEdit::CreateGrid2d {
+                                group: g,
+                                w: w2.max(1) as u32,
+                                h: h2.max(1) as u32,
+                                spacing: d2,
+                                origin: [0.0; 3],
                             });
                             self.frame_pending = true;
                             keep = false;
@@ -1673,16 +1660,13 @@ impl EditorApp {
                         });
                         if ui.button("Create").clicked() {
                             let (g, w2, h2, dd, sp) = (group.clone(), *w, *h, *d2, *spacing);
-                            self.edit_net(move |n| {
-                                net_format::builders::create_3d_grid(
-                                    n,
-                                    &g,
-                                    w2.max(1) as usize,
-                                    h2.max(1) as usize,
-                                    dd.max(1) as usize,
-                                    sp,
-                                    [0.0; 3],
-                                );
+                            self.edit_net(NetEdit::CreateGrid3d {
+                                group: g,
+                                w: w2.max(1) as u32,
+                                h: h2.max(1) as u32,
+                                d: dd.max(1) as u32,
+                                spacing: sp,
+                                origin: [0.0; 3],
                             });
                             self.frame_pending = true;
                             keep = false;
@@ -1707,9 +1691,11 @@ impl EditorApp {
                         ui.add(egui::DragValue::new(w).prefix("w "));
                         if ui.button("Create").clicked() {
                             let (g, sc, la, ww) = (group.clone(), *scaling, *lambda, *w);
-                            self.send(Cmd::Eval(format!(
-                                "net.create_connections({g:?}, {sc:?}, {la:?}, {ww:?})"
-                            )));
+                            self.send(ClientMsg::Eval {
+                                code: format!(
+                                    "net.create_connections({g:?}, {sc:?}, {la:?}, {ww:?})"
+                                ),
+                            });
                             keep = false;
                         }
                     });
@@ -1726,9 +1712,9 @@ impl EditorApp {
                         ui.add(egui::DragValue::new(sd).prefix("sd "));
                         if ui.button("Apply").clicked() {
                             let (g, m, s) = (group.clone(), *mean, *sd);
-                            self.send(Cmd::Eval(format!(
-                                "net.set_synapse_weights({g:?}, {m:?}, {s:?})"
-                            )));
+                            self.send(ClientMsg::Eval {
+                                code: format!("net.set_synapse_weights({g:?}, {m:?}, {s:?})"),
+                            });
                             keep = false;
                         }
                     });
@@ -1744,7 +1730,9 @@ impl EditorApp {
                         ui.add(egui::Slider::new(frac, 0.0..=1.0).text("inh frac"));
                         if ui.button("Apply").clicked() {
                             let (g, f) = (group.clone(), *frac);
-                            self.send(Cmd::Eval(format!("net.set_exc_inh({g:?}, {f:?})")));
+                            self.send(ClientMsg::Eval {
+                                code: format!("net.set_exc_inh({g:?}, {f:?})"),
+                            });
                             keep = false;
                         }
                     });
@@ -1776,12 +1764,14 @@ impl EditorApp {
                             let n2 = name.clone();
                             let wt = *weight;
                             let tw: Vec<(u32, f32)> = targets.iter().map(|&t| (t, wt)).collect();
-                            self.edit_net(move |net| {
-                                net.add_input(&n2, tw, [0.0; 3]);
+                            self.edit_net(NetEdit::AddInput {
+                                name: n2,
+                                targets: tw,
+                                pos: [0.0; 3],
                             });
                             // a new input at value 0 drives nothing —
                             // apply the dialog's value right after create
-                            self.send(Cmd::SetInputConst {
+                            self.send(ClientMsg::SetInputConst {
                                 name: name.clone(),
                                 value: *value,
                             });
@@ -1800,9 +1790,7 @@ impl EditorApp {
                         ui.label("empty (t,value) series — fill via net.samples_write");
                         if ui.button("Create").clicked() {
                             let n2 = name.clone();
-                            self.edit_net(move |net| {
-                                net.samples_mut(&n2);
-                            });
+                            self.edit_net(NetEdit::AddSamples { name: n2 });
                             keep = false;
                         }
                     });
@@ -1826,9 +1814,7 @@ impl EditorApp {
                         ui.label(format!("{} units (from selection)", units.len()));
                         if ui.button("Create").clicked() && !units.is_empty() {
                             let n2 = name.clone();
-                            self.edit_net(move |net| {
-                                net.add_readout(&n2, units.clone());
-                            });
+                            self.edit_net(NetEdit::AddReadout { name: n2, units });
                             keep = false;
                         }
                     });
@@ -1852,15 +1838,7 @@ impl EditorApp {
                         ui.label(format!("{} neurons", ids.len()));
                         if ui.button("Add").clicked() && !ids.is_empty() {
                             let nm = name.clone();
-                            self.edit_net(move |net| {
-                                let gi = net.add_group(&nm);
-                                for id in &ids {
-                                    if !net.groups[gi].members.contains(id) {
-                                        net.groups[gi].members.push(*id);
-                                    }
-                                }
-                                net.invalidate_grids();
-                            });
+                            self.edit_net(NetEdit::AddToGroup { name: nm, ids });
                             keep = false;
                         }
                     });
@@ -1889,7 +1867,9 @@ impl EditorApp {
                         ui.text_edit_singleline(path);
                         if ui.button("Save").clicked() {
                             let p = path.clone();
-                            self.send(Cmd::Eval(format!("net.save({p:?})")));
+                            self.send(ClientMsg::Eval {
+                                code: format!("net.save({p:?})"),
+                            });
                             self.saved_version = self
                                 .ctl
                                 .shared

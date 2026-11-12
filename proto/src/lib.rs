@@ -342,8 +342,10 @@ pub struct Activity {
     pub rate_hz: f64,
     /// Measured wall-time speed (steps/s).
     pub steps_per_sec: f32,
-    /// Bit i set ⇔ `Geo.non_grid[i]` spiked since the previous Activity.
-    /// Grid members don't appear here — their texel deltas carry it.
+    /// Bit i set ⇔ neuron id `i` spiked since the previous Activity.
+    /// Covers the whole id space — clients fold it into their raster /
+    /// particle spike views; grid members' *glow* still rides the texel
+    /// deltas (`grid_delta`), so a decay isn't confused with a spike.
     pub spike_bits: Vec<u8>,
     /// u8-quantized activity glow for non-grid neurons (same indexing as
     /// `spike_bits`).
