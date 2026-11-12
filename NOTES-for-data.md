@@ -185,8 +185,9 @@ editor --screenshot big.png  --net big.ne2 --no-synapses
 - **Sim threading for the editor**: implemented as described — worker owns
   `Env` (net+sim+Rhai), snapshots via `Arc<RwLock<Shared>>`; geometry only
   re-uploaded on `net_version` change; activity/spikes every progress chunk.
-- `examples/lsm.ne2` is the tiny 2-population demo net from the Rhai smoke
-  test; `lsm_hidden.rhai` builds its own liquid programmatically.
+- `examples/lsm.ne2` is the 512-neuron liquid (8³ grid + inputs + trained
+  readout) that `lsm_hidden.rhai` saves at the end of seed 1 — the same
+  net the script builds programmatically per seed.
 
 ## Interactive verification (Xvfb, run 2)
 

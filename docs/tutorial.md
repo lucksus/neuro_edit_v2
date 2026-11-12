@@ -14,7 +14,7 @@ time, plus 500 permutation fits per seed) and prints a per-seed line, then
 a `mean ± sd` summary:
 
 ```
-seed 1: liquid 512 neurons, ~79k synapses
+seed 1: liquid 512 neurons, 2256 synapses
 seed 1  main auc=0.877 (val=0.85)  p=0.003  off=0.527  raw=0.501  cooc=1.0
         null=0.515±0.19
 …
@@ -66,7 +66,7 @@ net.clear();
 seed(seed_val);
 net.create_3d_grid("liquid", 8, 8, 8, 60.0);   // 512 neurons, 60 unit spacing
 net.set_exc_inh("liquid", 0.2);                // 20% inhibitory
-net.create_connections("liquid", 0.35, 90.0, 3.0);  // p ∝ 0.35·e^(−d/90)
+net.create_connections("liquid", 0.35, 90.0, 3.0);  // p = 0.35·e^(−(d/90)²)
 ```
 
 Then the wiring that makes the task *hard but learnable*: each pair shares
@@ -163,11 +163,16 @@ or build it by hand:
 1. **Insert → 3D grid…**: group `liquid`, 8×8×8, spacing 60 → Create.
 2. **Group → Set exc/inh…**: group `liquid`, frac 0.2 → Apply.
 3. **Group → Create connections…**: `liquid`, scaling 0.35, lambda 90,
-   weight 3 → Create (≈79k synapses).
+   weight 3 → Create (2256 synapses at seed 1 — a few thousand, not tens
+   of thousands: the Gaussian `p = 0.35·e^(−(d/90)²)` falls off fast).
 4. Console: `net.add_input("src0", [[0,12],[1,12],[2,12]])` — or box-select
-   some neurons first, then **Insert → Input…**.
-5. `sim.set_noise(25, 0.5)`, box-select neurons (they're the watch list),
-   `sim.run(500)` — watch `v(t)` traces and the raster tab.
+   some neurons first, then **Insert → Input…**. A new input starts at
+   value 0, so drive it with `sim.set_input("src0", 1)`.
+5. `sim.set_noise(60, 18)` — a Poisson kick ~18 mV per hit, so the raster
+   actually lights up (`25, 0.5` stays sub-threshold). Box-select neurons
+   and `sim.run(500)`: the first 8 selected neurons are the `v(t)` watch
+   list (the plots header says how many), and the raster tab shows every
+   spiking neuron.
 6. Drive it like the script does:
    `sim.play_input("src0", [1,1,1,0,0,1,…])`, `sim.run_steps(500)`,
    `sim.spike_counts(500)`.

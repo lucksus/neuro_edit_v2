@@ -56,7 +56,8 @@ net.connect(a, b, w)                          // a→b synapse, weight w → ind
 net.create_2d_grid("group", w, h, spacing);      // w×h plane, adds a group
 net.create_3d_grid("group", w, h, d, spacing);   // w×h×d volume
 net.create_connections("group", scaling, lambda, weight);
-//     probability p(d) = scaling * exp(-d/lambda) per ordered pair
+//     probability p(d) = scaling * exp(-(d/lambda)^2) per ordered pair
+//     (a Gaussian in distance, as in Maass 2002 — not an exponential)
 net.set_synapse_weights("group", mean, sd);      // gaussian on existing synapses
 net.set_exc_inh("group", frac);                  // frac → inhibitory kind
 ```
