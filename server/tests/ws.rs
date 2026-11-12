@@ -737,6 +737,7 @@ fn ws_web_serves_http_and_ws_on_one_port() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("index.html"), "<html>ne-web</html>").unwrap();
     std::fs::write(dir.join("app.js"), "console.log(1)").unwrap();
+    std::fs::write(dir.join("site.webmanifest"), "{}").unwrap();
     std::fs::write(base.join("secret.txt"), "nope").unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -761,6 +762,11 @@ fn ws_web_serves_http_and_ws_on_one_port() {
     let js = http_get(&addr, "/app.js");
     assert!(js.contains("Content-Type: text/javascript"), "{js:?}");
     assert!(js.contains("console.log(1)"), "{js:?}");
+    let manifest = http_get(&addr, "/site.webmanifest");
+    assert!(
+        manifest.contains("Content-Type: application/manifest+json"),
+        "{manifest:?}"
+    );
     let escape = http_get(&addr, "/../secret.txt");
     assert!(escape.starts_with("HTTP/1.1 404"), "{escape:?}");
     let missing = http_get(&addr, "/nope.wasm");

@@ -298,6 +298,7 @@ fn serve_http(
         Some("svg") => "image/svg+xml",
         Some("json") | Some("map") => "application/json",
         Some("ico") => "image/x-icon",
+        Some("webmanifest") => "application/manifest+json",
         _ => "application/octet-stream",
     };
     let (status, ct, bytes): (&str, &str, Vec<u8>) = match body {
