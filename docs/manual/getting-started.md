@@ -18,7 +18,7 @@ so gold lines can appear with nothing selected.
 - **Speed** slider scales sim time vs wall time.
 - Modes: **navigate** (V), **insert** (I), **connect** (C), **move** (M).
 - Plane picker: x–z / x–y / y–z work plane for inserts and moves.
-- Toggles: synapses, floor grid, spike dots, grid-view mode.
+- Toggles: synapses, input links, floor grid, spike dots, grid-view mode.
 
 ## Windows
 

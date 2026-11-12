@@ -107,6 +107,17 @@ impl PlotHist {
 /// window can't bounce the axis; "Auto Y" opts out per tab.
 pub const V_Y_RANGE: (f64, f64) = (-90.0, 40.0);
 
+/// egui_plot draws tick labels inside the plot rect: the lowest y label
+/// lands in the same corner as the leftmost x label. A y formatter can
+/// use this to blank the colliding mark — a y tick is suppressed when it
+/// sits within half a grid step of the visible range start.
+pub fn y_label_hits_corner(
+    mark: &egui_plot::GridMark,
+    range: &std::ops::RangeInclusive<f64>,
+) -> bool {
+    mark.value - *range.start() < 0.5 * mark.step_size
+}
+
 /// Stable per-watch color, shared by the v(t) and phase tabs — keyed
 /// by the position in the sent watch list so the same neuron draws the
 /// same color in both (the histories are HashMaps; iterating them
@@ -243,6 +254,20 @@ mod tests {
         us.pop_front();
         let (pts, _) = phase_points(&vs, &us, None);
         assert_eq!(pts.len(), 9);
+    }
+
+    #[test]
+    fn corner_label_detection() {
+        let r = -90.0..=40.0;
+        // a mark at the range floor collides; the next step up doesn't.
+        let mk = |v: f64| egui_plot::GridMark {
+            value: v,
+            step_size: 20.0,
+        };
+        assert!(y_label_hits_corner(&mk(-90.0), &r));
+        assert!(y_label_hits_corner(&mk(-85.0), &r));
+        assert!(!y_label_hits_corner(&mk(-80.0), &r));
+        assert!(!y_label_hits_corner(&mk(40.0), &r));
     }
 
     /// Stage 13 B: follow mode yields the trailing window; once off,

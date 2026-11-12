@@ -3205,7 +3205,15 @@ impl EditorApp {
                             ui.weak("no watched neurons — click a neuron to \
                                      watch it, or right-click -> \"Watch v(t)\"");
                         }
-                        let mut p = egui_plot::Plot::new("vplot").height(140.0);
+                        let mut p = egui_plot::Plot::new("vplot")
+                            .height(140.0)
+                            .y_axis_formatter(|y, range| {
+                                if crate::plot::y_label_hits_corner(&y, range) {
+                                    String::new()
+                                } else {
+                                    format!("{:.0}", y.value)
+                                }
+                            });
                         if win.is_none() || auto_y {
                             // x (or y too when following) from the data.
                             p = p.auto_bounds(egui::Vec2b::new(win.is_none(), auto_y));
@@ -3255,6 +3263,13 @@ impl EditorApp {
                         let win = self.plot_win.bounds(self.last_sim_t);
                         let p = egui_plot::Plot::new("phplot")
                             .height(140.0)
+                            .y_axis_formatter(|y, range| {
+                                if crate::plot::y_label_hits_corner(&y, range) {
+                                    String::new()
+                                } else {
+                                    format!("{:.0}", y.value)
+                                }
+                            })
                             .x_axis_label("v (mV)")
                             .y_axis_label("u");
                         let _ = p.show(ui, |ui| {
@@ -3313,7 +3328,10 @@ impl EditorApp {
                             .include_y(y_hi);
                         let pr = plot
                             .x_axis_formatter(|x, _| format!("{:.0}ms", x.value))
-                            .y_axis_formatter(move |y, _| {
+                            .y_axis_formatter(move |y, range| {
+                                if crate::plot::y_label_hits_corner(&y, range) {
+                                    return String::new();
+                                }
                                 let k = y.value.round() as usize;
                                 if watches.is_empty() {
                                     format!("{}", k)
