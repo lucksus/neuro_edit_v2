@@ -130,20 +130,33 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
             }
 
             // ---- pick request on click (and a cheap hover pick each frame
-            // so the status bar + context menu know what's under the cursor)
+            // so the status bar + context menu know what's under the cursor).
+            // Clicks queue in app.pick_click so an in-flight hover pick can't
+            // drop them; the queue drains as soon as a pick slot frees.
             if resp.clicked()
                 || (resp.drag_started_by(egui::PointerButton::Primary) && app.mode == Mode::Move)
             {
                 if let Some(mv) = mouse_vp {
-                    let px = (mv.x * w_px as f32).min(w_px as f32 - 1.0) as u32;
-                    let py = (mv.y * h_px as f32).min(h_px as f32 - 1.0) as u32;
-                    with_gpu(rs, |gpu| gpu.request_pick(px, py, w_px, h_px, false));
+                    app.pick_click = Some(mv);
+                }
+            }
+            if let Some(mv) = app.pick_click {
+                let px = (mv.x * w_px as f32).min(w_px as f32 - 1.0) as u32;
+                let py = (mv.y * h_px as f32).min(h_px as f32 - 1.0) as u32;
+                let mut sent = false;
+                with_gpu(rs, |gpu| {
+                    sent = gpu.request_pick(px, py, w_px, h_px, false);
+                });
+                if sent {
+                    app.pick_click = None;
                 }
             } else if resp.hovered() && !resp.dragged() {
                 if let Some(mv) = mouse_vp {
                     let px = (mv.x * w_px as f32).min(w_px as f32 - 1.0) as u32;
                     let py = (mv.y * h_px as f32).min(h_px as f32 - 1.0) as u32;
-                    with_gpu(rs, |gpu| gpu.request_pick(px, py, w_px, h_px, true));
+                    with_gpu(rs, |gpu| {
+                        gpu.request_pick(px, py, w_px, h_px, true);
+                    });
                 }
             }
 

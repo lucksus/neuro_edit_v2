@@ -379,6 +379,9 @@ pub fn register_api(
                   -> Result<rhai::INT, Box<rhai::EvalAltResult>> {
                 let len = n.borrow().neurons.len();
                 let (a, b) = (nid(a, len)?, nid(b, len)?);
+                if a == b {
+                    return Err(format!("self-synapse on neuron {a}").into());
+                }
                 invalidate(&s, &v);
                 Ok(n.borrow_mut().connect(a, b, d_f64(&w) as f32) as rhai::INT)
             },

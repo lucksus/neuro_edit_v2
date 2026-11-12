@@ -39,6 +39,9 @@ pub struct EditorApp {
     pub last_pick: Option<u32>,
     /// Instance under the cursor (hover pick, one frame behind).
     pub hover: Option<u32>,
+    /// Click waiting for a free pick slot (uv in the viewport). Clicks queue
+    /// here so an in-flight hover pick can't drop them.
+    pub pick_click: Option<glam::Vec2>,
     pub show_grid: bool,
     pub show_synapses: bool,
     /// Grid-group render mode (activity plane vs per-neuron cubes).
@@ -207,6 +210,7 @@ impl EditorApp {
             preview_delta: None,
             last_pick: None,
             hover: None,
+            pick_click: None,
             console_input: String::new(),
             history: Vec::new(),
             hist_idx: None,
@@ -343,6 +347,10 @@ impl EditorApp {
 
     /// Finish a connect drag: synapse a→b with default weight by kind.
     pub fn connect_neurons(&mut self, a: u32, b: u32) {
+        if a == b {
+            self.status = format!("can't connect neuron {a} to itself");
+            return;
+        }
         self.edit_net(move |n| {
             n.connect(a, b, 6.0);
         });

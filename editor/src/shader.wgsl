@@ -171,7 +171,18 @@ fn vs_syn(@builtin(vertex_index) vi: u32) -> LineOut {
     // no separate 16B/synapse colour buffer (10M synapses stay bindable).
     let inh = (lpairs[si].x & 0x80000000u) != 0u;
     let base_rgb = select(vec3f(1.0, 0.55, 0.45), vec3f(0.5, 0.55, 1.0), inh);
-    o.color = vec4f(mix(base_rgb * 0.35, base_rgb, act), 0.25 * cam.lod.x);
+    // Direction cue: the line brightens toward the target end.
+    let dir = select(0.5, 1.45, end == 1u);
+    var rgb = mix(base_rgb * 0.35, base_rgb, act) * dir;
+    var alpha = 0.4 * cam.lod.x;
+    // Synapses touching a selected neuron glow golden and denser.
+    let src_i = lpairs[si].x & 0x7fffffffu;
+    let tgt_i = lpairs[si].y & 0x7fffffffu;
+    if selected(src_i) || selected(tgt_i) {
+        rgb = mix(rgb, vec3f(1.0, 0.85, 0.3), 0.65);
+        alpha = min(alpha * 3.0, 1.0);
+    }
+    o.color = vec4f(rgb, alpha);
     return o;
 }
 

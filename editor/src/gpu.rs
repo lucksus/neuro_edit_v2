@@ -237,6 +237,7 @@ impl Gpu {
                     wgpu::ShaderStages::VERTEX,
                 ),
                 (2, storage(), wgpu::ShaderStages::VERTEX),
+                (3, storage(), wgpu::ShaderStages::VERTEX),
                 (4, storage(), wgpu::ShaderStages::VERTEX),
                 (5, storage(), wgpu::ShaderStages::VERTEX),
                 (6, storage(), wgpu::ShaderStages::VERTEX),
@@ -602,12 +603,77 @@ impl Gpu {
     /// Rebuild all static geometry buffers from a new GeoSnap.
     pub fn set_scene(&mut self, geo: &GeoSnap) {
         let n = geo.pos.len();
+
+        // Scene bounds up front: the synapse LOD stats below reuse them,
+        // and cube size adapts to local density so fixed-size cubes can't
+        // interpenetrate a tightly packed grid into one merged mass.
+        let mut mn = Vec3::splat(f32::MAX);
+        let mut mx = Vec3::splat(f32::MIN);
+        for p in &geo.pos {
+            let v = Vec3::from(*p);
+            mn = mn.min(v);
+            mx = mx.max(v);
+        }
+        if mn.x > mx.x {
+            mn = Vec3::splat(-100.0);
+            mx = Vec3::splat(100.0);
+        }
+        let ext = (mx - mn).max(Vec3::splat(1.0));
+        let avg_spacing = (ext.x * ext.y * ext.z / n.max(1) as f32).cbrt();
+
+        // Cube half-size ≈ 40% of the nearest-neighbour distance (spatial
+        // hash, cells ~1.5x mean spacing), capped at the original 4 units;
+        // neurons with no neighbour in reach stay at the cap. Dense grids
+        // get small separated cubes — synapses show between them again.
+        let cell = (avg_spacing * 1.5).max(1.0);
+        let vc = |p: &[f32; 3]| {
+            (
+                (p[0] / cell).floor() as i32,
+                (p[1] / cell).floor() as i32,
+                (p[2] / cell).floor() as i32,
+            )
+        };
+        let mut vox: std::collections::HashMap<(i32, i32, i32), Vec<u32>> =
+            std::collections::HashMap::with_capacity(n);
+        for (i, p) in geo.pos.iter().enumerate() {
+            vox.entry(vc(p)).or_default().push(i as u32);
+        }
+        let nn_scale: Vec<f32> = geo
+            .pos
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let c = vc(p);
+                let mut d2 = f32::MAX;
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        for dz in -1..=1 {
+                            if let Some(members) = vox.get(&(c.0 + dx, c.1 + dy, c.2 + dz)) {
+                                for &j in members {
+                                    if j as usize == i {
+                                        continue;
+                                    }
+                                    let q = Vec3::from(geo.pos[j as usize]);
+                                    d2 = d2.min((q - Vec3::from(*p)).length_squared());
+                                }
+                            }
+                        }
+                    }
+                }
+                if d2 == f32::MAX {
+                    4.0
+                } else {
+                    (0.4 * d2.sqrt()).clamp(0.3, 4.0)
+                }
+            })
+            .collect();
+
         // instances: neurons, then inputs, then readouts
         let mut inst = Vec::with_capacity(n + geo.inputs.len() + geo.readouts.len());
         let mut entity_of_inst = Vec::with_capacity(inst.capacity());
         for (i, p) in geo.pos.iter().enumerate() {
             inst.push(Inst {
-                pos_scale: [p[0], p[1], p[2], 4.0],
+                pos_scale: [p[0], p[1], p[2], nn_scale[i]],
                 aux: geo.kind.get(i).copied().unwrap_or(0) as u32,
                 _pad: [0; 3],
             });
@@ -799,6 +865,7 @@ impl Gpu {
                     entries: &[
                         entry(0, self.cam_buf.as_entire_binding()),
                         entry(2, activity_buf.as_entire_binding()),
+                        entry(3, sel_buf.as_entire_binding()),
                         entry(4, pos_buf.as_entire_binding()),
                         entry(
                             5,
@@ -815,24 +882,11 @@ impl Gpu {
             })
             .collect();
 
-        let mut mn = Vec3::splat(f32::MAX);
-        let mut mx = Vec3::splat(f32::MIN);
-        for p in &geo.pos {
-            let v = Vec3::from(*p);
-            mn = mn.min(v);
-            mx = mx.max(v);
-        }
-        if mn.x > mx.x {
-            mn = Vec3::splat(-100.0);
-            mx = Vec3::splat(100.0);
-        }
-
-        // Stats for the screen-space synapse LOD in `syn_lod`.
-        let ext = (mx - mn).max(Vec3::splat(1.0));
+        // Stats for the screen-space synapse LOD in `syn_lod` (bounds and
+        // mean spacing were computed at the top for the cube sizing).
         let mut dims = [ext.x, ext.y, ext.z];
         dims.sort_by(|a, b| b.total_cmp(a));
         let silhouette = dims[0] * dims[1];
-        let avg_spacing = (ext.x * ext.y * ext.z / n.max(1) as f32).cbrt();
         let mut edge_sum = 0.0f32;
         for &(a, b) in &geo.syn {
             if let (Some(&pa), Some(&pb)) = (geo.pos.get(a as usize), geo.pos.get(b as usize)) {
@@ -1016,9 +1070,9 @@ impl Gpu {
         let overdraw = drawn * len_px / screen_px.max(sil_px);
         let alpha_mul = if overdraw > 1.0 {
             // per-line alpha so k overlaps accumulate to ~55% coverage:
-            // a = 1 - (1-T)^(1/k), divided by the baked-in base alpha 0.25
+            // a = 1 - (1-T)^(1/k), divided by the baked-in base alpha 0.4
             const T: f32 = 0.55;
-            (1.0 - (1.0 - T).powf(1.0 / overdraw)) / 0.25
+            (1.0 - (1.0 - T).powf(1.0 / overdraw)) / 0.4
         } else {
             1.0
         };
@@ -1335,10 +1389,11 @@ impl Gpu {
 
     /// Queue a single-pixel entity pick at (px,py). `hover` tags the result
     /// so the UI can tell hover picks (context menu, status bar) apart from
-    /// click picks (selection).
-    pub fn request_pick(&mut self, px: u32, py: u32, vw: u32, vh: u32, hover: bool) {
+    /// click picks (selection). Returns false when a pick is already in
+    /// flight (caller may queue the click for next frame).
+    pub fn request_pick(&mut self, px: u32, py: u32, vw: u32, vh: u32, hover: bool) -> bool {
         if self.pick_pending.is_some() || self.scene.is_none() {
-            return;
+            return false;
         }
         self.ensure_targets(vw.max(1), vh.max(1));
         // Pick mode: vs_neuron fattens cubes when misc.w != 0, so thin
@@ -1444,6 +1499,7 @@ impl Gpu {
             hover,
             _buf: buf,
         });
+        true
     }
 
     /// Poll the pick result: outer None = still pending; inner None = miss.
