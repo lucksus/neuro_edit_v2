@@ -283,6 +283,9 @@ fn keys(app: &mut EditorApp, ui: &mut egui::Ui) {
         if i.key_pressed(egui::Key::V) && !i.modifiers.ctrl {
             app.mode = Mode::Navigate;
         }
+        if i.key_pressed(egui::Key::F) {
+            app.frame_all();
+        }
         if i.modifiers.ctrl && i.key_pressed(egui::Key::C) {
             app.copy_selection(false);
         }

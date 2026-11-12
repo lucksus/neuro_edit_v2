@@ -19,6 +19,8 @@ pub struct EditorApp {
     pub camera: Camera,
     pub geo: Option<Arc<GeoSnap>>,
     geo_version: u64,
+    /// Frame the camera on the next geometry publish (grid dialogs, load).
+    frame_pending: bool,
     last_snap_seq: u64,
     pub activity: Vec<f32>,
     pub particles: Particles,
@@ -186,6 +188,7 @@ impl EditorApp {
             camera: Camera::default(),
             geo: None,
             geo_version: 0,
+            frame_pending: false,
             last_snap_seq: 0,
             activity: Vec::new(),
             particles: Particles::new(),
@@ -380,10 +383,15 @@ impl EditorApp {
             if g.version != self.geo_version {
                 gpu.set_scene(&g);
                 self.geo_version = g.version;
-                let (mn, mx) = gpu.scene.as_ref().unwrap().bounds;
-                if self.geo.is_none() {
+                // Auto-frame on empty → non-empty (first net, script-built
+                // grid on a blank canvas, rebuild after New) and whenever a
+                // dialog asked for it (frame_pending).
+                let was_empty = self.geo.as_ref().map_or(true, |old| old.pos.is_empty());
+                if !g.pos.is_empty() && (was_empty || self.frame_pending) {
+                    let (mn, mx) = gpu.scene.as_ref().unwrap().bounds;
                     self.camera.frame(mn, mx);
                 }
+                self.frame_pending = false;
                 self.geo = Some(g);
             }
         }
@@ -839,6 +847,13 @@ impl EditorApp {
                             "planes",
                         );
                     });
+                if ui
+                    .button("Frame")
+                    .on_hover_text("Frame network (F)")
+                    .clicked()
+                {
+                    self.frame_all();
+                }
                 ui.separator();
                 ui.checkbox(&mut self.show_console, "console");
                 ui.checkbox(&mut self.show_plots, "plots");
@@ -1444,6 +1459,7 @@ impl EditorApp {
                                     [0.0; 3],
                                 );
                             });
+                            self.frame_pending = true;
                             keep = false;
                         }
                     });
@@ -1481,6 +1497,7 @@ impl EditorApp {
                                     [0.0; 3],
                                 );
                             });
+                            self.frame_pending = true;
                             keep = false;
                         }
                     });
