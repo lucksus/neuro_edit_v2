@@ -1261,10 +1261,12 @@ pub fn register_api(
         });
     }
     {
-        let (dd, q) = (data_dir.clone(), quota_bytes.clone());
+        let (dd, q, c) = (data_dir.clone(), quota_bytes.clone(), cfg.clone());
         engine.register_fn(
             "save",
             move |n: &mut NetHandle, path: &str| -> Result<(), Box<rhai::EvalAltResult>> {
+                // M3: the live sim config is persisted with the net.
+                crate::cfg_to_meta(&c.borrow(), &mut n.borrow_mut().meta);
                 let bytes = net_format::io::to_bytes(&n.borrow())
                     .map_err(|e| s_err(format!("save {path}: {e}")))?;
                 checked_write(&dd, &q, path, &bytes)?;
@@ -1273,11 +1275,12 @@ pub fn register_api(
         );
     }
     {
-        let (s, v, g, dd) = (
+        let (s, v, g, dd, c) = (
             sim.clone(),
             net_version.clone(),
             net_gen.clone(),
             data_dir.clone(),
+            cfg.clone(),
         );
         engine.register_fn(
             "load",
@@ -1285,6 +1288,8 @@ pub fn register_api(
                 let p = rdir(&dd, path)?;
                 let loaded =
                     net_format::io::load(&p).map_err(|e| s_err(format!("load {path}: {e}")))?;
+                // M3: the file's sim settings become live.
+                crate::meta_to_cfg(&loaded.meta, &mut c.borrow_mut());
                 *n.borrow_mut() = loaded;
                 g.set(g.get() + 1);
                 invalidate(&s, &v);
@@ -1551,6 +1556,26 @@ pub fn register_api(
         engine.register_fn("set_int_weights", move |_: &mut SimSlot, on: rhai::INT| {
             c.borrow_mut().int_weights = on != 0;
             *s.borrow_mut() = None; // switches the kernel + ring semantics
+        });
+    }
+    // M3: the persisted settings are readable, so a script can confirm
+    // what a loaded file actually adopted.
+    {
+        let c = cfg.clone();
+        engine.register_fn("synapse_tau", move |_: &mut SimSlot| -> f64 {
+            c.borrow().synapse_tau_ms as f64
+        });
+    }
+    {
+        let c = cfg.clone();
+        engine.register_fn("readout_tau", move |_: &mut SimSlot| -> f64 {
+            c.borrow().readout_tau_ms as f64
+        });
+    }
+    {
+        let c = cfg.clone();
+        engine.register_fn("dt", move |_: &mut SimSlot| -> f64 {
+            c.borrow().dt_ms as f64
         });
     }
 

@@ -406,6 +406,8 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                             .and_then(|p| net_format::io::load(&p).map_err(|e| e.to_string()))
                         {
                             Ok(n) => {
+                                // M3: the file's sim settings become live.
+                                crate::meta_to_cfg(&n.meta, &mut env.cfg.borrow_mut());
                                 *env.net.borrow_mut() = n;
                                 env.net_gen.set(env.net_gen.get() + 1);
                                 bump(&env);

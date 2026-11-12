@@ -1001,3 +1001,43 @@ fn upload_chunks_need_start_and_count_bytes() {
     rig.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// M3: sim settings persist through save→fresh-session→load. A tau set
+/// in one run survives in the file and is adopted on load.
+#[test]
+fn sim_settings_persist_across_sessions() {
+    let dir = std::env::temp_dir().join(format!("serve_m3_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let _ = std::fs::remove_file(dir.join("m3.ne2"));
+
+    let rig = start(Network::new(), Some(dir.clone()));
+    rig.send(ClientMsg::Subscribe);
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+    rig.send(ClientMsg::Eval {
+        code: "sim.set_synapse_tau(10); sim.set_dt(0.5); net.save(\"m3.ne2\");".into(),
+    });
+    rig.until(|m| matches!(m, ServerMsg::Console(s) if s.contains("m3.ne2") || !s.is_empty()));
+    rig.stop();
+
+    // the file itself carries the settings
+    let loaded = net_format::io::load(dir.join("m3.ne2").as_path()).unwrap();
+    assert_eq!(loaded.meta.synapse_tau_ms, 10.0);
+    assert_eq!(loaded.meta.dt_ms, 0.5);
+
+    // a fresh session adopts them
+    let rig = start(Network::new(), Some(dir.clone()));
+    rig.send(ClientMsg::Subscribe);
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+    rig.send(ClientMsg::Eval {
+        code: "net.load(\"m3.ne2\"); print(sim.synapse_tau()); print(sim.dt());".into(),
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Console(s) if s.trim() == "0.5"));
+    assert!(
+        evs.iter().any(
+            |e| matches!(&e.msg, ServerMsg::Console(s) if s.trim() == "10.0")
+        ),
+        "loaded tau must become the live config: {evs:?}"
+    );
+    rig.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}

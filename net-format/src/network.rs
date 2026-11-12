@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{DEFAULT_CONDUCTION_SPEED, DEFAULT_DT_MS, DEFAULT_SYNAPSE_TAU_MS};
+use crate::{
+    DEFAULT_CONDUCTION_SPEED, DEFAULT_DT_MS, DEFAULT_READOUT_TAU_MS, DEFAULT_SYNAPSE_TAU_MS,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum NeuronModel {
@@ -278,6 +280,21 @@ pub struct Meta {
     pub seed: u64,
     pub conduction_speed: f32,
     pub synapse_tau_ms: f32,
+    /// M3: these three came along later — serde defaults keep every
+    /// .ne2 written before them loadable.
+    #[serde(default = "default_readout_tau_ms")]
+    pub readout_tau_ms: f32,
+    #[serde(default)]
+    pub noise_rate_hz: f32,
+    #[serde(default = "default_noise_kick_mv")]
+    pub noise_kick_mv: f32,
+}
+
+fn default_readout_tau_ms() -> f32 {
+    DEFAULT_READOUT_TAU_MS
+}
+fn default_noise_kick_mv() -> f32 {
+    20.0
 }
 
 impl Default for Meta {
@@ -287,6 +304,9 @@ impl Default for Meta {
             seed: 1,
             conduction_speed: DEFAULT_CONDUCTION_SPEED,
             synapse_tau_ms: DEFAULT_SYNAPSE_TAU_MS,
+            readout_tau_ms: DEFAULT_READOUT_TAU_MS,
+            noise_rate_hz: 0.0,
+            noise_kick_mv: 20.0,
         }
     }
 }

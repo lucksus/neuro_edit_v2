@@ -36,6 +36,28 @@ pub fn valid_dt_ms(dt: f32) -> bool {
     dt.is_finite() && (MIN_DT_MS..=MAX_DT_MS).contains(&dt)
 }
 
+/// M3: persisted sim settings round-trip through `Meta`. Loading a
+/// network adopts the file's simulation settings; saving writes the
+/// live config back so nothing is silently reset on reopen.
+pub fn meta_to_cfg(meta: &net_format::Meta, cfg: &mut crate::state::SimConfig) {
+    cfg.dt_ms = meta.dt_ms;
+    cfg.synapse_tau_ms = meta.synapse_tau_ms;
+    cfg.readout_tau_ms = meta.readout_tau_ms;
+    cfg.noise_rate_hz = meta.noise_rate_hz;
+    cfg.noise_kick_mv = meta.noise_kick_mv;
+    cfg.seed = meta.seed;
+}
+
+/// Mirror of `meta_to_cfg` for the save path.
+pub fn cfg_to_meta(cfg: &crate::state::SimConfig, meta: &mut net_format::Meta) {
+    meta.dt_ms = cfg.dt_ms;
+    meta.synapse_tau_ms = cfg.synapse_tau_ms;
+    meta.readout_tau_ms = cfg.readout_tau_ms;
+    meta.noise_rate_hz = cfg.noise_rate_hz;
+    meta.noise_kick_mv = cfg.noise_kick_mv;
+    meta.seed = cfg.seed;
+}
+
 /// Server-side ceiling on sim memory, checked once before a sim build.
 /// All zeros = unlimited — the local desktop app has no server to
 /// protect, so it runs with the default (unlimited) limits.
