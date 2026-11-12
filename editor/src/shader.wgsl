@@ -9,7 +9,8 @@ struct Camera {
     right: vec4f,
     up: vec4f,
     misc: vec4f, // x: neuron size, y: activity glow, z: time, w: pick mode
-    lod: vec4f,  // x: synapse alpha multiplier, y: keep 1-of-N (<=1 draws all)
+    lod: vec4f,  // x: synapse alpha mul, y: keep 1-of-N, z: hovered inst +1
+    preview: vec4f, // xyz: live move delta for selected, w: drag active
 }
 
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -100,7 +101,16 @@ fn vs_neuron(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -
     }
     // misc.w = pick mode: draw the same cubes 75% bigger for easier clicks.
     let size = it.pos_scale.w * (1.0 + cam.misc.w * 0.75);
-    let wp = it.pos_scale.xyz + CUBE[vi] * size;
+    let sel = selected(ii);
+    let moving = sel && cam.preview.w > 0.5;
+    // Live move preview: selected cubes (and, in vs_syn, their synapse
+    // endpoints) render at the drag offset — the real positions only
+    // change when the drag is committed on release.
+    var wpos = it.pos_scale.xyz;
+    if moving {
+        wpos += cam.preview.xyz;
+    }
+    let wp = wpos + CUBE[vi] * size;
     o.clip = cam.view_proj * vec4f(wp, 1.0);
     o.nrm = CUBE_N[vi];
     o.id = ii;
@@ -113,10 +123,14 @@ fn vs_neuron(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -
     }
     let act = clamp(activity[ii], 0.0, 1.0);
     var col = mix(base * 0.45, base * 1.6, act);
-    if selected(ii) {
+    if sel {
         col = mix(col, vec3f(1.0, 0.35, 0.1), 0.75);
     }
-    o.color = vec4f(col, 1.0);
+    // Hover feedback: the cube under the cursor brightens a notch.
+    if ii + 1u == u32(cam.lod.z) {
+        col = col * 1.4 + vec3f(0.06, 0.06, 0.06);
+    }
+    o.color = vec4f(col, select(1.0, 0.5, moving));
     return o;
 }
 
@@ -165,7 +179,12 @@ fn vs_syn(@builtin(vertex_index) vi: u32) -> LineOut {
         o.color = vec4f(0.0);
         return o;
     }
-    o.clip = cam.view_proj * vec4f(lpos[p].xyz, 1.0);
+    // Move preview: endpoints belonging to selected neurons ride along.
+    var lpt = lpos[p].xyz;
+    if selected(p) && cam.preview.w > 0.5 {
+        lpt += cam.preview.xyz;
+    }
+    o.clip = cam.view_proj * vec4f(lpt, 1.0);
     let act = clamp(activity[p], 0.0, 1.0);
     // Per-synapse colour by source kind travels in lpairs[si].x's top bit:
     // no separate 16B/synapse colour buffer (10M synapses stay bindable).

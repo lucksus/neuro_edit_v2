@@ -170,7 +170,7 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
         cam.pitch_deg = p;
     }
     cam.clamp_above_floor();
-    gpu.write_cam(&cam, w as f32 / h as f32, h as f32, 0.0);
+    gpu.write_cam(&cam, w as f32 / h as f32, h as f32, 0.0, None, None);
 
     // overlay: floor grid + group boxes
     let mut pvs = Vec::new();

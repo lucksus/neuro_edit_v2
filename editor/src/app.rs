@@ -44,6 +44,9 @@ pub struct EditorApp {
     /// Click waiting for a free pick slot (uv in the viewport). Clicks queue
     /// here so an in-flight hover pick can't drop them.
     pub pick_click: Option<glam::Vec2>,
+    /// Per-instance cube half sizes (copied from `Scene` on geo change) —
+    /// the selection brackets size to the projected object box.
+    pub inst_half: Vec<f32>,
     pub show_grid: bool,
     pub show_synapses: bool,
     /// Grid-group render mode (activity plane vs per-neuron cubes).
@@ -143,6 +146,11 @@ pub enum PlotTab {
 
 #[derive(Clone)]
 pub struct MoveDrag {
+    /// Work-plane anchor: the grabbed object's world position. The drag
+    /// plane passes through it (not the camera target) so the object
+    /// stays under the cursor for the whole drag.
+    pub anchor: glam::Vec3,
+    /// Where the drag-start ray hit the work plane.
     pub plane_pt: glam::Vec3,
     pub start_pos: Vec<glam::Vec3>,
     pub ids: Vec<u32>,
@@ -255,6 +263,7 @@ impl EditorApp {
             last_pick: None,
             hover: None,
             pick_click: None,
+            inst_half: Vec::new(),
             console_input: String::new(),
             history: Vec::new(),
             hist_idx: None,
@@ -570,6 +579,11 @@ impl EditorApp {
                 // dialog asked for it (frame_pending).
                 // Floor grid + camera clamp follow the net's own baseline.
                 self.camera.floor_y = g.floor_y();
+                self.inst_half = gpu
+                    .scene
+                    .as_ref()
+                    .map(|s| s.inst_half.clone())
+                    .unwrap_or_default();
                 let was_empty = self.geo.as_ref().map_or(true, |old| old.pos.is_empty());
                 if !g.pos.is_empty() && (was_empty || self.frame_pending) {
                     let (mn, mx) = gpu.scene.as_ref().unwrap().bounds;

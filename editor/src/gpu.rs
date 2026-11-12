@@ -26,8 +26,12 @@ pub struct CamU {
     right: [f32; 4],
     up: [f32; 4],
     misc: [f32; 4],
-    /// x: synapse alpha multiplier, y: draw 1-of-N synapses (<=1 draws all).
+    /// x: synapse alpha multiplier, y: draw 1-of-N synapses (<=1 draws all),
+    /// z: hovered instance +1 (0 = none — brightens its cube).
     lod: [f32; 4],
+    /// xyz: live move-drag delta, applied to selected instances (and their
+    /// synapse endpoints) at 50% alpha; w: 1 while a drag is active.
+    preview: [f32; 4],
 }
 
 #[repr(C)]
@@ -111,6 +115,8 @@ pub struct Scene {
     /// Bounds silhouette proxy: product of the two largest extents.
     silhouette: f32,
     pub bounds: (Vec3, Vec3),
+    /// Cube half size per instance — CPU copy for the selection brackets.
+    pub inst_half: Vec<f32>,
 }
 
 /// What an instance index refers to.
@@ -670,8 +676,10 @@ impl Gpu {
 
         // instances: neurons, then inputs, then readouts
         let mut inst = Vec::with_capacity(n + geo.inputs.len() + geo.readouts.len());
+        let mut inst_half = Vec::with_capacity(inst.capacity());
         let mut entity_of_inst = Vec::with_capacity(inst.capacity());
         for (i, p) in geo.pos.iter().enumerate() {
+            inst_half.push(nn_scale[i]);
             inst.push(Inst {
                 pos_scale: [p[0], p[1], p[2], nn_scale[i]],
                 aux: geo.kind.get(i).copied().unwrap_or(0) as u32,
@@ -697,6 +705,7 @@ impl Gpu {
                     p = [c[0] / m, c[1] / m + 60.0, c[2] / m];
                 }
             }
+            inst_half.push(7.0);
             inst.push(Inst {
                 pos_scale: [p[0], p[1], p[2], 7.0],
                 aux: 2,
@@ -723,6 +732,7 @@ impl Gpu {
                     c = [c[0] / m, c[1] / m + 120.0, c[2] / m];
                 }
             }
+            inst_half.push(7.0);
             inst.push(Inst {
                 pos_scale: [c[0], c[1], c[2], 7.0],
                 aux: 3,
@@ -912,6 +922,7 @@ impl Gpu {
             avg_edge_len,
             silhouette,
             bounds: (mn, mx),
+            inst_half,
         });
     }
 
@@ -1012,13 +1023,24 @@ impl Gpu {
         }
     }
 
-    pub fn write_cam(&mut self, cam: &Camera, aspect: f32, vp_h_px: f32, t: f32) {
+    pub fn write_cam(
+        &mut self,
+        cam: &Camera,
+        aspect: f32,
+        vp_h_px: f32,
+        t: f32,
+        preview_delta: Option<Vec3>,
+        hover: Option<u32>,
+    ) {
         let vp = cam.view_proj(aspect);
         let eye = cam.eye();
         let fwd = (cam.target - eye).normalize_or(Vec3::Z);
         let right = fwd.cross(Vec3::Y).normalize_or(Vec3::X);
         let up = right.cross(fwd).normalize_or(Vec3::Y);
         let (alpha_mul, keep) = self.syn_lod(cam, aspect, vp_h_px);
+        let (pd, pa) = preview_delta
+            .map(|d| ([d.x, d.y, d.z], 1.0))
+            .unwrap_or(([0.0; 3], 0.0));
         let u = CamU {
             view_proj: vp.to_cols_array_2d(),
             cam_pos: [eye.x, eye.y, eye.z, 0.0],
@@ -1027,7 +1049,13 @@ impl Gpu {
             right: [right.x, right.y, right.z, 0.0],
             up: [up.x, up.y, up.z, 0.0],
             misc: [4.0, 1.0, t, 0.0],
-            lod: [alpha_mul, keep as f32, 0.0, 0.0],
+            lod: [
+                alpha_mul,
+                keep as f32,
+                hover.map(|h| h + 1).unwrap_or(0) as f32,
+                0.0,
+            ],
+            preview: [pd[0], pd[1], pd[2], pa],
         };
         self.cam_u = u;
         self.queue

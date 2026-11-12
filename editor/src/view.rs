@@ -125,7 +125,7 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
                 if hover {
                     app.hover = res;
                 } else {
-                    on_pick(app, res, ctx, mouse_vp, aspect);
+                    on_pick(app, res, ctx);
                 }
             }
 
@@ -165,6 +165,23 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
             // ---- mode interactions ----
             mode_input(app, &resp, rect, mouse_vp, aspect);
 
+            // Cursor feedback: grab/grabbing on selected objects, hand on
+            // any object, crosshair in the placement modes.
+            let icon = if app.move_drag.is_some() {
+                egui::CursorIcon::Grabbing
+            } else {
+                match app.mode {
+                    Mode::Insert | Mode::Connect => egui::CursorIcon::Crosshair,
+                    Mode::Move => egui::CursorIcon::Move,
+                    Mode::Navigate => match app.hover {
+                        Some(i) if app.selection.contains(&i) => egui::CursorIcon::Grab,
+                        Some(_) => egui::CursorIcon::PointingHand,
+                        None => egui::CursorIcon::Default,
+                    },
+                }
+            };
+            ui.output_mut(|o| o.cursor_icon = icon);
+
             // ---- uploads + offscreen scene render ----
             let now_ms = app.ctl.shared.read().unwrap().snap.time_ms;
             let sel: Vec<u32> = app.selection.iter().copied().collect();
@@ -197,6 +214,8 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
                     aspect,
                     h_px as f32,
                     ctx.input(|i| i.time) as f32,
+                    app.preview_delta,
+                    app.hover,
                 );
                 gpu.write_activity(&act);
                 gpu.write_selection(&sel);
@@ -277,9 +296,17 @@ fn keys(app: &mut EditorApp, ui: &mut egui::Ui) {
     }
     ui.input(|i| {
         if i.key_pressed(egui::Key::Escape) {
-            app.mode = Mode::Navigate;
-            app.connect_from = None;
-            app.move_drag = None;
+            if app.move_drag.is_some() {
+                // Cancel: the drag only ever drove the shader preview, so
+                // dropping it snaps everything back to its real position.
+                app.move_drag = None;
+                app.preview_delta = None;
+                app.status.clear();
+            } else if app.connect_from.is_some() {
+                app.connect_from = None;
+            } else {
+                app.mode = Mode::Navigate;
+            }
         }
         if i.key_pressed(egui::Key::Delete) {
             app.delete_selection();
@@ -376,13 +403,7 @@ fn context_menu(app: &mut EditorApp, resp: &egui::Response) {
     });
 }
 
-fn on_pick(
-    app: &mut EditorApp,
-    res: Option<u32>,
-    ctx: &egui::Context,
-    mouse_vp: Option<Vec2>,
-    aspect: f32,
-) {
+fn on_pick(app: &mut EditorApp, res: Option<u32>, ctx: &egui::Context) {
     match app.mode {
         Mode::Connect => {
             // Only a hit on a neuron changes state: a missed click keeps the
@@ -415,23 +436,14 @@ fn on_pick(
             }
         }
         Mode::Move => {
-            // click starts a move drag if it landed on a selected entity
-            if let (Some(inst), Some(mv)) = (res, mouse_vp) {
-                if app.selection.contains(&inst) {
-                    if let Some(g) = &app.geo {
-                        let (ro, rd) = ray(&app.camera, aspect, mv.x, mv.y);
-                        if let Some(hit) = plane_hit(app.plane, app.camera.target, ro, rd) {
-                            let ids: Vec<u32> = app.selection.iter().copied().collect();
-                            let start_pos: Vec<Vec3> =
-                                ids.iter().filter_map(|&i| inst_pos(g, i)).collect();
-                            app.move_drag = Some(MoveDrag {
-                                plane_pt: hit,
-                                start_pos,
-                                ids,
-                            });
-                        }
-                    }
+            // A click in Move mode selects what it hit (drags start in
+            // mode_input; this pick is the click that launched them).
+            if let Some(inst) = res {
+                if !app.selection.contains(&inst) {
+                    app.selection.clear();
+                    app.selection.insert(inst);
                 }
+                app.last_pick = Some(inst);
             }
         }
         _ => {
@@ -474,38 +486,64 @@ fn mode_input(
                 }
             }
         }
-        Mode::Move => {
+        Mode::Move | Mode::Navigate => {
+            let nav = app.mode == Mode::Navigate;
+            if resp.drag_started_by(egui::PointerButton::Primary) {
+                if let Some(mv) = mouse_vp {
+                    let (ro, rd) = ray(&app.camera, aspect, mv.x, mv.y);
+                    // What did the press land on? The hover pick is a frame
+                    // stale — fall back to a CPU ray test so the very first
+                    // drag in a session still grabs what's under the cursor.
+                    let under = app.hover.or_else(|| {
+                        app.geo
+                            .as_ref()
+                            .and_then(|g| nearest_on_ray(g, ro, rd, 6.0))
+                    });
+                    match primary_drag_action(app.mode, under) {
+                        DragAction::Move { grab } => {
+                            if nav {
+                                if let Some(i) = grab {
+                                    if !app.selection.contains(&i) {
+                                        // Drag on an unselected object
+                                        // selects it, then moves.
+                                        if !resp.ctx.input(|i| i.modifiers.shift) {
+                                            app.selection.clear();
+                                        }
+                                        app.selection.insert(i);
+                                    }
+                                }
+                            }
+                            begin_move(app, grab, mv, aspect);
+                        }
+                        DragAction::Box => {
+                            if let Some(p) = resp.interact_pointer_pos() {
+                                app.box_sel = Some((p, p));
+                            }
+                        }
+                    }
+                }
+            }
             if resp.dragged_by(egui::PointerButton::Primary) {
                 if let (Some(mv), Some(md)) = (mouse_vp, app.move_drag.clone()) {
                     let (ro, rd) = ray(&app.camera, aspect, mv.x, mv.y);
-                    if let Some(hit) = plane_hit(app.plane, app.camera.target, ro, rd) {
+                    // Plane through the grabbed object — it stays under
+                    // the cursor for the whole drag.
+                    if let Some(hit) = plane_hit(app.plane, md.anchor, ro, rd) {
                         let delta = hit - md.plane_pt;
                         app.preview_delta = Some(delta);
                         app.status =
                             format!("move d({:.0},{:.0},{:.0})", delta.x, delta.y, delta.z);
                     }
+                } else if let (Some((a, _)), Some(cur)) = (app.box_sel, resp.interact_pointer_pos())
+                {
+                    app.box_sel = Some((a, cur));
                 }
             }
             if resp.drag_stopped_by(egui::PointerButton::Primary) {
                 if let (Some(md), Some(d)) = (app.move_drag.take(), app.preview_delta.take()) {
                     app.apply_move(&md, d);
                     app.status.clear();
-                }
-            }
-        }
-        Mode::Navigate => {
-            if resp.drag_started_by(egui::PointerButton::Primary) {
-                if let Some(p) = resp.interact_pointer_pos() {
-                    app.box_sel = Some((p, p));
-                }
-            }
-            if resp.dragged_by(egui::PointerButton::Primary) {
-                if let (Some((a, _)), Some(cur)) = (app.box_sel, resp.interact_pointer_pos()) {
-                    app.box_sel = Some((a, cur));
-                }
-            }
-            if resp.drag_stopped_by(egui::PointerButton::Primary) {
-                if let Some((a, b)) = app.box_sel.take() {
+                } else if let Some((a, b)) = app.box_sel.take() {
                     let shift = resp.ctx.input(|i| i.modifiers.shift);
                     box_select(app, rect, a, b, aspect, shift);
                 }
@@ -530,6 +568,57 @@ fn mode_input(
             }
         }
         Mode::Connect => {}
+    }
+}
+
+/// What a primary-button drag means in this mode (pure — unit tested):
+/// drag on an entity moves it (selecting first when unselected); drag on
+/// empty space box-selects. Move mode is always-move, even on empty space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DragAction {
+    Move { grab: Option<u32> },
+    Box,
+}
+
+pub fn primary_drag_action(mode: Mode, under: Option<u32>) -> DragAction {
+    match (mode, under) {
+        (Mode::Move, Some(i)) | (Mode::Navigate, Some(i)) => DragAction::Move { grab: Some(i) },
+        (Mode::Move, None) => DragAction::Move { grab: None },
+        _ => DragAction::Box,
+    }
+}
+
+/// Start a move drag: the work plane is anchored at the grabbed object's
+/// position (selection centroid for an empty-space Move-mode drag) so the
+/// dragged objects track the cursor exactly.
+fn begin_move(app: &mut EditorApp, grab: Option<u32>, mv: Vec2, aspect: f32) {
+    let Some(g) = app.geo.clone() else { return };
+    // (id, pos) pairs — keep them aligned (a positionless readout must not
+    // shift the other ids' start positions).
+    let pairs: Vec<(u32, Vec3)> = app
+        .selection
+        .iter()
+        .filter_map(|&i| inst_pos(&g, i).map(|p| (i, p)))
+        .collect();
+    if pairs.is_empty() {
+        return;
+    }
+    let anchor = grab
+        .and_then(|i| inst_pos(&g, i))
+        .or_else(|| {
+            let c = pairs.iter().fold(Vec3::ZERO, |a, (_, p)| a + *p);
+            (pairs.len() > 0).then(|| c / pairs.len() as f32)
+        })
+        .unwrap_or(app.camera.target);
+    let (ro, rd) = ray(&app.camera, aspect, mv.x, mv.y);
+    if let Some(hit) = plane_hit(app.plane, anchor, ro, rd) {
+        app.move_drag = Some(MoveDrag {
+            anchor,
+            plane_pt: hit,
+            start_pos: pairs.iter().map(|(_, p)| *p).collect(),
+            ids: pairs.iter().map(|(i, _)| *i).collect(),
+        });
+        app.preview_delta = Some(Vec3::ZERO);
     }
 }
 
@@ -615,38 +704,33 @@ fn inst_pos(g: &GeoSnap, inst: u32) -> Option<Vec3> {
 /// Selection corner brackets + mode hint.
 fn overlay_2d(app: &EditorApp, ui: &mut egui::Ui, rect: egui::Rect, aspect: f32) {
     let painter = ui.painter();
+    const SEL_COL: egui::Color32 = egui::Color32::from_rgb(255, 120, 40);
+    /// Past this many selected objects, per-object brackets turn to noise —
+    /// draw one bracket around their union plus a count instead.
+    const BIG_SEL: usize = 24;
     if let Some(g) = &app.geo {
-        let mut drawn = 0;
+        let big = app.selection.len() > BIG_SEL;
+        let mut union: Option<egui::Rect> = None;
         for &id in &app.selection {
-            if drawn > 64 {
-                break;
-            }
-            if let Some(p) = inst_pos(g, id) {
-                if let Some(nd) = project(&app.camera, aspect, p) {
-                    let s = egui::pos2(
-                        rect.min.x + nd.x * rect.width(),
-                        rect.min.y + nd.y * rect.height(),
-                    );
-                    let r = 7.0f32;
-                    let col = egui::Color32::from_rgb(255, 120, 40);
-                    for (dx, dy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
-                        painter.line_segment(
-                            [
-                                egui::pos2(s.x + dx * r, s.y + dy * r),
-                                egui::pos2(s.x + dx * r * 0.4, s.y + dy * r),
-                            ],
-                            egui::Stroke::new(1.5_f32, col),
-                        );
-                        painter.line_segment(
-                            [
-                                egui::pos2(s.x + dx * r, s.y + dy * r),
-                                egui::pos2(s.x + dx * r, s.y + dy * r * 0.4),
-                            ],
-                            egui::Stroke::new(1.5_f32, col),
-                        );
-                    }
-                    drawn += 1;
+            let Some(p) = inst_pos(g, id) else { continue };
+            let half = app.inst_half.get(id as usize).copied().unwrap_or(4.0) * 1.15;
+            if let Some(r) = screen_box_rect(&app.camera, aspect, rect, p, half) {
+                union = Some(union.map_or(r, |u: egui::Rect| u.union(r)));
+                if !big {
+                    draw_bracket(painter, r, SEL_COL);
                 }
+            }
+        }
+        if big {
+            if let Some(r) = union {
+                draw_bracket(painter, r, SEL_COL);
+                painter.text(
+                    egui::pos2(r.center().x, r.min.y - 4.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    format!("{} selected", app.selection.len()),
+                    egui::FontId::proportional(11.0),
+                    SEL_COL,
+                );
             }
         }
     }
@@ -674,4 +758,136 @@ fn overlay_2d(app: &EditorApp, ui: &mut egui::Ui, rect: egui::Rect, aspect: f32)
         egui::FontId::monospace(11.0),
         egui::Color32::from_gray(180),
     );
+}
+
+/// Project an instance's world-space cube (centre ± `half`) to its screen
+/// bounding rect — the bracket hugs the object instead of orbiting its
+/// centre at a fixed pixel radius (the original does the same with the
+/// object radius in glscene.cpp's selection pass).
+pub fn screen_box_rect(
+    cam: &Camera,
+    aspect: f32,
+    vp: egui::Rect,
+    center: Vec3,
+    half: f32,
+) -> Option<egui::Rect> {
+    let mut mn = egui::pos2(f32::MAX, f32::MAX);
+    let mut mx = egui::pos2(f32::MIN, f32::MIN);
+    let mut any = false;
+    for dx in [-half, half] {
+        for dy in [-half, half] {
+            for dz in [-half, half] {
+                if let Some(nd) = project(cam, aspect, center + Vec3::new(dx, dy, dz)) {
+                    let s = egui::pos2(vp.min.x + nd.x * vp.width(), vp.min.y + nd.y * vp.height());
+                    mn = mn.min(s);
+                    mx = mx.max(s);
+                    any = true;
+                }
+            }
+        }
+    }
+    any.then(|| egui::Rect::from_min_max(mn, mx))
+}
+
+/// Corner ticks on the rect's four corners.
+fn draw_bracket(painter: &egui::Painter, r: egui::Rect, col: egui::Color32) {
+    let t = (r.width().min(r.height()) * 0.3).clamp(4.0, 12.0);
+    let st = egui::Stroke::new(1.5_f32, col);
+    for (cx, sx) in [(r.min.x, 1f32), (r.max.x, -1f32)] {
+        for (cy, sy) in [(r.min.y, 1f32), (r.max.y, -1f32)] {
+            let c = egui::pos2(cx, cy);
+            painter.line_segment([c, egui::pos2(cx + sx * t, cy)], st);
+            painter.line_segment([c, egui::pos2(cx, cy + sy * t)], st);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn cam() -> Camera {
+        let mut c = Camera::default();
+        c.target = Vec3::new(0.0, 10.0, 0.0);
+        c.dist = 200.0;
+        c.yaw_deg = -35.0;
+        c.pitch_deg = -25.0;
+        c
+    }
+
+    #[test]
+    fn drag_plane_keeps_object_under_cursor() {
+        let c = cam();
+        let aspect = 1.6;
+        let obj = Vec3::new(30.0, -40.0, 15.0); // deliberately off camera.target
+                                                // press ray through the object's centre on screen
+        let nd = project(&c, aspect, obj).unwrap();
+        let (ro, rd) = ray(&c, aspect, nd.x, nd.y);
+        // plane anchored AT the object: the drag-start hit is the object
+        // itself, so the initial delta is ~0 …
+        let hit0 = plane_hit(Plane::XZ, obj, ro, rd).unwrap();
+        assert!((hit0 - obj).length() < 1e-2);
+        // … and after the cursor moves, obj + (hit1 - hit0) sits exactly on
+        // the new cursor ray — the object tracks the pointer 1:1.
+        let (ro1, rd1) = ray(&c, aspect, nd.x + 0.1, nd.y + 0.05);
+        let hit1 = plane_hit(Plane::XZ, obj, ro1, rd1).unwrap();
+        let obj_new = obj + (hit1 - hit0);
+        assert!((obj_new - hit1).length() < 1e-2);
+        // anchored at camera.target instead (the old behaviour): the start
+        // hit is offset from the object — it would visibly jump on grab.
+        let hit_t = plane_hit(Plane::XZ, c.target, ro, rd).unwrap();
+        assert!((hit_t - obj).length() > 1.0);
+    }
+
+    #[test]
+    fn drag_gesture_mapping() {
+        assert_eq!(
+            primary_drag_action(Mode::Navigate, Some(7)),
+            DragAction::Move { grab: Some(7) }
+        );
+        assert_eq!(primary_drag_action(Mode::Navigate, None), DragAction::Box);
+        assert_eq!(
+            primary_drag_action(Mode::Move, Some(3)),
+            DragAction::Move { grab: Some(3) }
+        );
+        assert_eq!(
+            primary_drag_action(Mode::Move, None),
+            DragAction::Move { grab: None }
+        );
+        assert_eq!(primary_drag_action(Mode::Connect, None), DragAction::Box);
+    }
+
+    #[test]
+    fn bracket_rect_follows_projected_box() {
+        let c = cam();
+        let vp = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 500.0));
+        let aspect = 800.0 / 500.0;
+        let near = Vec3::new(0.0, 10.0, 0.0);
+        let r = screen_box_rect(&c, aspect, vp, near, 4.0).unwrap();
+        // the bracket contains the projected centre and has real extent
+        let nd = project(&c, aspect, near).unwrap();
+        let s = egui::pos2(nd.x * 800.0, nd.y * 500.0);
+        assert!(r.contains(s));
+        assert!(r.width() > 1.0 && r.height() > 1.0);
+        // a bigger object gets a bigger bracket — screen-sized, not 7px
+        let r_big = screen_box_rect(&c, aspect, vp, near, 12.0).unwrap();
+        assert!(r_big.width() > r.width() * 1.5);
+        // same box further away shrinks the bracket
+        let far = near - (c.eye() - near).normalize() * 150.0;
+        let r_far = screen_box_rect(&c, aspect, vp, far, 4.0).unwrap();
+        assert!(r_far.width() < r.width());
+    }
+
+    #[test]
+    fn hover_not_selected_still_maps_to_move() {
+        // Navigate drag on an UNselected object → Move (the caller selects
+        // it first); drag on empty space → box select.
+        let sel: HashSet<u32> = [1, 2].into_iter().collect();
+        let _ = sel;
+        assert!(matches!(
+            primary_drag_action(Mode::Navigate, Some(9)),
+            DragAction::Move { .. }
+        ));
+    }
 }
