@@ -220,6 +220,120 @@ fn ws_path_escape_refused() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Rhai `import` must be confined to --data-dir like every other file
+/// fn: `..` and absolute imports refused; a legit import inside still
+/// works.
+#[test]
+fn ws_import_escape_refused() {
+    let dir = std::env::temp_dir().join(format!("ws_imp_{}", std::process::id()));
+    // next to server/, so "../ws_imp_out/..." resolves via the test cwd
+    let outside = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("ws_imp_out");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("evil.rhai"), "fn hi() { 99 }").unwrap();
+    std::fs::write(dir.join("ok.rhai"), "fn hi() { 42 }").unwrap();
+    let w = start(Network::new(), Some(dir.clone()), 1);
+    let mut c = w.client();
+    hydrate(&mut c);
+
+    for code in [
+        // up out of data_dir, then wherever the process cwd points
+        r#"import "../ws_imp_out/evil" as e; print("BAD:"+e::hi());"#,
+        // absolute import straight to the outside file
+        &format!(
+            "import \"{}/evil\" as e; print(\"BAD:\"+e::hi());",
+            outside.display()
+        ),
+    ] {
+        c.send(&ClientMsg::Eval {
+            code: code.to_string(),
+        })
+        .unwrap();
+        let msgs = until(
+            &mut c,
+            |m| matches!(m, ServerMsg::Console(s) if s.contains("escapes") || s.starts_with("BAD:")),
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ServerMsg::Console(s) if s.contains("escapes"))),
+            "import not refused: {msgs:?}"
+        );
+    }
+
+    // positive control: importing inside the dir works
+    c.send(&ClientMsg::Eval {
+        code: r#"import "ok" as o; print("imp="+o::hi());"#.into(),
+    })
+    .unwrap();
+    let msgs = until(
+        &mut c,
+        |m| matches!(m, ServerMsg::Console(s) if s == "imp=42" || s.starts_with("!")),
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, ServerMsg::Console(s) if s == "imp=42")),
+        "inside import broke: {msgs:?}"
+    );
+    w.srv.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
+/// A symlink planted inside --data-dir must not lead outside — for
+/// net.save/net.load and for import.
+#[cfg(unix)]
+#[test]
+fn ws_symlink_escape_refused() {
+    let dir = std::env::temp_dir().join(format!("ws_sym_{}", std::process::id()));
+    let outside = dir.parent().unwrap().join("ws_sym_out");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let w = start(Network::new(), Some(dir.clone()), 1);
+    let mut c = w.client();
+    hydrate(&mut c);
+
+    // a real .ne2 outside the dir + module file outside
+    c.send(&ClientMsg::Eval {
+        code: r#"net.add_neuron(0.0,0.0,0.0); net.save("ok.ne2"); print("saved");"#.into(),
+    })
+    .unwrap();
+    until(
+        &mut c,
+        |m| matches!(m, ServerMsg::Console(s) if s == "saved"),
+    );
+    std::fs::copy(dir.join("ok.ne2"), outside.join("real.ne2")).unwrap();
+    std::fs::write(outside.join("evil.rhai"), "fn hi() { 99 }").unwrap();
+
+    // symlink dir inside → outside; symlink file inside → outside file
+    std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
+    std::os::unix::fs::symlink(outside.join("real.ne2"), dir.join("evil.ne2")).unwrap();
+
+    for code in [
+        r#"net.save("link/x.ne2")"#,    // write through symlinked dir
+        r#"net.load("link/real.ne2")"#, // read through symlinked dir
+        r#"net.load("evil.ne2")"#,      // read through symlinked file
+        r#"import "link/evil" as e;"#,  // module through symlinked dir
+    ] {
+        c.send(&ClientMsg::Eval { code: code.into() }).unwrap();
+        let msgs = until(
+            &mut c,
+            |m| matches!(m, ServerMsg::Console(s) if s.contains("escapes") || s.contains("!")),
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ServerMsg::Console(s) if s.contains("escapes"))),
+            "{code} not refused: {msgs:?}"
+        );
+    }
+    assert!(!outside.join("x.ne2").exists());
+    w.srv.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
 /// The same scripted session gives identical results over the local
 /// (channel) transport and the WS transport — the "local ≡ remote" test.
 #[test]

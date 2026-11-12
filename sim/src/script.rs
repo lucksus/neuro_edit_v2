@@ -334,7 +334,9 @@ fn run_chunked(
 }
 
 /// Shared resolver: a path relative to `dir`, refusing `..` and
-/// absolute paths. `None` = local mode, verbatim.
+/// absolute paths. `None` = local mode, verbatim. The result is
+/// canonicalized through the deepest existing ancestor so a symlink
+/// anywhere in the chain can't lead outside.
 fn resolve_in(dir: &Option<std::path::PathBuf>, p: &str) -> Result<String, String> {
     match dir {
         None => Ok(p.to_string()),
@@ -347,7 +349,36 @@ fn resolve_in(dir: &Option<std::path::PathBuf>, p: &str) -> Result<String, Strin
             {
                 return Err(format!("path {p:?} escapes --data-dir"));
             }
-            Ok(dir.join(rel).to_string_lossy().into_owned())
+            let root = dir
+                .canonicalize()
+                .map_err(|e| format!("--data-dir {}: {e}", dir.display()))?;
+            let joined = root.join(rel);
+            // Walk up to the deepest existing ancestor and canonicalize
+            // it — a symlinked component (dir or file) resolves to its
+            // target, which must still sit under the root.
+            let mut probe: &std::path::Path = &joined;
+            let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+            let mut out = loop {
+                match probe.canonicalize() {
+                    Ok(c) => {
+                        if !c.starts_with(&root) {
+                            return Err(format!("path {p:?} escapes --data-dir"));
+                        }
+                        break c;
+                    }
+                    Err(_) => match probe.file_name() {
+                        Some(name) => {
+                            tail.push(name);
+                            probe = probe.parent().unwrap_or(root.as_path());
+                        }
+                        None => break joined.clone(),
+                    },
+                }
+            };
+            for name in tail.iter().rev() {
+                out.push(name);
+            }
+            Ok(out.to_string_lossy().into_owned())
         }
     }
 }
@@ -358,6 +389,51 @@ fn rdir(
     p: &str,
 ) -> Result<String, Box<rhai::EvalAltResult>> {
     resolve_in(&dd.borrow(), p).map_err(s_err)
+}
+
+/// `import` resolver confined to a server's `--data-dir`: the path gets
+/// the same `resolve_in` rules as every other script file fn (no `..`,
+/// no absolute, no symlink escapes), then an inner `FileModuleResolver`
+/// rooted at the dir does the loading. Nested imports resolve
+/// dir-relative, not source-relative.
+pub struct ConfinedResolver {
+    dir: std::path::PathBuf,
+    inner: rhai::module_resolvers::FileModuleResolver,
+}
+
+impl ConfinedResolver {
+    pub fn new(dir: std::path::PathBuf) -> Self {
+        Self {
+            inner: rhai::module_resolvers::FileModuleResolver::new_with_path(dir.clone()),
+            dir,
+        }
+    }
+    /// What the inner resolver would open: `dir/path(.rhai)` — refuse
+    /// unless `resolve_in` okays it.
+    fn confine(&self, path: &str) -> Result<(), Box<rhai::EvalAltResult>> {
+        let mut logical = std::path::PathBuf::from(path);
+        logical.set_extension("rhai");
+        resolve_in(&Some(self.dir.clone()), &logical.to_string_lossy()).map_err(|e| {
+            Box::new(rhai::EvalAltResult::ErrorSystem(
+                e.clone(),
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, e).into(),
+            ))
+        })?;
+        Ok(())
+    }
+}
+
+impl rhai::ModuleResolver for ConfinedResolver {
+    fn resolve(
+        &self,
+        engine: &Engine,
+        source: Option<&str>,
+        path: &str,
+        pos: rhai::Position,
+    ) -> Result<rhai::Shared<rhai::Module>, Box<rhai::EvalAltResult>> {
+        self.confine(path)?;
+        self.inner.resolve(engine, source, path, pos)
+    }
 }
 
 /// Register the whole API on an engine, capturing the shared handles.

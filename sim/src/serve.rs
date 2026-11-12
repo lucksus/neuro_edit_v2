@@ -102,7 +102,13 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
         let e = emit.clone();
         Rc::new(move |s: &str| emit_b(&e, con(s)))
     });
-    *env.data_dir.borrow_mut() = data_dir;
+    *env.data_dir.borrow_mut() = data_dir.clone();
+    // Confine `import` too — Rhai's default module resolver reads from
+    // the process cwd/absolute paths unchecked.
+    if let Some(d) = &data_dir {
+        env.engine
+            .set_module_resolver(crate::script::ConfinedResolver::new(d.clone()));
+    }
     // The worker's whole job is publishing snapshots; raster, particles and
     // the activity counts all need the rolling spike bitmap, so force it on
     // regardless of the caller's cfg.
