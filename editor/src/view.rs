@@ -351,6 +351,7 @@ fn keys(app: &mut EditorApp, ui: &mut egui::Ui) {
                 (egui::Key::Num3, &mut app.show_console),
                 (egui::Key::Num4, &mut app.show_script),
                 (egui::Key::Num5, &mut app.show_inputs),
+                (egui::Key::Num6, &mut app.show_files),
             ] {
                 if i.key_pressed(key) {
                     *flag = !*flag;

@@ -38,6 +38,9 @@ pub struct SimCtl {
     pub shared: SharedRef,
     /// Ask a running chunked run to stop early.
     pub abort: Arc<AtomicBool>,
+    /// Remote transports speak the file/dataset/job protocol against
+    /// the server's sandbox; local ones are the user's own filesystem.
+    pub remote: bool,
     imp: Imp,
 }
 
@@ -124,6 +127,7 @@ impl SimCtl {
             tx,
             shared,
             abort,
+            remote: false,
             imp: Imp {
                 worker: Some(worker),
                 pump: Some(pump),
@@ -142,10 +146,32 @@ impl SimCtl {
     /// `addr` is a `server` process's bind address (`host:port`).
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     pub fn connect(addr: &str) -> anyhow::Result<SimCtl> {
+        Self::connect_url(&format!("ws://{addr}"), None)
+    }
+
+    /// Authenticated remote transport: `ws(s)://host/ws` with a session
+    /// token as `Authorization: Bearer` (multi-user server).
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    pub fn connect_secure(base_url: &str, token: &str) -> anyhow::Result<SimCtl> {
+        let ws_url = base_url
+            .trim_end_matches('/')
+            .replacen("https://", "wss://", 1)
+            .replacen("http://", "ws://", 1)
+            + "/ws";
+        Self::connect_url(&ws_url, Some(token))
+    }
+
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    fn connect_url(url: &str, token: Option<&str>) -> anyhow::Result<SimCtl> {
         let shared: SharedRef = Arc::new(RwLock::new(Shared::default()));
         let abort = Arc::new(AtomicBool::new(false));
-        let conn = server::ClientConn::connect(addr)
-            .map_err(|e| anyhow::anyhow!("connect ws://{addr}: {e}"))?;
+        let bearer = token.map(|t| format!("Bearer {t}"));
+        let hdrs: Vec<(&str, &str)> = match &bearer {
+            Some(b) => vec![("authorization", b.as_str())],
+            None => vec![],
+        };
+        let conn = server::ClientConn::connect_url(url, &hdrs)
+            .map_err(|e| anyhow::anyhow!("connect {url}: {e}"))?;
         let (mut wsend, mut wrecv) = conn.into_split()?;
         let remote_shutdown = wrecv.shutdown_stream().ok();
 
@@ -179,6 +205,7 @@ impl SimCtl {
             tx,
             shared,
             abort,
+            remote: true,
             imp: Imp {
                 worker: Some(writer),
                 pump: Some(reader),
@@ -191,13 +218,71 @@ impl SimCtl {
         Ok(ctl)
     }
 
+    /// A not-connected transport (multi-user login pending): sends go
+    /// nowhere, `shared` stays default — lets the app boot so the login
+    /// dialog can run before the real socket exists.
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    pub fn offline() -> SimCtl {
+        let (tx, _rx) = mpsc::channel::<(u64, ClientMsg)>();
+        std::mem::forget(_rx); // sends return Err — send() ignores them
+        SimCtl {
+            tx,
+            shared: Arc::new(RwLock::new(Shared::default())),
+            abort: Arc::new(AtomicBool::new(false)),
+            remote: true,
+            imp: Imp {
+                worker: None,
+                pump: None,
+                remote_shutdown: None,
+            },
+        }
+    }
+
+    /// `POST /api/login` on a multi-user server → the session token for
+    /// `connect_secure`. Errors carry the server's sentence verbatim.
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    pub fn remote_login(base_url: &str, email: &str, password: &str) -> anyhow::Result<String> {
+        let url = format!("{}/api/login", base_url.trim_end_matches('/'));
+        let cfg = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build();
+        let agent = ureq::Agent::new_with_config(cfg);
+        let mut resp = agent
+            .post(&url)
+            .send_form([("email", email), ("password", password)])
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let v: serde_json::Value = resp
+            .body_mut()
+            .read_to_string()
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        if resp.status() == 200 {
+            v.get("token")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| anyhow::anyhow!("no token in reply"))
+        } else {
+            Err(anyhow::anyhow!(
+                "{}",
+                v.get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("login failed")
+            ))
+        }
+    }
+
     /// Remote transport, wasm: the browser `WebSocket` speaks the same
     /// bincode frames. No threads — `onmessage` folds straight into
     /// `Shared`; sends before `onopen` queue up.
     #[cfg(target_arch = "wasm32")]
     pub fn connect(addr: &str) -> anyhow::Result<SimCtl> {
         use wasm_bindgen::{closure::Closure, JsCast};
-        let url = format!("ws://{addr}");
+        let url = if addr.contains("://") {
+            addr.to_string()
+        } else {
+            format!("ws://{addr}")
+        };
         let ws = web_sys::WebSocket::new(&url).map_err(|e| anyhow::anyhow!("ws {url}: {e:?}"))?;
         ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
 
@@ -244,6 +329,7 @@ impl SimCtl {
                 _onopen: onopen,
                 _onclose: onclose,
             },
+            remote: true,
         };
         ctl.send(ClientMsg::Hello {
             proto: proto::PROTO_VERSION,

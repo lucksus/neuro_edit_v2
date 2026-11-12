@@ -110,7 +110,10 @@ fn main() -> anyhow::Result<()> {
         return pollster::block_on(editor::shot::render_headless(opts));
     }
 
-    // GUI mode
+    // GUI mode. `--connect http(s)://…` is a multi-user server: the app
+    // starts on a placeholder transport and logs in (remembered token or
+    // the dialog); `host:port` is the unauthenticated wire as before.
+    let mut login_url: Option<String> = None;
     let ctl = match &cli.connect {
         Some(addr) => {
             if cli.net.is_some() {
@@ -119,7 +122,12 @@ fn main() -> anyhow::Result<()> {
             if cli.cpu || cli.cuda || cli.int_weights {
                 eprintln!("--cpu/--cuda/--int-weights ignored with --connect (server's backend)");
             }
-            editor::simctl::SimCtl::connect(addr)?
+            if addr.starts_with("http://") || addr.starts_with("https://") {
+                login_url = Some(addr.clone());
+                editor::simctl::SimCtl::offline()
+            } else {
+                editor::simctl::SimCtl::connect(addr)?
+            }
         }
         None => {
             let net = match &cli.net {
@@ -168,6 +176,9 @@ fn main() -> anyhow::Result<()> {
         native,
         Box::new(move |cc| {
             let mut app = editor::app::EditorApp::new(ctl, cc.storage);
+            if let Some(url) = &login_url {
+                app.try_saved_login(url);
+            }
             app.net_path = net_path.clone();
             if let Some(p) = &net_path {
                 app.push_recent(p.clone());
@@ -207,6 +218,14 @@ fn main() {
         .location()
         .host()
         .unwrap_or_else(|_| "127.0.0.1:3090".into());
+    // https pages (the multi-user server) must speak wss and reach the
+    // /ws endpoint; plain-http `--web` keeps ws://host (any path works —
+    // the shared acceptor only checks Upgrade).
+    let ws_url = if window.location().protocol().ok().as_deref() == Some("https:") {
+        format!("wss://{host}/ws")
+    } else {
+        format!("ws://{host}/ws")
+    };
 
     let mut opts = eframe::WebOptions::default();
     opts.wgpu_options.wgpu_setup =
@@ -225,7 +244,7 @@ fn main() {
                 canvas,
                 opts,
                 Box::new(move |cc| {
-                    let ctl = editor::simctl::SimCtl::connect(&host)
+                    let ctl = editor::simctl::SimCtl::connect(&ws_url)
                         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
                     cc.egui_ctx.set_theme(eframe::egui::Theme::Dark);
                     Ok(Box::new(editor::app::EditorApp::new(ctl, cc.storage)))

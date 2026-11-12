@@ -72,6 +72,14 @@ pub struct EditorApp {
     pub(crate) show_inputs: bool,
     /// `?` shortcut overlay.
     pub(crate) show_keys: bool,
+    /// Files window (per-user space when remote, app-data dir locally).
+    pub(crate) show_files: bool,
+    files: FilesUi,
+    /// Multi-user login (`--connect http(s)://…`) — `Some` until a
+    /// session exists.
+    login: Option<LoginDlg>,
+    /// Remembered (url, session-token) for `remember me` — persisted.
+    pub saved_token: Option<(String, String)>,
     plot_tab: PlotTab,
     /// Raster strip height in px — draggable in the plots header.
     raster_h: f32,
@@ -231,6 +239,200 @@ pub enum Dialog {
     About,
 }
 
+/// Files-window state: a listing of the user's space (remote per-user
+/// root over the file protocol, or the local app-data dir when running
+/// without --connect). One window, two backends.
+pub struct FilesUi {
+    /// Remote: path inside the user's root ("" = root). Local: absolute
+    /// path under `local_root`.
+    pub cwd: String,
+    /// Entries of `cwd` (remote: last `FileList` reply; local: read_dir).
+    pub entries: Vec<proto::FileEntry>,
+    /// Native, no --connect: files live in `dirs::data_dir()/neuro_edit`
+    /// through std::fs instead of the wire protocol.
+    pub local_root: Option<std::path::PathBuf>,
+    /// (used, quota) from `Usage` / local dir_size.
+    pub usage: Option<(u64, u64)>,
+    pub sel: Option<String>,
+    pub mkdir: String,
+    pub rename_to: String,
+    pub confirm_delete: Option<String>,
+    /// Uploads in flight: (rel-path, bytes, offset). One at a time —
+    /// `UploadStart` waits on `UploadReady` before chunks go out.
+    pub upload: Option<(String, Vec<u8>, usize)>,
+    pub upload_q: std::collections::VecDeque<(String, Vec<u8>)>,
+    /// First-open listing requested?
+    pub opened: bool,
+    /// egui drag-drop payloads stashed by `files_window` for `files_pump`.
+    pub ctx_dropped: Option<Vec<egui::DroppedFile>>,
+    pub status: String,
+}
+
+impl Default for FilesUi {
+    fn default() -> Self {
+        Self {
+            cwd: String::new(),
+            entries: Vec::new(),
+            local_root: None,
+            usage: None,
+            sel: None,
+            mkdir: String::new(),
+            rename_to: String::new(),
+            confirm_delete: None,
+            upload: None,
+            upload_q: std::collections::VecDeque::new(),
+            opened: false,
+            ctx_dropped: None,
+            status: String::new(),
+        }
+    }
+}
+
+fn fmt_size(b: u64) -> String {
+    if b >= 1 << 30 {
+        format!("{:.1} GB", b as f64 / (1u64 << 30) as f64)
+    } else if b >= 1 << 20 {
+        format!("{:.1} MB", b as f64 / (1u64 << 20) as f64)
+    } else if b >= 1024 {
+        format!("{:.1} KB", b as f64 / 1024.0)
+    } else {
+        format!("{b} B")
+    }
+}
+
+fn fmt_date(ms: u64) -> String {
+    if ms == 0 {
+        return "—".into();
+    }
+    // day-precision UTC, civil-from-days
+    let z = (ms / 86_400_000) as i64 + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    format!("{:04}-{:02}-{:02}", if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// Browser download: bytes → Blob → object URL → anchor click.
+#[cfg(target_arch = "wasm32")]
+fn download_blob(name: &str, bytes: &[u8]) {
+    use wasm_bindgen::JsCast;
+    let Some(w) = web_sys::window() else { return };
+    let Some(doc) = w.document() else { return };
+    let arr = js_sys::Uint8Array::from(bytes);
+    let parts = js_sys::Array::new();
+    parts.push(&arr);
+    let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence(&parts) else {
+        return;
+    };
+    let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) else {
+        return;
+    };
+    if let Ok(a) = doc.create_element("a") {
+        if let Ok(a) = a.dyn_into::<web_sys::HtmlAnchorElement>() {
+            a.set_href(&url);
+            a.set_download(name);
+            a.click();
+        }
+    }
+    let _ = web_sys::Url::revoke_object_url(&url);
+}
+
+// Browser file picker: a transient `<input type=file multiple>` whose
+// `change` handler FileReader-reads each File into PICKED, drained by
+// `files_pump` on the next frames.
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static PICKED: std::cell::RefCell<Vec<(String, Vec<u8>)>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
+#[cfg(target_arch = "wasm32")]
+fn web_file_picker() {
+    use wasm_bindgen::{closure::Closure, JsCast};
+    let Some(w) = web_sys::window() else { return };
+    let Some(doc) = w.document() else { return };
+    let Ok(el) = doc.create_element("input") else {
+        return;
+    };
+    let Ok(input) = el.dyn_into::<web_sys::HtmlInputElement>() else {
+        return;
+    };
+    input.set_type("file");
+    input.set_multiple(true);
+    // the input element stays alive via this closure's capture
+    let inp = input.clone();
+    let onchange = Closure::wrap(Box::new(move |_: web_sys::Event| {
+        let Some(list) = inp.files() else { return };
+        for j in 0..list.length() {
+            let Some(file) = list.item(j) else { continue };
+            let name = file.name();
+            let Ok(reader) = web_sys::FileReader::new() else {
+                continue;
+            };
+            let r2 = reader.clone();
+            let onload = Closure::wrap(Box::new(move |_: web_sys::Event| {
+                if let Ok(buf) = r2.result() {
+                    let arr = js_sys::Uint8Array::new(&buf);
+                    PICKED.with(|p| p.borrow_mut().push((name.clone(), arr.to_vec())));
+                }
+            }) as Box<dyn FnMut(web_sys::Event)>);
+            reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+            let _ = reader.read_as_array_buffer(&file);
+            onload.forget();
+        }
+    }) as Box<dyn FnMut(web_sys::Event)>);
+    input.set_onchange(Some(onchange.as_ref().unchecked_ref()));
+    input.click();
+    onchange.forget();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn local_dir_size(root: &std::path::Path) -> u64 {
+    std::fs::read_dir(root)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| {
+                    let p = e.path();
+                    if p.is_dir() {
+                        local_dir_size(&p)
+                    } else {
+                        e.metadata().map(|m| m.len()).unwrap_or(0)
+                    }
+                })
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// `dirs::data_dir()/neuro_edit` — the native no-`--connect` file space,
+/// created on first use.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn local_files_root() -> std::path::PathBuf {
+    let d = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("neuro_edit");
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
+/// Login dialog state for `--connect http(s)://…` (multi-user server):
+/// the app boots "offline" and swaps in the real `SimCtl` on success.
+pub struct LoginDlg {
+    pub url: String,
+    pub email: String,
+    pub password: String,
+    pub remember: bool,
+    pub busy: bool,
+    pub error: String,
+    /// Result of the background login+connect attempt.
+    pub rx: Option<std::sync::mpsc::Receiver<Result<(crate::simctl::SimCtl, String), String>>>,
+}
+
 /// Persisted UI state (recent files + window visibility) across sessions.
 /// Window positions/sizes persist separately through egui's own memory
 /// (eframe stores it under the same storage slot).
@@ -239,6 +441,9 @@ pub struct Persisted {
     pub recent: Vec<String>,
     #[serde(default)]
     pub windows: WindowVis,
+    /// `remember me`: (server base-url, session token).
+    #[serde(default)]
+    pub token: Option<(String, String)>,
 }
 
 /// Which floating windows are open.
@@ -249,6 +454,8 @@ pub struct WindowVis {
     pub console: bool,
     pub script: bool,
     pub inputs: bool,
+    #[serde(default)]
+    pub files: bool,
 }
 
 impl Default for WindowVis {
@@ -259,6 +466,7 @@ impl Default for WindowVis {
             console: true,
             script: false,
             inputs: false,
+            files: false,
         }
     }
 }
@@ -267,9 +475,12 @@ impl EditorApp {
     pub fn new(ctl: SimCtl, storage: Option<&dyn eframe::Storage>) -> Self {
         let persisted = storage.and_then(|s| eframe::get_value::<Persisted>(s, "state"));
         let wins = persisted.as_ref().map(|p| p.windows).unwrap_or_default();
+        let persisted_token = persisted.as_ref().and_then(|p| p.token.clone());
         let recent: VecDeque<String> = persisted
             .map(|p| p.recent.into_iter().collect())
             .unwrap_or_default();
+        #[allow(unused_variables)]
+        let is_remote = ctl.remote;
         Self {
             recent,
             ctl,
@@ -303,6 +514,24 @@ impl EditorApp {
             show_script: wins.script,
             show_inputs: wins.inputs,
             show_keys: false,
+            show_files: wins.files,
+            files: {
+                #[allow(unused_mut)]
+                let mut f = FilesUi::default();
+                #[cfg(not(target_arch = "wasm32"))]
+                if !is_remote {
+                    f.local_root = Some(local_files_root());
+                    f.cwd = f
+                        .local_root
+                        .as_ref()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
+                }
+                f
+            },
+            login: None,
+            saved_token: persisted_token,
             plot_tab: PlotTab::Voltage,
             raster_h: 100.0,
             ro_sel: 0,
@@ -586,7 +815,38 @@ impl EditorApp {
                 self.status = format!("wrote {p}");
             }
             if let Some((dir, entries)) = sh.files.take() {
+                if self.files.local_root.is_none() && dir == self.files.cwd {
+                    self.files.entries = entries.clone();
+                }
                 self.file_list = Some((dir, entries));
+            }
+            if let Some((used, quota)) = sh.usage.take() {
+                self.files.usage = Some((used, quota));
+            }
+            if let Some(op) = sh.file_op.take() {
+                // a mkdir/delete/rename/upload landed — relist
+                if let Some(p) = op.strip_prefix("upload ready ") {
+                    // drop the lock: upload_ready sends client messages
+                    drop(sh);
+                    self.upload_ready(&p.to_string());
+                    sh = self.ctl.shared.write().unwrap();
+                } else {
+                    drop(sh);
+                    self.files_refresh();
+                    self.status = op;
+                    sh = self.ctl.shared.write().unwrap();
+                }
+            }
+            let dl = sh.download.take();
+            if let Some((path, bytes, done)) = dl {
+                if done {
+                    drop(sh);
+                    self.save_download(&path, &bytes);
+                    sh = self.ctl.shared.write().unwrap();
+                } else {
+                    // still streaming — put it back
+                    sh.download = Some((path, bytes, done));
+                }
             }
             self.jobs = sh.jobs.clone();
             self.job_progress = sh.job_progress.clone();
@@ -978,6 +1238,7 @@ impl EditorApp {
                         (&mut self.show_console, &ic.console, "Console"),
                         (&mut self.show_script, &ic.script, "Script editor"),
                         (&mut self.show_inputs, &ic.connect, "Inputs"),
+                        (&mut self.show_files, &ic.save, "Files"),
                     ] {
                         if ui.add(icons::button(icon, label).selected(*flag)).clicked() {
                             *flag = !*flag;
@@ -1332,6 +1593,551 @@ impl EditorApp {
 
     /// `?` — every mode key and mouse gesture in one small overlay.
     /// (WASD/QE pan the camera, so tools use other letters.)
+    // ------------------------------------------------------------------
+    // Files window — one UI, two backends: the file protocol (remote,
+    /// per-user root) or std::fs on the local app-data dir.
+    // ------------------------------------------------------------------
+
+    /// Refresh `files.entries` for the current `cwd` (remote → ListFiles;
+    /// local → read_dir) + the usage numbers.
+    fn files_refresh(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(root) = self.files.local_root.clone() {
+            let dir = root.join(&self.files.cwd);
+            self.files.entries = std::fs::read_dir(&dir)
+                .map(|rd| {
+                    let mut v: Vec<proto::FileEntry> = rd
+                        .flatten()
+                        .filter_map(|e| {
+                            let md = e.metadata().ok()?;
+                            Some(proto::FileEntry {
+                                name: e.file_name().to_string_lossy().into_owned(),
+                                is_dir: md.is_dir(),
+                                size: md.len(),
+                                mtime_ms: md
+                                    .modified()
+                                    .ok()
+                                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                    .map(|d| d.as_millis() as u64)
+                                    .unwrap_or(0),
+                            })
+                        })
+                        .collect();
+                    v.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+                    v
+                })
+                .unwrap_or_default();
+            self.files.usage = Some((local_dir_size(&root), 0));
+            return;
+        }
+        self.ctl.send(ClientMsg::ListFiles {
+            path: self.files.cwd.clone(),
+        });
+        self.ctl.send(ClientMsg::FileUsage);
+    }
+
+    /// `UploadReady` arrived — stream the queued chunks for this path.
+    fn upload_ready(&mut self, path: &str) {
+        let Some((p, data, off)) = &self.files.upload else {
+            return;
+        };
+        if p != path {
+            return;
+        }
+        // send the whole remaining tail; the writer thread queues them
+        let mut off = *off;
+        while off < data.len() {
+            let end = (off + 256 * 1024).min(data.len());
+            self.ctl.send(ClientMsg::UploadChunk {
+                path: p.clone(),
+                data: data[off..end].to_vec(),
+                last: end == data.len(),
+            });
+            off = end;
+        }
+        self.files.upload.as_mut().map(|u| u.2 = off);
+    }
+
+    /// Completed `DownloadFile` stream — hand the bytes to the user.
+    fn save_download(&mut self, path: &str, bytes: &[u8]) {
+        let name = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "download".into());
+        #[cfg(target_arch = "wasm32")]
+        {
+            download_blob(&name, bytes);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(dst) = rfd::FileDialog::new().set_file_name(&name).save_file() {
+                match std::fs::write(&dst, bytes) {
+                    Ok(()) => self.files.status = format!("saved {}", dst.display()),
+                    Err(e) => self.files.status = format!("save: {e}"),
+                }
+            }
+        }
+    }
+
+    /// Queue an upload (remote → chunked protocol; local → copy).
+    fn queue_upload(&mut self, name: &str, bytes: Vec<u8>) {
+        if let Some(root) = self.files.local_root.clone() {
+            let dst = root.join(&self.files.cwd).join(name);
+            match std::fs::write(&dst, &bytes) {
+                Ok(()) => self.files.status = format!("uploaded {name}"),
+                Err(e) => self.files.status = format!("upload {name}: {e}"),
+            }
+            self.files_refresh();
+            return;
+        }
+        self.files.upload_q.push_back((
+            if self.files.cwd.is_empty() {
+                name.to_string()
+            } else {
+                format!("{}/{name}", self.files.cwd)
+            },
+            bytes,
+        ));
+    }
+
+    /// Poll the upload queue: idle → `UploadStart` for the next item.
+    fn files_pump(&mut self) {
+        if self.files.local_root.is_none() && self.files.upload.is_none() {
+            if let Some((p, data)) = self.files.upload_q.pop_front() {
+                self.ctl.send(ClientMsg::UploadStart {
+                    path: p.clone(),
+                    size: data.len() as u64,
+                });
+                self.files.upload = Some((p, data, 0));
+            }
+        }
+        // browser file-picker results (web only)
+        #[cfg(target_arch = "wasm32")]
+        PICKED.with(|p| {
+            for (name, bytes) in p.borrow_mut().drain(..) {
+                self.queue_upload(&name, bytes);
+            }
+        });
+        // dropped files (drag & drop onto the app — works native + wasm)
+        for f in self.files.ctx_dropped.take().unwrap_or_default() {
+            if let Some(bytes) = f.bytes.as_deref() {
+                self.queue_upload(&f.name, bytes.to_vec());
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if f.bytes.is_none() {
+                if let Some(p) = &f.path {
+                    if let Ok(b) = std::fs::read(p) {
+                        self.queue_upload(&f.name, b);
+                    }
+                }
+            }
+        }
+    }
+
+    fn files_window(&mut self, ctx: &egui::Context) {
+        // stash dropped files where files_pump can see them each frame
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        if !dropped.is_empty() {
+            self.files.ctx_dropped = Some(dropped);
+        }
+        self.files_pump();
+        if !self.show_files {
+            return;
+        }
+        if !self.files.opened {
+            self.files.opened = true;
+            self.files_refresh();
+        }
+        let mut open = self.show_files;
+        egui::Window::new("Files")
+            .open(&mut open)
+            .default_size([420.0, 420.0])
+            .show(ctx, |ui| {
+                // path bar: root label + up + refresh
+                ui.horizontal(|ui| {
+                    if self.files.local_root.is_some() {
+                        ui.label("app data:");
+                    } else {
+                        ui.label("my files:");
+                    }
+                    ui.monospace(if self.files.cwd.is_empty() {
+                        "/".to_string()
+                    } else {
+                        self.files.cwd.clone()
+                    });
+                    if ui.button("↑").clicked() && !self.files.cwd.is_empty() {
+                        let cwd = std::path::Path::new(&self.files.cwd);
+                        self.files.cwd = cwd
+                            .parent()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        self.files_refresh();
+                    }
+                    if ui.button("⟳").clicked() {
+                        self.files_refresh();
+                    }
+                });
+                // usage bar
+                if let Some((used, quota)) = self.files.usage {
+                    let (txt, frac) = if quota > 0 {
+                        (
+                            format!("{} of {} used", fmt_size(used), fmt_size(quota)),
+                            used as f32 / quota as f32,
+                        )
+                    } else {
+                        (format!("{} used", fmt_size(used)), 0.0)
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(frac.clamp(0.0, 1.0))
+                            .text(txt)
+                            .desired_height(10.0),
+                    );
+                }
+                ui.separator();
+                // listing
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let entries = self.files.entries.clone();
+                    for e in &entries {
+                        let label = if e.is_dir {
+                            format!("📁 {}", e.name)
+                        } else {
+                            format!(
+                                "{}   {}   {}",
+                                e.name,
+                                fmt_size(e.size),
+                                fmt_date(e.mtime_ms)
+                            )
+                        };
+                        let sel = self.files.sel.as_deref() == Some(e.name.as_str());
+                        let r = ui.selectable_label(sel, label);
+                        if r.clicked() {
+                            self.files.sel = Some(e.name.clone());
+                            self.files.rename_to = e.name.clone();
+                        }
+                        if r.double_clicked() {
+                            self.files_open(e);
+                        }
+                    }
+                    if entries.is_empty() {
+                        ui.weak("(empty — drop files here to upload)");
+                    }
+                });
+                ui.separator();
+                // actions on the selection
+                let sel = self.files.sel.clone();
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("new folder").clicked() {
+                        self.files.mkdir = "new-folder".into();
+                    }
+                    if !self.files.mkdir.is_empty() {
+                        ui.text_edit_singleline(&mut self.files.mkdir);
+                        if ui.button("create").clicked() {
+                            self.file_mkdir();
+                        }
+                    }
+                    if sel.is_some() && ui.button("rename…").clicked() {
+                        // rename_to already seeded on select
+                    }
+                    if sel.is_some() && ui.button("delete…").clicked() {
+                        self.files.confirm_delete = sel.clone();
+                    }
+                    if sel.is_some() && ui.button("download").clicked() {
+                        self.file_download();
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if ui.button("upload…").clicked() {
+                        if let Some(paths) = rfd::FileDialog::new().pick_files() {
+                            for p in paths {
+                                if let Ok(b) = std::fs::read(&p) {
+                                    let n = p
+                                        .file_name()
+                                        .map(|x| x.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|| "file".into());
+                                    self.queue_upload(&n, b);
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    if ui.button("upload…").clicked() {
+                        web_file_picker();
+                    }
+                });
+                if self.files.sel.is_some() && !self.files.rename_to.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.label("rename to");
+                        ui.text_edit_singleline(&mut self.files.rename_to);
+                        if ui.button("ok").clicked() {
+                            self.file_rename();
+                        }
+                    });
+                }
+                if let Some(d) = self.files.confirm_delete.clone() {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(egui::Color32::LIGHT_RED, format!("delete {d}?"));
+                        if ui.button("yes, delete").clicked() {
+                            self.file_delete(&d);
+                            self.files.confirm_delete = None;
+                        }
+                        if ui.button("cancel").clicked() {
+                            self.files.confirm_delete = None;
+                        }
+                    });
+                }
+                if let Some((p, data, off)) = &self.files.upload {
+                    ui.weak(format!(
+                        "uploading {p}: {}/{}",
+                        fmt_size(*off as u64),
+                        fmt_size(data.len() as u64)
+                    ));
+                }
+                if !self.files.status.is_empty() {
+                    ui.weak(&self.files.status);
+                }
+            });
+        self.show_files = open;
+    }
+
+    /// Double-click open: dirs descend; `.ne2` loads; `.rhai` opens in
+    /// the script editor; anything else just stays selected.
+    fn files_open(&mut self, e: &proto::FileEntry) {
+        if e.is_dir {
+            self.files.cwd = if self.files.cwd.is_empty() {
+                e.name.clone()
+            } else {
+                format!("{}/{}", self.files.cwd, e.name)
+            };
+            self.files_refresh();
+            return;
+        }
+        let path = if self.files.cwd.is_empty() {
+            e.name.clone()
+        } else {
+            format!("{}/{}", self.files.cwd, e.name)
+        };
+        if e.name.ends_with(".ne2") {
+            if self.files.local_root.is_none() {
+                self.ctl.send(ClientMsg::LoadNet { path });
+            } else {
+                let p = self
+                    .files
+                    .local_root
+                    .as_ref()
+                    .unwrap()
+                    .join(&self.files.cwd)
+                    .join(&e.name);
+                self.ctl.send(ClientMsg::LoadNet {
+                    path: p.to_string_lossy().into_owned(),
+                });
+            }
+            self.status = format!("loading {e}", e = e.name);
+        } else if e.name.ends_with(".rhai") {
+            if self.files.local_root.is_none() {
+                self.ctl.send(ClientMsg::ReadFile { path });
+            } else if let Some(p) = self
+                .files
+                .local_root
+                .as_ref()
+                .map(|r| r.join(&self.files.cwd).join(&e.name))
+            {
+                if let Ok(t) = std::fs::read_to_string(&p) {
+                    self.script_file = p.to_string_lossy().into_owned();
+                    self.script_text = t;
+                }
+            }
+            self.show_script = true;
+        }
+    }
+
+    fn file_mkdir(&mut self) {
+        let name = self.files.mkdir.clone();
+        if let Some(root) = self.files.local_root.clone() {
+            let _ = std::fs::create_dir_all(root.join(&self.files.cwd).join(&name));
+            self.files.mkdir.clear();
+            self.files_refresh();
+        } else {
+            let path = if self.files.cwd.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{name}", self.files.cwd)
+            };
+            self.ctl.send(ClientMsg::Mkdir { path });
+            self.files.mkdir.clear();
+        }
+    }
+
+    fn file_rename(&mut self) {
+        let Some(sel) = self.files.sel.clone() else {
+            return;
+        };
+        let to_name = self.files.rename_to.clone();
+        if let Some(root) = self.files.local_root.clone() {
+            let dir = root.join(&self.files.cwd);
+            let _ = std::fs::rename(dir.join(&sel), dir.join(&to_name));
+            self.files_refresh();
+        } else {
+            let (a, b) = if self.files.cwd.is_empty() {
+                (sel, to_name)
+            } else {
+                (
+                    format!("{}/{sel}", self.files.cwd),
+                    format!("{}/{to_name}", self.files.cwd),
+                )
+            };
+            self.ctl.send(ClientMsg::RenameFile { from: a, to: b });
+        }
+        self.files.sel = None;
+    }
+
+    fn file_delete(&mut self, name: &str) {
+        if let Some(root) = self.files.local_root.clone() {
+            let p = root.join(&self.files.cwd).join(name);
+            if p.is_dir() {
+                let _ = std::fs::remove_dir_all(&p);
+            } else {
+                let _ = std::fs::remove_file(&p);
+            }
+            self.files_refresh();
+        } else {
+            let path = if self.files.cwd.is_empty() {
+                name.to_string()
+            } else {
+                format!("{}/{name}", self.files.cwd)
+            };
+            self.ctl.send(ClientMsg::DeleteFile { path });
+        }
+        self.files.sel = None;
+    }
+
+    fn file_download(&mut self) {
+        let Some(sel) = self.files.sel.clone() else {
+            return;
+        };
+        if let Some(root) = self.files.local_root.clone() {
+            let p = root.join(&self.files.cwd).join(&sel);
+            if let Ok(bytes) = std::fs::read(&p) {
+                self.save_download(&sel, &bytes);
+            }
+        } else {
+            let path = if self.files.cwd.is_empty() {
+                sel.clone()
+            } else {
+                format!("{}/{sel}", self.files.cwd)
+            };
+            self.files.status = format!("downloading {path}…");
+            self.ctl.send(ClientMsg::DownloadFile { path });
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Login dialog — `--connect http(s)://host` multi-user servers.
+    // ------------------------------------------------------------------
+
+    /// `--connect http(s)://…` entry point: reuse the persisted token
+    /// when it matches this server (falling back to the dialog when it
+    /// expired or never existed).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn try_saved_login(&mut self, url: &str) {
+        if let Some((u, tok)) = self.saved_token.clone() {
+            if u == url {
+                match SimCtl::connect_secure(url, &tok) {
+                    Ok(ctl) => {
+                        self.ctl = ctl;
+                        self.status = "connected".into();
+                        return;
+                    }
+                    Err(_) => self.saved_token = None, // expired — re-login
+                }
+            }
+        }
+        self.begin_login(url, "");
+    }
+
+    /// Ask for credentials before the real transport exists; called by
+    /// main's `--connect http(s)://` path after `EditorApp::new`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn begin_login(&mut self, url: &str, email: &str) {
+        self.login = Some(LoginDlg {
+            url: url.to_string(),
+            email: email.to_string(),
+            password: String::new(),
+            remember: true,
+            busy: false,
+            error: String::new(),
+            rx: None,
+        });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn login_window(&mut self, ctx: &egui::Context) {
+        let Some(lg) = &mut self.login else {
+            return;
+        };
+        // result of the background attempt
+        let mut done: Option<Result<(SimCtl, String), String>> = None;
+        if let Some(rx) = &lg.rx {
+            if let Ok(r) = rx.try_recv() {
+                done = Some(r);
+            }
+        }
+        match done {
+            Some(Ok((ctl, token))) => {
+                self.ctl = ctl;
+                if lg.remember {
+                    self.saved_token = Some((lg.url.clone(), token));
+                }
+                self.login = None;
+                self.status = "connected".into();
+                return;
+            }
+            Some(Err(e)) => {
+                lg.busy = false;
+                lg.error = e;
+                lg.rx = None;
+            }
+            None => {}
+        }
+        let mut keep = true;
+        egui::Window::new(format!("Log in — {}", lg.url))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("email");
+                ui.text_edit_singleline(&mut lg.email);
+                ui.label("password");
+                let r = ui.add(egui::TextEdit::singleline(&mut lg.password).password(true));
+                ui.checkbox(&mut lg.remember, "remember me on this machine");
+                if !lg.error.is_empty() {
+                    ui.colored_label(egui::Color32::LIGHT_RED, &lg.error);
+                }
+                ui.add_enabled_ui(!lg.busy, |ui| {
+                    if ui.button("Log in").clicked()
+                        || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                    {
+                        lg.busy = true;
+                        lg.error.clear();
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let (url, email, pw) =
+                            (lg.url.clone(), lg.email.clone(), lg.password.clone());
+                        std::thread::spawn(move || {
+                            let r = SimCtl::remote_login(&url, &email, &pw).and_then(|tok| {
+                                SimCtl::connect_secure(&url, &tok).map(|c| (c, tok))
+                            });
+                            let _ = tx.send(r.map_err(|e| e.to_string()));
+                        });
+                        lg.rx = Some(rx);
+                    }
+                });
+                if ui.button("Cancel").clicked() {
+                    keep = false;
+                }
+            });
+        if !keep {
+            self.login = None;
+        }
+    }
+
     fn keys_window(&mut self, ctx: &egui::Context) {
         if !self.show_keys {
             return;
@@ -1381,8 +2187,8 @@ impl EditorApp {
                     ui.end_row();
                     row(
                         ui,
-                        "Ctrl+1..5",
-                        "inspector · plots · console · script · inputs",
+                        "Ctrl+1..6",
+                        "inspector · plots · console · script · inputs · files",
                     );
                     row(ui, "?", "this overlay");
                 });
@@ -2368,7 +3174,9 @@ impl eframe::App for EditorApp {
                 console: self.show_console,
                 script: self.show_script,
                 inputs: self.show_inputs,
+                files: self.show_files,
             },
+            token: self.saved_token.clone(),
         };
         eframe::set_value(storage, "state", &p);
     }
@@ -2431,6 +3239,9 @@ impl eframe::App for EditorApp {
         self.script_window(ctx);
         self.plots(ctx);
         self.inputs_window(ctx);
+        self.files_window(ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.login_window(ctx);
         self.keys_window(ctx);
         self.dialog(ctx);
 
