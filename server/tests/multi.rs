@@ -904,16 +904,37 @@ fn drop_user_during_eval_is_fast() {
         matches!(m, ServerMsg::Status { busy: true, .. })
     });
 
+    // D (Stage 17): prove the worker really exits and the front door
+    // stays live *while* stop() is still draining the endless eval.
+    let run = fx.multi.runs.get(u.id).expect("live run");
+    let runs = fx.multi.runs.clone();
+    let uid = u.id;
+    let stopper = std::thread::spawn(move || {
+        runs.drop_user(uid);
+    });
+    // While stop() is still running, HTTP must answer — previously a
+    // map-lock held across the join stalled every request.
     let t = Instant::now();
-    fx.multi.runs.drop_user(u.id);
+    let r = http(&fx.addr, "GET", "/", &[], "");
+    assert_eq!(200, r.status);
+    assert!(
+        t.elapsed() < Duration::from_secs(5),
+        "GET / stalled behind drop_user's join ({:?})",
+        t.elapsed()
+    );
+    stopper.join().expect("drop_user panicked");
     assert!(
         t.elapsed() < Duration::from_secs(10),
         "drop_user stalled {:?}",
         t.elapsed()
     );
-    // and the HTTP front door still answers
-    let r = http(&fx.addr, "GET", "/", &[], "");
-    assert_eq!(200, r.status);
+    // and the worker thread actually exited — the eval saw the
+    // shutdown flag, it wasn't merely detached
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !run.dead() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(run.dead(), "worker thread still alive after drop_user");
 }
 
 /// S2/S3: Abort over the socket ends an endless eval — the flag is
