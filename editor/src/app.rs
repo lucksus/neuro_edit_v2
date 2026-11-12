@@ -55,6 +55,11 @@ pub struct EditorApp {
     pub inst_half: Vec<f32>,
     pub show_grid: bool,
     pub show_synapses: bool,
+    /// Spike dots travelling display synapses (View toggle).
+    pub show_dots: bool,
+    /// Wall-clock ms (egui `i.time`) — particle flights ride this clock
+    /// so their duration is frame-cadence/sim-rate independent.
+    pub wall_ms: f64,
     /// Grid-group render mode (activity plane vs per-neuron cubes).
     pub grid_view: crate::plane::GridView,
     /// Per-group 3D display config, keyed by `GeoSnap::grids[].group`.
@@ -536,6 +541,8 @@ impl EditorApp {
             last_jobs_poll: -10.0,
             show_grid: true,
             show_synapses: true,
+            show_dots: true,
+            wall_ms: 0.0,
             grid_view: crate::plane::GridView::Auto,
             plane_cfgs: HashMap::new(),
             grid_traces: Vec::new(),
@@ -900,7 +907,8 @@ impl EditorApp {
             self.grid_traces = snap.grid_traces.clone();
             self.input_values = snap.input_values.clone();
             if let Some(g) = &self.geo {
-                self.particles.feed(g, &snap.counts, snap.time_ms);
+                self.particles
+                    .feed(g, &snap.counts, snap.time_ms, self.wall_ms);
             }
             // raster bin: ids with count>0 — folded into the histories
             // by PlotHist::feed, which also spots the sim clock going
@@ -1379,6 +1387,7 @@ impl EditorApp {
                 ui.separator();
                 icons::toggle(ui, &mut self.show_synapses, &ic.synapses, "synapses");
                 icons::toggle(ui, &mut self.show_grid, &ic.grid, "grid");
+                icons::toggle(ui, &mut self.show_dots, &ic.raster, "spike dots");
                 // Grid-group render mode: the plane LOD keeps big grids
                 // interactive; cubes stay available for editing up close.
                 let view_icon = match self.grid_view {
@@ -3310,6 +3319,7 @@ impl eframe::App for EditorApp {
                 ));
             }
         }
+        self.wall_ms = ctx.input(|i| i.time) * 1000.0;
         crate::view::with_gpu(rs, |gpu| self.sync_shared(gpu));
         self.update_watch();
         if self.mode != self.last_mode {

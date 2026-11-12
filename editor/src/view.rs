@@ -183,7 +183,6 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
             ui.output_mut(|o| o.cursor_icon = icon);
 
             // ---- uploads + offscreen scene render ----
-            let now_ms = app.ctl.shared.read().unwrap().snap.time_ms;
             let sel: Vec<u32> = app.selection.iter().copied().collect();
             let mut pvs = Vec::new();
             if app.mode == Mode::Move || app.mode == Mode::Insert {
@@ -219,7 +218,13 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
                 }
             }
             let act = app.activity.clone();
-            let parts = app.particles.instances(now_ms);
+            // Flights live on the wall clock (MIN_FLIGHT_MS..MAX_FLIGHT_MS);
+            // sim time only feeds the rewind detector.
+            let parts = if app.show_dots {
+                app.particles.instances(app.wall_ms)
+            } else {
+                Vec::new()
+            };
             let pv_n = pvs.len() as u32;
             let show_syn = app.show_synapses;
             with_gpu(rs, |gpu| {

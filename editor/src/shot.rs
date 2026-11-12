@@ -178,12 +178,14 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
     gpu.write_pv(&pvs);
     let pv_count = pvs.len() as u32;
 
-    // particles from the last 300 steps of the run
+    // particles from the last 300 steps of the run — flights are
+    // wall-clocked now; any base works for a still, and mid-flight
+    // reads best.
     let mut parts = scene::Particles::new();
     let counts = sim.spike_counts((300.0 / dt) as usize).unwrap_or_default();
     let now_ms = sim.time_ms();
-    parts.feed(&geo, &counts, now_ms);
-    let pinst = parts.instances(now_ms + 1.0);
+    parts.feed(&geo, &counts, now_ms, 0.0);
+    let pinst = parts.instances(scene::MIN_FLIGHT_MS / 2.0);
     let part_count = gpu.write_parts(&pinst) as u32;
     gpu.draw_params = Some(crate::gpu::DrawParams {
         pv_count,
