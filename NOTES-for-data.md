@@ -919,3 +919,40 @@ section with the exact toolchain commands (wasm32 target,
 works after), `web_dir_without_index_fails_startup_check`. Verified
 live: curl → 426 + hint, `--web /tmp/empty_web` → startup error,
 `--web editor/dist-web` → the open-URL line.
+
+## Stage 9 — WebGPU help page per browser
+
+Nico's Brave-on-Linux report: the page died on the wasm
+adapter/device error ("No suitable graphics adapter found … webgpu not
+requested") — Brave ships WebGPU off on Linux, `navigator.gpu` is
+absent, and users got a raw JsValue instead of a way forward.
+
+`editor/web/webgpu-help.mjs` (plain ES module, no build step) runs
+BEFORE the wasm loads: `navigator.gpu` missing → "WebGPU is off in
+this browser"; `requestAdapter()` null/throws → "WebGPU found no
+GPU"; adapter found → the loading line names the vendor/architecture
+and the editor boots. Browser/OS detection covers Brave
+(`navigator.brave.isBrave`), Edge/Opera/Vivaldi/Chrome/Chromium,
+Firefox, Safari × Linux/Windows/macOS/Android/iOS; unknown gets
+generic Chromium steps. Steps are real per-combo instructions —
+`<scheme>://flags/#enable-unsafe-webgpu` + `#enable-vulkan` on
+Chromium-Linux (scheme brave/chrome/edge/vivaldi/opera), update-first
+on Windows/macOS (on by default since Chrome 113),
+`settings/system` + `chrome://gpu` + `#ignore-gpu-blocklist` for the
+no-GPU case, `about:config → dom.webgpu.enabled` for Firefox (on by
+default Windows ≥141 / macOS ≥147 — verified against the gpuweb
+implementation-status table, not guessed), Safari 26+/Feature Flags.
+Every browser URL renders as copyable text + a Copy button (pages
+can't open `chrome://` links), and every page ends with
+`editor --connect <this host:port>`. The Rust fallback in `main.rs`
+kept as the last resort: a device request that still fails calls
+`window.neWebgpuHelp.show(err)` — same rendered page, raw JsValue in
+a `<details>` line.
+
+Tests: `webgpu-help.test.mjs` (`node --test`, 9 cases with real UA
+strings — Brave/Chrome/Vivaldi Linux, Edge Windows, Firefox Linux,
+Safari macOS, Android Chrome, unknown). Verified live in headless
+Chrome: `server --web editor/dist-web` + no-GPU browser renders the
+numbered-steps page (`review/stage9_webgpu_help.png`), not a blank
+canvas. README's browser section now documents the check and the
+node-test command.
