@@ -203,6 +203,44 @@ write_to_file("out.txt", [1.0, 2.5, 3]);   // one value per line
 read_to_vec("out.txt")                     // → [f64,…]
 ```
 
+## Datasets
+
+Reproducible multi-channel series live in `data_dir/datasets/<name>/`.
+`dataset_gen(#{...})` generates (or loads the cached) series from a
+spec; `dataset(name)` loads one (including uploads); `datasets()` lists
+names. Everything is deterministic — same spec + seed ⇒ same bytes.
+
+```rhai
+let d = dataset_gen(#{
+    name: "det_corr", channels: 8, len_ms: 45000, dt_ms: 1.0,
+    dist: "poisson", rate_hz: 25.0, seed: 5,
+    events: [#{ kind: "corr", every_ms: 500.0, jitter_ms: 150.0,
+               window_ms: 12.0, strength: 35.0, seed: 17 }],
+});
+d.n_channels;  d.steps;  d.len_ms;          // dimensions
+d.channel(i);                              // → [f32; steps]
+d.events();  d.events(lo_ms, hi_ms);       // event label times
+```
+
+Event kinds: `rate` (rate bump), `corr` (coincident burst across all
+channels), `motif` (`channels:`, `pattern:`, `gap_ms:` — injected
+temporal pattern). Uploads take the same path via
+`ClientMsg::UploadDataset` (`.f32` or `.npy`, name confined, size cap
+`server --max-upload-mb`).
+
+## Jobs
+
+On the WebSocket `server` a script can run as a background job (its own
+`Env` + thread, survives client disconnect, `CancelJob` stops it via
+the progress callback). `job_progress(#{ k: v, … })` emits numeric
+fields to the editor's Jobs plot; `job_dir()` returns `runs/<id>` for
+artifacts ("" when run interactively).
+
+```rhai
+job_progress(#{ seed: s, auc: test_auc, done: 1.0 });
+write_to_file(job_dir() + "/result.json", [1.0]);
+```
+
 ## A minimal script
 
 ```rhai

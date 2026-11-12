@@ -690,3 +690,113 @@ on this box can't composite the swapchain). `wasm-opt` for the ~9.9 MB
 bundle. Then spec-deferred items: dataset upload + training jobs, auth,
 and the 3b leftovers (script pause/resume, raster density map,
 synapse-alpha tuning, backend-fallback `notice`).
+
+## Stage 6 — datasets, background jobs, detector + memory examples (review/STAGE6.md, this run)
+
+### What landed
+
+- **`sim::dataset`** — seeded multi-channel generator (poisson/gauss
+  base + `rate`/`corr`/`motif` events), persisted under
+  `datasets/<name>/` as `signal.f32` + `meta.json` + `labels.json`,
+  cached by canonical spec JSON; `.npy` reader for uploads. Same spec +
+  seed ⇒ identical bytes (test `same_seed_same_bytes`).
+- **Wire upload**: `ClientMsg::UploadDataset` → `datasets/<name>`
+  inside `data_dir`, name confined to a plain dir name (no `/`, `\`,
+  `.`-prefix), byte cap via `server --max-upload-mb` (default 64 MiB;
+  `ServeOpts::max_upload_bytes`). Server replies `DatasetUploaded` or
+  `Error`; local transport accepts uploads too, so CLI runs share the
+  same code path.
+- **Rhai dataset API**: `dataset(name)` (gen-or-load by name),
+  `dataset_gen(#{...spec})`, `datasets()`, `d.channel(i)`, `d.events()`,
+  `d.events(lo,hi)`, `d.n_channels`, `d.steps`, `d.len_ms`, `d.dt_ms`,
+  `d.name`, `d.spec_json`. Names go through the same confinement as
+  file paths — `dataset("../x")` is refused.
+- **Background jobs** (`server` only — the sim worker is shared, so a
+  job gets its own `Env` on its own thread): `StartJob{name,script}` →
+  `JobStarted{id}`; the runner writes `runs/<id>/{script.rhai,
+  status,metrics.json,…}` under `data_dir`, streams
+  `job_progress(#{k:v,…})` as `JobProgress` broadcasts, survives the
+  launching client's disconnect, honours `CancelJob` (rhai
+  `on_progress` → `Terminated`), and `ListJobs`/`OpenJob` report
+  `JobInfo`/`JobDetail` (status + `result.json` + script). `job_dir()`
+  gives scripts their artifact dir. The local transport rejects job
+  messages with an explanatory error (jobs need the server).
+- **Editor**: a *Jobs* plot tab — live job list (2 s poll while open),
+  per-job status, cancel/open buttons, numeric `JobProgress` fields
+  plotted as lines, and opened-job detail (status + `result.json` +
+  script). The script editor gained a **Run as job** button.
+- **Examples**: `examples/detector.rhai`, `examples/memory_window.rhai`
+  (same rigor pattern as `lsm_hidden.rhai`: cached dataset, split by
+  time, ridge readout on liquid spike counts, raw + coincidence
+  baselines, permutation null).
+
+### Detector numbers (detector.rhai, full params, CPU)
+
+`det_corr`: 8 ch × 45 s poisson 25 Hz, `corr` bursts every ~500 ms
+(±150 jitter), footprint 12 ms, strength 35 Hz — deliberately subtle:
+per-channel marginal barely moves, pairwise coincidence carries it.
+Windows = event anchors vs. clean negatives (≥250 ms event-free behind,
+≥60 ms ahead); 3 liquid seeds, ridge λ=1, 200-label permutation.
+
+| split | pos+neg |
+|---|---|
+| train | 44+44  val 25+25  test 21+21 |
+
+| readout | test AUC (mean ± sd, 3 seeds) |
+|---|---|
+| **liquid** | **0.739 ± 0.014** (val 0.666 ± 0.051) |
+| raw counts | 0.710 |
+| coincidence counts (28d) | 0.819 |
+| permutation null | 0.503 ± 0.185 (pooled p = 0.114) |
+
+Per-seed liquid AUCs: 0.752 / 0.746 / 0.719 (p = 0.039 / 0.139 / 0.174).
+
+**Honest read**: the null sits at chance (0.503) — the control is
+clean. The event is genuinely detectable, but at readout delay 0 the
+28-dim coincidence-count baseline is *stronger* than the liquid
+(0.82 vs 0.74) — no memory is needed at zero delay, and the coincidence
+feature is a direct match to the planted event structure. The liquid's
+value-add is the temporal dimension, which the delay sweep below
+probes. Marginal significance (p≈0.11) reflects the small test set —
+more events would tighten it.
+
+### Memory-window table (memory_window.rhai, full params, CPU)
+
+Sparse `corr` events (every ~900 ms), ridge readout on liquid spike
+counts in a 20 ms window starting `delay` ms after event onset; ~29+29
+windows/split; three liquid settings.
+
+| liquid | +0 | +5 | +10 | +20 | +50 | +100 | +200 ms |
+|---|---|---|---|---|---|---|---|
+| base (8³, λ=8, w=1.0) | .725 | .688 | .547 | .485 | .535 | .522 | .488 |
+| weak (w_rec 0.5)      | .711 | .661 | .417 | .505 | .681 | .481 | .453 |
+| big (12³, λ=8)        | .762 | .752 | .522 | .536 | .635 | .622 | .405 |
+
+**Honest read**: usable readout horizon ≈ 5–20 ms at these settings —
+by +50 ms the curves sit at chance, with a non-monotonic blip at
+50–100 ms for `big` and several sub-0.5 cells (the readout
+anti-predicts — overfit noise at ~30 windows/split, not real negative
+information). The decay is real but the curve is noisy; longer
+datasets / more windows would smooth it.
+
+### Tests added
+
+- `sim/src/dataset.rs` unit tests: `same_seed_same_bytes`,
+  `labels_line_up_with_events`, `save_load_round_trip`, `npy_reads`.
+- `sim/tests/serve.rs`: `dataset_gen_over_wire`,
+  `dataset_name_escape_refused`, `upload_dataset_too_big_refused`,
+  `upload_dataset_roundtrip` (+ earlier `import` confinement cases).
+- `server/tests/ws.rs`: `ws_detector_example_small` (splice in small
+  params, real job end-to-end — dataset → liquid → auc → JobDone +
+  `runs/<id>` artifacts), `ws_job_progress_survives_client`
+  (job keeps running + persists after the starter disconnects),
+  `ws_job_cancel` (`job.status` → `cancelled`, run dir stamped).
+
+### Next steps
+
+Auth for `server` (any connected client can run jobs), job
+queueing/limits (one job at a time per server is enforced only by
+caller discipline), `wasm-opt` for the 9.9 MB bundle, and the honest
+science follow-ups the numbers suggest: more events per split for
+tighter AUC CIs, and a delay sweep on `detector.rhai` where the
+liquid's temporal memory should pay off vs. the coincidence baseline.
