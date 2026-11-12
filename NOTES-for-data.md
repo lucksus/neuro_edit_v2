@@ -589,3 +589,104 @@ wasm/browser build of the UI against the same protocol; dataset upload
 + training jobs; auth beyond localhost binding. Also open from 3b: real
 script pause/resume, raster density heat map, synapse-alpha tuning,
 backend-fallback `notice` (field exists, never set).
+
+## Stage 5 — file confinement + browser UI (review/STAGE5.md, this run)
+
+Six commits `63e3a5e`..`d54e009`. Both items: the `import` confinement
+gap (item 0), and the wasm/browser editor served by `server --web`
+(item 1). Not done, per spec: dataset upload/training jobs, auth.
+
+- **`63e3a5e` import confinement (item 0)**: Rhai's default
+  `FileModuleResolver` ignored `data_dir` entirely — `import` read from
+  process cwd and absolute paths. `ConfinedResolver` wraps a resolver
+  rooted at `data_dir` after pre-validating the path through the same
+  `resolve_in` as the file fns. `resolve_in` now also canonicalizes the
+  deepest existing ancestor of the resolved path, so a symlink planted
+  inside `data_dir` pointing outside is refused for `net.save`,
+  `net.load`, `import`, and the file messages alike (nonexistent save
+  targets resolve through the canonicalized parent). Red→green over WS:
+  `import "../x"`, `import "/abs/x"` and symlinked-dir escapes all
+  refused as console errors while `import "ok"` inside the dir still
+  loads (`imp=42`).
+- **`6bc5788` wire file ops**: `ClientMsg::{ListFiles,ReadFile,WriteFile}`
+  → `ServerMsg::{FileList,FileData,FileWritten}` + `proto::FileEntry`.
+  Handled in `sim::serve` through the same `resolve` sandbox, targeted
+  to the requesting client. The UI's last `std::fs` (script panel
+  open/save, Load dialog) now goes through the wire — List renders
+  server-side entries, dirs descend via `ListFiles`, and `Shared`
+  carries the one-shot responses. `Shared`'s `SimConfig`/`BackendKind`
+  became the `proto::` wire types, so the whole UI read model is
+  `sim`-free (needed for wasm).
+- **`73371fd` browser build**: `editor` features — `native` (default:
+  sim/server/clap/pollster) and `web`; both are off on wasm32 where
+  `SimCtl::connect` is the only transport (browser `WebSocket`, sends
+  queued until `onopen`, `onmessage` folds into `Shared`, no threads,
+  no `std::fs`, no `std::time::Instant` anywhere in the UI surface —
+  egui supplies timing; `getrandom/js` for entropy). `main` on wasm is
+  an eframe `WebRunner` pinned to `Backends::BROWSER_WEBGPU` (the scene
+  pipelines need storage buffers; a WebGL2 fallback would just fail
+  later) and, on failure, paints a plain-English "needs WebGPU" message
+  on the page. `editor/web/build.sh` = `cargo build --target
+  wasm32-unknown-unknown --release --no-default-features --features
+  web` + `wasm-bindgen --target web` (CLI 0.2.118 matches the crate) →
+  `editor/dist-web/` (gitignored) with `web/index.html`.
+- **`508056b` server --web**: `handle_client` sniffs the request head —
+  `Upgrade: websocket` answers with a hand-rolled 101 +
+  `derive_accept_key`, anything else serves a static file from
+  `web_dir` (component-wise traversal refusal; `index.html` at `/`;
+  correct MIME incl. `application/wasm`). One port carries page, bundle
+  and wire. `accept_web`/`spawn_acceptor_web`; `--web` requires
+  `index.html` to exist at startup.
+- **`d54e009` docs**: README + features.md gained the server/browser
+  story (the features table never mentioned `server`; the old "a
+  browser UI could…" line is now what actually exists).
+
+### Tests (all green)
+
+`cargo fmt` clean; `cargo test --workspace` — 30 targets (cuda);
+`cargo test -p sim --no-default-features` — 15 targets; `cargo check
+-p editor --no-default-features` (native, feature-less) and
+`--target wasm32-unknown-unknown --features web` both clean;
+`cargo build -p editor --release --target wasm32-unknown-unknown`
+produces `editor.wasm`; `wasm-bindgen` emits `editor_bg.wasm`
+(~9.9 MB unoptimized-for-size).
+
+- `ws_web_serves_http_and_ws_on_one_port`: GET /, /app.js with the
+  right MIME, `/../secret.txt` and misses 404, then a real WS client on
+  the same port completes Hello→Eval→Console.
+- Item-0 confinement tests stay green.
+
+### Browser smoke (this box, port 3090)
+
+`server --bind 127.0.0.1:3090 --data-dir /tmp/ne_web_data --web
+editor/dist-web`. curl: `/`, `/editor.js`, `/editor_bg.wasm` all 200
+with correct types. Headless Chromium (snap + playwright
+chrome-headless-shell) and windowed Chromium under Xvfb :99:
+
+- page loads, wasm compiles, eframe takes over `<canvas>` (egui's
+  hidden text input present; `#loading` removed) — DOM verified via
+  `--dump-dom`;
+- the browser opened `ws://127.0.0.1:3090/` and got
+  `HTTP/1.1 101 Switching Protocols` — netlog verified (the manual
+  upgrade path works);
+- WebGPU adapter/device/surface acquired — `WebGPUSwapBufferProvider`
+  created the swapchain under `--use-webgpu-adapter=swiftshader`;
+- **pixels could not be screenshotted here**: every headless/snap path
+  on this box lacks a `SharedImageBackingFactory` for
+  `WebgpuSwapChainTexture` — the canvas renders but can't be
+  display-composited (also with `--use-vulkan`, real RTX 3090 Vulkan
+  path, and ANGLE-swiftshader). Environment limit, not an app failure;
+  needs a real Chrome on a display-capable host.
+- the no-WebGPU path IS screenshotted (`--disable-gpu`): the page shows
+  "neuro_edit v2 needs WebGPU (the 3D view uses storage buffers).
+  Adapter/device request failed: …" on dark background —
+  /home/data/web_no_webgpu.png.
+
+### Next steps
+
+Painted-pixel verification of the browser editor on a WebGPU-capable
+Chrome (any recent Chrome on a normal desktop works — headless shells
+on this box can't composite the swapchain). `wasm-opt` for the ~9.9 MB
+bundle. Then spec-deferred items: dataset upload + training jobs, auth,
+and the 3b leftovers (script pause/resume, raster density map,
+synapse-alpha tuning, backend-fallback `notice`).
