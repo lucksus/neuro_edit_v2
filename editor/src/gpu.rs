@@ -1542,6 +1542,9 @@ impl Gpu {
                 }),
                 ..Default::default()
             });
+            // Scissor to the target pixel: raster work collapses to the
+            // single texel we actually read back (was full-viewport).
+            rpass.set_scissor_rect(px, py, 1, 1);
             let sc = self.scene.as_ref().unwrap();
             rpass.set_pipeline(&self.pip_pick);
             rpass.set_bind_group(0, self.neuron_bg.as_ref().unwrap(), &[]);
