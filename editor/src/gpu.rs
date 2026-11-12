@@ -1059,8 +1059,8 @@ impl Gpu {
         let u = CamU {
             view_proj: vp.to_cols_array_2d(),
             cam_pos: [eye.x, eye.y, eye.z, 0.0],
-            exc_color: [0.55, 0.8, 1.0, 1.0],
-            inh_color: [0.85, 0.6, 1.0, 1.0],
+            exc_color: crate::scene::rgba(crate::scene::NEURON_EXC, 1.0),
+            inh_color: crate::scene::rgba(crate::scene::NEURON_INH, 1.0),
             right: [right.x, right.y, right.z, 0.0],
             up: [up.x, up.y, up.z, 0.0],
             misc: [4.0, 1.0, t, 0.0],

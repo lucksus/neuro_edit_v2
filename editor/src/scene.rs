@@ -7,6 +7,21 @@ use glam::Vec3;
 use crate::gpu::{Part, Pv};
 use crate::snap::GeoSnap;
 
+/// Scene palette — the manual's colour legend (docs/manual/getting-started.md)
+/// describes these; `palette_matches_shader` pins the wgsl copies to them.
+pub const NEURON_EXC: [f32; 3] = [0.55, 0.8, 1.0]; // light blue
+pub const NEURON_INH: [f32; 3] = [0.85, 0.6, 1.0]; // pale purple
+pub const SPIKE_FLASH: [f32; 3] = [1.0, 0.35, 0.1]; // orange flash on spike
+pub const SYN_EXC: [f32; 3] = [1.0, 0.55, 0.45]; // salmon, excitatory source
+pub const SYN_INH: [f32; 3] = [0.5, 0.55, 1.0]; // blue, inhibitory source
+pub const SYN_SELECTED: [f32; 3] = [1.0, 0.85, 0.3]; // golden, touches selection
+pub const DOT_EXC: [f32; 3] = [1.0, 0.9, 0.4]; // spike dot on an exc axon
+pub const DOT_INH: [f32; 3] = [0.6, 0.7, 1.0]; // spike dot on an inh axon
+
+pub const fn rgba(c: [f32; 3], a: f32) -> [f32; 4] {
+    [c[0], c[1], c[2], a]
+}
+
 const PLANE_COL: [f32; 4] = [0.35, 0.5, 0.6, 0.5];
 const DRAG_COL: [f32; 4] = [0.55, 0.8, 1.0, 0.85];
 const GROUP_COL: [f32; 4] = [0.9, 0.8, 0.3, 0.6];
@@ -237,11 +252,8 @@ impl Particles {
                 let k = ((wall_ms - f.t0_ms) / f.dur_ms).clamp(0.0, 1.0) as f32;
                 let p = f.src.lerp(f.dst, k);
                 let glow = (1.0 - k * 0.6) * 0.9;
-                let col = if f.inhibitory {
-                    [0.6, 0.7, 1.0, glow]
-                } else {
-                    [1.0, 0.9, 0.4, glow]
-                };
+                let base = if f.inhibitory { DOT_INH } else { DOT_EXC };
+                let col = [base[0], base[1], base[2], glow];
                 Part {
                     pos: [p.x, p.y, p.z, PART_DOT],
                     color: col,
@@ -307,5 +319,31 @@ mod tests {
             p.feed(&g, &[4, 0], i as f64, 1000.0 + i as f64);
         }
         assert!(p.instances(2000.0).len() <= MAX_PARTICLES);
+    }
+
+    /// `vec3f` literals in shader.wgsl duplicate the palette — assert each
+    /// palette colour's wgsl spelling is still in the shader so the docs and
+    /// the pixels can't drift apart.
+    #[test]
+    fn palette_matches_shader() {
+        fn lit(c: [f32; 3]) -> String {
+            let f = |v: f32| {
+                if v.fract() == 0.0 {
+                    format!("{v:.1}")
+                } else {
+                    format!("{v}")
+                }
+            };
+            format!("vec3f({}, {}, {})", f(c[0]), f(c[1]), f(c[2]))
+        }
+        let wgsl = include_str!("shader.wgsl");
+        for (name, c) in [
+            ("SPIKE_FLASH", SPIKE_FLASH),
+            ("SYN_EXC", SYN_EXC),
+            ("SYN_INH", SYN_INH),
+            ("SYN_SELECTED", SYN_SELECTED),
+        ] {
+            assert!(wgsl.contains(&lit(c)), "{name} {} not in shader", lit(c));
+        }
     }
 }
