@@ -6,6 +6,7 @@
 
 pub mod bench;
 pub mod cpu;
+pub mod dataset;
 pub mod readout;
 pub mod script;
 pub mod serve;

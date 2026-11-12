@@ -3069,6 +3069,7 @@ dependencies = [
  "proto",
  "rhai",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
