@@ -170,7 +170,7 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
             let sel: Vec<u32> = app.selection.iter().copied().collect();
             let mut pvs = Vec::new();
             if app.show_grid {
-                scene::floor_grid(app.camera.target, &mut pvs);
+                scene::floor_grid(app.camera.target, app.camera.floor_y, &mut pvs);
             }
             if app.mode == Mode::Move || app.mode == Mode::Insert {
                 scene::work_plane(app.camera.target, app.plane, &mut pvs);

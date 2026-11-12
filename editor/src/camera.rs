@@ -3,14 +3,17 @@
 
 use glam::{Mat4, Vec3};
 
-/// The floor grid sits at y=0; keep the eye a little above it.
-const MIN_EYE_Y: f32 = 2.0;
+/// Keep the eye this far above the floor plane.
+const MIN_EYE_ABOVE_FLOOR: f32 = 2.0;
 
 pub struct Camera {
     pub target: Vec3,
     pub yaw_deg: f32,
     pub pitch_deg: f32,
     pub dist: f32,
+    /// Floor-grid height — the app sets this to `GeoSnap::floor_y()` so the
+    /// clamp follows the net's own baseline instead of a fixed y=0.
+    pub floor_y: f32,
     /// Smoothed target (double-click ease).
     anim: Option<(Vec3, f32)>,
 }
@@ -22,6 +25,7 @@ impl Default for Camera {
             yaw_deg: -35.0,
             pitch_deg: -20.0,
             dist: 700.0,
+            floor_y: 0.0,
             anim: None,
         }
     }
@@ -96,17 +100,18 @@ impl Camera {
         self.clamp_above_floor();
     }
 
-    /// Keep `eye().y >= MIN_EYE_Y`: cap the pitch (looking up pushes the eye
-    /// down) and lift the target when even level flight can't stay above.
-    /// Called by every mutator; also public so manual field tweaks (e.g. the
-    /// screenshot camera overrides) can re-apply it.
+    /// Keep `eye().y >= floor_y + 2`: cap the pitch (looking up pushes the
+    /// eye down) and lift the target when even level flight can't stay
+    /// above. Called by every mutator; also public so manual field tweaks
+    /// (e.g. the screenshot camera overrides) can re-apply it.
     pub fn clamp_above_floor(&mut self) {
-        let sin_max = ((self.target.y - MIN_EYE_Y) / self.dist).clamp(-1.0, 1.0);
+        let min_eye = self.floor_y + MIN_EYE_ABOVE_FLOOR;
+        let sin_max = ((self.target.y - min_eye) / self.dist).clamp(-1.0, 1.0);
         let pitch_max = sin_max.asin().to_degrees();
         if self.pitch_deg > pitch_max {
             self.pitch_deg = pitch_max;
         }
-        let below = MIN_EYE_Y - self.eye().y;
+        let below = min_eye - self.eye().y;
         if below > 0.0 {
             self.target.y += below;
         }
@@ -127,7 +132,7 @@ mod tests {
         };
         // drag hard upward: pitch would go to +89 and sink the eye to -200
         c.orbit(0.0, 400.0);
-        assert!(c.eye().y >= MIN_EYE_Y - 1e-4);
+        assert!(c.eye().y >= c.floor_y + MIN_EYE_ABOVE_FLOOR - 1e-4);
         assert!(c.pitch_deg <= 0.0);
     }
 
@@ -140,7 +145,26 @@ mod tests {
             ..Default::default()
         };
         c.pan(0.0, 0.0, -10.0, 1.0); // push the target far below the floor
-        assert!(c.eye().y >= MIN_EYE_Y - 1e-4);
+        assert!(c.eye().y >= c.floor_y + MIN_EYE_ABOVE_FLOOR - 1e-4);
+    }
+
+    #[test]
+    fn clamp_follows_deep_floor() {
+        // Net sits at y≈-200 → floor at -220: an eye parked just under the
+        // old y=0 floor is fine there (it's 220 above the real floor) and a
+        // deep target must not be lifted back up to y≈0.
+        let mut c = Camera {
+            target: Vec3::new(0.0, -200.0, 0.0),
+            pitch_deg: -10.0,
+            dist: 100.0,
+            floor_y: -220.0,
+            ..Default::default()
+        };
+        c.clamp_above_floor();
+        assert!(c.eye().y >= -218.0 - 1e-4);
+        // and looking up still pushes the eye below the real floor → clamped
+        c.orbit(0.0, 400.0);
+        assert!(c.eye().y >= c.floor_y + MIN_EYE_ABOVE_FLOOR - 1e-4);
     }
 
     #[test]

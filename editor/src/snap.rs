@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 
 /// Immutable geometry snapshot of the whole network.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 #[allow(dead_code)]
 pub struct GeoSnap {
     pub version: u64,
@@ -41,6 +41,20 @@ pub struct GeoSnap {
     /// these instead of the member cubes.
     pub grids: Vec<GridSnap>,
     pub dt_ms: f32,
+}
+
+impl GeoSnap {
+    /// Floor-grid height: 20 units under the deepest neuron (the original
+    /// hard-codes y=0, which cuts through nets whose lattice extends below
+    /// zero and makes deep nets unfocusable).
+    pub fn floor_y(&self) -> f32 {
+        self.pos
+            .iter()
+            .map(|p| p[1])
+            .reduce(f32::min)
+            .unwrap_or(0.0)
+            - 20.0
+    }
 }
 
 #[derive(Clone)]
@@ -628,5 +642,24 @@ impl Shared {
             self.console.pop_front();
         }
         self.console.push_back(s);
+    }
+}
+
+#[cfg(test)]
+mod floor_tests {
+    use super::*;
+
+    #[test]
+    fn floor_tracks_deepest_neuron() {
+        let g = GeoSnap {
+            pos: vec![[10.0, 30.0, 0.0], [-5.0, -200.0, 4.0], [0.0, -80.0, 0.0]],
+            ..Default::default()
+        };
+        assert_eq!(g.floor_y(), -220.0);
+    }
+
+    #[test]
+    fn empty_net_floors_below_origin() {
+        assert_eq!(GeoSnap::default().floor_y(), -20.0);
     }
 }

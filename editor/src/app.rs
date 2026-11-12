@@ -568,6 +568,8 @@ impl EditorApp {
                 // Auto-frame on empty → non-empty (first net, script-built
                 // grid on a blank canvas, rebuild after New) and whenever a
                 // dialog asked for it (frame_pending).
+                // Floor grid + camera clamp follow the net's own baseline.
+                self.camera.floor_y = g.floor_y();
                 let was_empty = self.geo.as_ref().map_or(true, |old| old.pos.is_empty());
                 if !g.pos.is_empty() && (was_empty || self.frame_pending) {
                     let (mn, mx) = gpu.scene.as_ref().unwrap().bounds;

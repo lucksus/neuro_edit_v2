@@ -158,6 +158,7 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
 
     let (mn, mx) = gpu.scene.as_ref().unwrap().bounds;
     let mut cam = Camera::default();
+    cam.floor_y = geo.floor_y();
     cam.frame(mn, mx);
     if let Some(d) = o.cam_dist {
         cam.dist = d;
@@ -173,7 +174,7 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
 
     // overlay: floor grid + group boxes
     let mut pvs = Vec::new();
-    scene::floor_grid(cam.target, &mut pvs);
+    scene::floor_grid(cam.target, cam.floor_y, &mut pvs);
     scene::group_boxes(&geo, &mut pvs);
     gpu.write_pv(&pvs);
     let pv_count = pvs.len() as u32;

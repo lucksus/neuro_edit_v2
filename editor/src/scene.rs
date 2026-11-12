@@ -26,15 +26,15 @@ fn line(out: &mut Vec<Pv>, a: Vec3, b: Vec3, c: [f32; 4]) {
 }
 
 /// Floor grid on x-z (original: step 20, ±1000) centred under the camera
-/// target so it stays useful at any zoom.
-pub fn floor_grid(center: Vec3, out: &mut Vec<Pv>) {
+/// target so it stays useful at any zoom; `y` is the net's floor
+/// (`GeoSnap::floor_y`), not always 0.
+pub fn floor_grid(center: Vec3, y: f32, out: &mut Vec<Pv>) {
     let step = 20.0f32;
     let ext = 1000.0f32;
     let x0 = (center.x / step).round() * step - ext;
     let z0 = (center.z / step).round() * step - ext;
     let x1 = (center.x / step).round() * step + ext;
     let z1 = (center.z / step).round() * step + ext;
-    let y = 0.0;
     let mut x = x0;
     while x <= x1 {
         line(out, Vec3::new(x, y, z0), Vec3::new(x, y, z1), GRID_COL);
