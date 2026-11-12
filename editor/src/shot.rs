@@ -203,7 +203,9 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
     eprintln!("scene render: {frame_ms:.2} ms");
 
     // ---- readback ----
-    let rb_size = (w * h * 4) as u64;
+    // COPY_BYTES_PER_ROW_ALIGNMENT: buffer rows must be 256-byte aligned.
+    let bpr = (w * 4 + 255) & !255;
+    let rb_size = (bpr * h) as u64;
     let rb = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("rb"),
         size: rb_size,
@@ -224,7 +226,7 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
             buffer: &rb,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(w * 4),
+                bytes_per_row: Some(bpr),
                 rows_per_image: Some(h),
             },
         },
@@ -249,11 +251,9 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
     {
         let data = rb.get_mapped_range(..);
         // BGRA? no — Rgba8UnormSrgb is RGBA already.
-        let mut row = vec![0u8; (w * 4) as usize];
         for y in 0..h {
-            let s = (y * w * 4) as usize;
-            row.copy_from_slice(&data[s..s + (w * 4) as usize]);
-            png.extend_from_slice(&row);
+            let s = (y * bpr) as usize;
+            png.extend_from_slice(&data[s..s + (w * 4) as usize]);
         }
     }
     rb.unmap();

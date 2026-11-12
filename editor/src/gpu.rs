@@ -11,6 +11,11 @@ use wgpu::util::DeviceExt;
 use crate::camera::Camera;
 use crate::snap::GeoSnap;
 
+/// Cap on one synapse-pairs bind range — keeps every binding comfortably
+/// under the 128MB `max_storage_buffer_binding_size` minimum, whatever the
+/// adapter reports above it.
+const SYN_BIND_MAX_BYTES: usize = 64 << 20;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct CamU {
@@ -59,8 +64,8 @@ pub struct Scene {
     sel_buf: wgpu::Buffer,
     pos_buf: wgpu::Buffer,
     pairs_buf: wgpu::Buffer,
-    lcol_buf: wgpu::Buffer,
-    syn_verts: u32,
+    /// Synapse vertices drawn this scene (2 per synapse, after truncation).
+    pub syn_verts: u32,
     /// Mean nearest-neighbour scale: cbrt(bounds volume / neuron count).
     avg_spacing: f32,
     /// Mean synapse length in world units.
@@ -101,7 +106,9 @@ pub struct Gpu {
     pick: Option<PickTarget>,
     pub scene: Option<Scene>,
     neuron_bg: Option<wgpu::BindGroup>,
-    syn_bg: Option<wgpu::BindGroup>,
+    /// One bind group per synapse-pairs chunk: each binding stays under
+    /// `max_storage_buffer_binding_size`, so huge nets still draw.
+    syn_bgs: Vec<(wgpu::BindGroup, u32)>,
     part_bg: Option<wgpu::BindGroup>,
     part_buf: wgpu::Buffer,
     part_cap: usize,
@@ -186,7 +193,6 @@ impl Gpu {
                 (2, storage(), wgpu::ShaderStages::VERTEX),
                 (4, storage(), wgpu::ShaderStages::VERTEX),
                 (5, storage(), wgpu::ShaderStages::VERTEX),
-                (6, storage(), wgpu::ShaderStages::VERTEX),
             ],
         );
         let bgl_pv = bgl(
@@ -450,7 +456,7 @@ impl Gpu {
             pick: None,
             scene: None,
             neuron_bg: None,
-            syn_bg: None,
+            syn_bgs: Vec::new(),
             part_bg: None,
             part_buf,
             part_cap: 0,
@@ -473,7 +479,7 @@ impl Gpu {
         for (i, p) in geo.pos.iter().enumerate() {
             inst.push(Inst {
                 pos_scale: [p[0], p[1], p[2], 4.0],
-                aux: geo.kind[i] as u32,
+                aux: geo.kind.get(i).copied().unwrap_or(0) as u32,
                 _pad: [0; 3],
             });
             entity_of_inst.push(Entity::Neuron(i as u32));
@@ -483,14 +489,18 @@ impl Gpu {
             let mut p = inp.pos;
             if p == [0.0; 3] && !inp.targets.is_empty() {
                 let mut c = [0f32; 3];
+                let mut m = 0f32;
                 for &t in &inp.targets {
-                    let tp = geo.pos[t as usize];
-                    c[0] += tp[0];
-                    c[1] += tp[1];
-                    c[2] += tp[2];
+                    if let Some(&tp) = geo.pos.get(t as usize) {
+                        c[0] += tp[0];
+                        c[1] += tp[1];
+                        c[2] += tp[2];
+                        m += 1.0;
+                    }
                 }
-                let m = inp.targets.len() as f32;
-                p = [c[0] / m, c[1] / m + 60.0, c[2] / m];
+                if m > 0.0 {
+                    p = [c[0] / m, c[1] / m + 60.0, c[2] / m];
+                }
             }
             inst.push(Inst {
                 pos_scale: [p[0], p[1], p[2], 7.0],
@@ -505,14 +515,18 @@ impl Gpu {
             let units = &geo.readouts[k].1;
             let mut c = [0f32; 3];
             if !units.is_empty() {
+                let mut m = 0f32;
                 for &u in units {
-                    let tp = geo.pos[u as usize];
-                    c[0] += tp[0];
-                    c[1] += tp[1];
-                    c[2] += tp[2];
+                    if let Some(&tp) = geo.pos.get(u as usize) {
+                        c[0] += tp[0];
+                        c[1] += tp[1];
+                        c[2] += tp[2];
+                        m += 1.0;
+                    }
                 }
-                let m = units.len() as f32;
-                c = [c[0] / m, c[1] / m + 120.0, c[2] / m];
+                if m > 0.0 {
+                    c = [c[0] / m, c[1] / m + 120.0, c[2] / m];
+                }
             }
             inst.push(Inst {
                 pos_scale: [c[0], c[1], c[2], 7.0],
@@ -566,20 +580,28 @@ impl Gpu {
                 contents: bytemuck::cast_slice(&pos4),
                 usage: wgpu::BufferUsages::STORAGE,
             });
-        let mut pairs = Vec::with_capacity(geo.syn.len());
-        let mut lcol: Vec<[f32; 4]> = Vec::with_capacity(geo.syn.len());
-        for &(a, b) in &geo.syn {
-            pairs.push([a, b]);
-            // colour by source kind, faint
-            lcol.push(if geo.kind.get(a as usize) == Some(&1) {
-                [0.5, 0.55, 1.0, 0.25]
-            } else {
-                [1.0, 0.55, 0.45, 0.25]
-            });
+        // Each synapse is one u32 pair; the source neuron's kind flag rides
+        // in the top bit of `a` (src < 2^31 always). That keeps per-synapse
+        // GPU data at 8B — a 10M-synapse net is an 80MB buffer.
+        // `max_buffer_size` still caps the absolute size; past it we draw a
+        // truncated prefix rather than trip device validation.
+        let limits = self.device.limits();
+        let cap_syns = (limits.max_buffer_size / 8) as usize;
+        let n_syns = geo.syn.len();
+        if n_syns > cap_syns {
+            eprintln!(
+                "scene: {} synapses exceed max_buffer_size — drawing first {} only",
+                n_syns, cap_syns
+            );
+        }
+        let draw_syns = n_syns.min(cap_syns).max(1); // [0,0] placeholder if empty
+        let mut pairs = Vec::with_capacity(draw_syns);
+        for &(a, b) in geo.syn.iter().take(draw_syns) {
+            let flag = u32::from(geo.kind.get(a as usize) == Some(&1)) << 31;
+            pairs.push([a | flag, b]);
         }
         if pairs.is_empty() {
             pairs.push([0, 0]);
-            lcol.push([0.0; 4]);
         }
         let pairs_buf = self
             .device
@@ -587,13 +609,6 @@ impl Gpu {
                 label: Some("pairs"),
                 contents: bytemuck::cast_slice(&pairs),
                 usage: wgpu::BufferUsages::STORAGE,
-            });
-        let lcol_buf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("lcol"),
-                contents: bytemuck::cast_slice(&lcol),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             });
 
         self.neuron_bg = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -606,17 +621,36 @@ impl Gpu {
                 entry(3, sel_buf.as_entire_binding()),
             ],
         }));
-        self.syn_bg = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("syn bg"),
-            layout: &self.bgl_syn,
-            entries: &[
-                entry(0, self.cam_buf.as_entire_binding()),
-                entry(2, activity_buf.as_entire_binding()),
-                entry(4, pos_buf.as_entire_binding()),
-                entry(5, pairs_buf.as_entire_binding()),
-                entry(6, lcol_buf.as_entire_binding()),
-            ],
-        }));
+        // Chunk the pairs binding under max_storage_buffer_binding_size
+        // (128MB on the least capable adapters). Each chunk becomes one
+        // bind group + one draw call.
+        let bind_cap =
+            (limits.max_storage_buffer_binding_size as usize).min(SYN_BIND_MAX_BYTES) / 8;
+        let chunk_syns = bind_cap.max(1);
+        self.syn_bgs = (0..pairs.len())
+            .step_by(chunk_syns)
+            .map(|off| {
+                let len = (pairs.len() - off).min(chunk_syns);
+                let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("syn bg"),
+                    layout: &self.bgl_syn,
+                    entries: &[
+                        entry(0, self.cam_buf.as_entire_binding()),
+                        entry(2, activity_buf.as_entire_binding()),
+                        entry(4, pos_buf.as_entire_binding()),
+                        entry(
+                            5,
+                            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &pairs_buf,
+                                offset: (off * 8) as u64,
+                                size: std::num::NonZero::new((len * 8) as u64),
+                            }),
+                        ),
+                    ],
+                });
+                (bg, (len * 2) as u32)
+            })
+            .collect();
 
         let mut mn = Vec3::splat(f32::MAX);
         let mut mx = Vec3::splat(f32::MIN);
@@ -638,8 +672,9 @@ impl Gpu {
         let avg_spacing = (ext.x * ext.y * ext.z / n.max(1) as f32).cbrt();
         let mut edge_sum = 0.0f32;
         for &(a, b) in &geo.syn {
-            edge_sum +=
-                (Vec3::from(geo.pos[b as usize]) - Vec3::from(geo.pos[a as usize])).length();
+            if let (Some(&pa), Some(&pb)) = (geo.pos.get(a as usize), geo.pos.get(b as usize)) {
+                edge_sum += (Vec3::from(pb) - Vec3::from(pa)).length();
+            }
         }
         let avg_edge_len = edge_sum / geo.syn.len().max(1) as f32;
 
@@ -651,8 +686,7 @@ impl Gpu {
             sel_buf,
             pos_buf,
             pairs_buf,
-            lcol_buf,
-            syn_verts: (geo.syn.len() * 2) as u32,
+            syn_verts: (draw_syns.min(n_syns) * 2) as u32,
             avg_spacing,
             avg_edge_len,
             silhouette,
@@ -916,8 +950,10 @@ impl Gpu {
         let Some(sc) = &self.scene else { return };
         if draw_syn && sc.syn_verts > 0 {
             rpass.set_pipeline(&self.pip_syn);
-            rpass.set_bind_group(0, self.syn_bg.as_ref().unwrap(), &[]);
-            rpass.draw(0..sc.syn_verts, 0..1);
+            for (bg, verts) in &self.syn_bgs {
+                rpass.set_bind_group(0, bg, &[]);
+                rpass.draw(0..*verts, 0..1);
+            }
         }
         if part_count > 0 {
             rpass.set_pipeline(&self.pip_part);

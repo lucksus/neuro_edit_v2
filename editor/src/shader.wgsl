@@ -118,7 +118,6 @@ fn fs_pick(o: NeurOut) -> @location(0) u32 {
 
 @group(0) @binding(4) var<storage, read> lpos: array<vec4f>;
 @group(0) @binding(5) var<storage, read> lpairs: array<vec2u>;
-@group(0) @binding(6) var<storage, read> lcol: array<vec4f>;
 
 struct LineOut {
     @builtin(position) clip: vec4f,
@@ -128,7 +127,7 @@ struct LineOut {
 @vertex
 fn vs_syn(@builtin(vertex_index) vi: u32) -> LineOut {
     var o: LineOut;
-    let si = vi >> 1u;          // synapse index
+    let si = vi >> 1u;          // synapse index (local to this draw chunk)
     let keep = u32(cam.lod.y + 0.5);
     if keep > 1u && (si % keep) != 0u {
         // LOD-culled: degenerate line off-screen, zero fragments
@@ -137,11 +136,15 @@ fn vs_syn(@builtin(vertex_index) vi: u32) -> LineOut {
         return o;
     }
     let end = vi & 1u;          // 0 = src, 1 = tgt
-    let p = select(lpairs[si].x, lpairs[si].y, end == 1u);
+    let raw = select(lpairs[si].x, lpairs[si].y, end == 1u);
+    let p = raw & 0x7fffffffu;  // neuron index (top bit is the src-kind flag)
     o.clip = cam.view_proj * vec4f(lpos[p].xyz, 1.0);
     let act = clamp(activity[p], 0.0, 1.0);
-    let base = lcol[si];
-    o.color = vec4f(mix(base.rgb * 0.35, base.rgb, act), base.a * cam.lod.x);
+    // Per-synapse colour by source kind travels in lpairs[si].x's top bit:
+    // no separate 16B/synapse colour buffer (10M synapses stay bindable).
+    let inh = (lpairs[si].x & 0x80000000u) != 0u;
+    let base_rgb = select(vec3f(1.0, 0.55, 0.45), vec3f(0.5, 0.55, 1.0), inh);
+    o.color = vec4f(mix(base_rgb * 0.35, base_rgb, act), 0.25 * cam.lod.x);
     return o;
 }
 
