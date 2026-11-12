@@ -712,11 +712,12 @@ impl EditorApp {
                     }
                 });
                 ui.separator();
-                // sim controls — Pause covers a running script (`busy`) too:
-                // abort_now flips the flag on_progress/run chunks watch.
+                // sim controls — "Stop" (not "Pause"): abort_now flips the
+                // flag on_progress/run chunks/builders watch. A busy script
+                // can't resume anyway, so Pause was a lie.
                 let live = self.running || self.busy;
                 let (run_icon, run_label) = if live {
-                    (ic_pause, " Pause")
+                    (ic_pause, " Stop")
                 } else {
                     (ic_play, " Run")
                 };

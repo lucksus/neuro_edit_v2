@@ -65,3 +65,38 @@ fn set_backend_is_respected_by_scripts() {
         "switching back should rebuild a CPU sim"
     );
 }
+
+/// Stage 3b: the editor's Stop button must interrupt slow native builders,
+/// not just script loops. `Env::set_cancel` is polled inside
+/// `create_connections` / the grid builders and unwinds the eval with a
+/// "stopped by user" error.
+#[test]
+fn cancel_check_stops_slow_builders() {
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let mut env = sim::script::Env::new(Network::new(), BackendKind::Cpu, 1).unwrap();
+    let s2 = stop.clone();
+    env.set_cancel(Rc::new(move || s2.load(Ordering::Relaxed)));
+
+    // A big enough group that create_connections can't finish between
+    // our flag flip and its next poll (checks every 64 outer rows).
+    env.eval_str("net.create_2d_grid(\"g\", 100, 100, 10.0);")
+        .unwrap();
+    stop.store(true, Ordering::Relaxed);
+    let err = env
+        .eval_str("net.create_connections(\"g\", 0.5, 50.0, 1.0);")
+        .unwrap_err();
+    assert!(
+        err.contains("stopped by user"),
+        "expected a stopped-by-user error, got: {err}"
+    );
+    // Cancelled mid-build: some synapses may exist but the loop must not
+    // have completed all 10k rows × 10k pairs.
+    let n_syn = env.net.borrow().synapses.len();
+    assert!(
+        n_syn < 100 * 100 * 99,
+        "cancel should stop before all pairs are tried (got {n_syn})"
+    );
+}

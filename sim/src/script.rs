@@ -28,6 +28,10 @@ pub type PrintFn = Rc<dyn Fn(&str)>;
 /// Return `false` to abort the rest of a chunked run (pause pressed).
 pub type ProgressFn = Rc<RefCell<dyn FnMut(&mut Sim) -> bool>>;
 
+/// Polled inside slow native builders (editor's Stop button); `true` =
+/// abort now. Defaults to never.
+pub type CancelFn = Rc<dyn Fn() -> bool>;
+
 /// Scripting environment: engine + shared handles.
 pub struct Env {
     pub engine: Engine,
@@ -44,6 +48,10 @@ pub struct Env {
     pub progress_chunk: Rc<std::cell::Cell<usize>>,
     /// Live backend choice; write via `set_backend`.
     pub backend: BackendCell,
+    /// Stop check for slow builders; editor plugs its abort flag in via
+    /// `set_cancel`. Wrapped in `RefCell` so it can be swapped after the
+    /// API closures captured it.
+    pub cancel: Rc<RefCell<CancelFn>>,
 }
 
 impl Env {
@@ -70,6 +78,7 @@ impl Env {
         let progress: Rc<RefCell<Option<ProgressFn>>> = Rc::new(RefCell::new(None));
         let progress_chunk = Rc::new(std::cell::Cell::new(200usize));
         let backend: BackendCell = Rc::new(std::cell::Cell::new(backend));
+        let cancel: Rc<RefCell<CancelFn>> = Rc::new(RefCell::new(Rc::new(|| false)));
         register_api(
             &mut engine,
             net.clone(),
@@ -80,6 +89,7 @@ impl Env {
             net_version.clone(),
             progress.clone(),
             progress_chunk.clone(),
+            cancel.clone(),
         );
         Env {
             engine,
@@ -92,6 +102,7 @@ impl Env {
             net_version,
             progress,
             progress_chunk,
+            cancel,
         }
     }
 
@@ -99,6 +110,11 @@ impl Env {
     pub fn set_progress(&mut self, chunk_steps: usize, cb: ProgressFn) {
         self.progress_chunk.set(chunk_steps);
         *self.progress.borrow_mut() = Some(cb);
+    }
+
+    /// Plug in a stop check polled by the slow native builders.
+    pub fn set_cancel(&self, f: CancelFn) {
+        *self.cancel.borrow_mut() = f;
     }
 
     /// Switch the backend scripts build sims on (invalidates any built sim).
@@ -147,7 +163,15 @@ impl Env {
     pub fn eval_str(&mut self, code: &str) -> Result<Dynamic, String> {
         self.engine
             .eval_with_scope::<Dynamic>(&mut self.scope(), code)
-            .map_err(|e| e.to_string())
+            .map_err(|e| match *e {
+                // A user abort shows up as rhai's generic "Script
+                // terminated" — say what actually happened.
+                rhai::EvalAltResult::ErrorTerminated(_, pos) => match pos.line() {
+                    Some(l) => format!("stopped by user at line {l}"),
+                    None => "stopped by user".into(),
+                },
+                _ => e.to_string(),
+            })
     }
 
     /// Evaluate a script file's contents.
@@ -291,6 +315,7 @@ pub fn register_api(
     net_version: Rc<std::cell::Cell<u64>>,
     progress: Rc<RefCell<Option<ProgressFn>>>,
     progress_chunk: Rc<std::cell::Cell<usize>>,
+    cancel: Rc<RefCell<CancelFn>>,
 ) {
     engine
         .register_type_with_name::<NetHandle>("Net")
@@ -350,24 +375,35 @@ pub fn register_api(
         );
     }
     {
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, c) = (sim.clone(), net_version.clone(), cancel.clone());
         engine.register_fn(
             "create_2d_grid",
-            move |n: &mut NetHandle, g: &str, w: rhai::INT, h: rhai::INT, d: Dynamic| {
+            move |n: &mut NetHandle,
+                  g: &str,
+                  w: rhai::INT,
+                  h: rhai::INT,
+                  d: Dynamic|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
                 invalidate(&s, &v);
-                builders::create_2d_grid(
+                let cancelled = builders::create_2d_grid_checked(
                     &mut n.borrow_mut(),
                     g,
                     w as usize,
                     h as usize,
                     d_f64(&d) as f32,
                     [0.0; 3],
+                    &|| (c.borrow())(),
                 );
+                if cancelled {
+                    Err(s_err("stopped by user"))
+                } else {
+                    Ok(())
+                }
             },
         );
     }
     {
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, c) = (sim.clone(), net_version.clone(), cancel.clone());
         engine.register_fn(
             "create_3d_grid",
             move |n: &mut NetHandle,
@@ -375,9 +411,10 @@ pub fn register_api(
                   w: rhai::INT,
                   h: rhai::INT,
                   dep: rhai::INT,
-                  d: Dynamic| {
+                  d: Dynamic|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
                 invalidate(&s, &v);
-                builders::create_3d_grid(
+                let cancelled = builders::create_3d_grid_checked(
                     &mut n.borrow_mut(),
                     g,
                     w as usize,
@@ -385,24 +422,46 @@ pub fn register_api(
                     dep as usize,
                     d_f64(&d) as f32,
                     [0.0; 3],
+                    &|| (c.borrow())(),
                 );
+                if cancelled {
+                    Err(s_err("stopped by user"))
+                } else {
+                    Ok(())
+                }
             },
         );
     }
     {
-        let (r, s, v) = (rng.clone(), sim.clone(), net_version.clone());
+        let (r, s, v, c) = (
+            rng.clone(),
+            sim.clone(),
+            net_version.clone(),
+            cancel.clone(),
+        );
         engine.register_fn(
             "create_connections",
-            move |n: &mut NetHandle, g: &str, scaling: Dynamic, lambda: Dynamic, w: Dynamic| {
+            move |n: &mut NetHandle,
+                  g: &str,
+                  scaling: Dynamic,
+                  lambda: Dynamic,
+                  w: Dynamic|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
                 invalidate(&s, &v);
-                builders::create_connections(
+                let cancelled = builders::create_connections_checked(
                     &mut n.borrow_mut(),
                     g,
                     d_f64(&scaling),
                     d_f64(&lambda),
                     d_f64(&w) as f32,
                     &mut r.borrow_mut(),
+                    &|| (c.borrow())(),
                 );
+                if cancelled {
+                    Err(s_err("stopped by user"))
+                } else {
+                    Ok(())
+                }
             },
         );
     }

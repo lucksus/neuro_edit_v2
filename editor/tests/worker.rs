@@ -83,7 +83,7 @@ fn abort_stops_an_infinite_script() {
     use std::sync::atomic::Ordering;
 
     let ctl = SimCtl::start(Network::new(), BackendKind::Cpu, 1);
-    ctl.send(Cmd::Eval("let mut x = 0; while true { x += 1; }".into()));
+    ctl.send(Cmd::Eval("let x = 0; while true { x += 1; }".into()));
     // Give the eval a moment to spin up, then flip the flag exactly like
     // the pause button does via SimCtl::abort_now.
     std::thread::sleep(Duration::from_millis(100));
@@ -95,6 +95,18 @@ fn abort_stops_an_infinite_script() {
         let s = ctl.shared.read().ok()?;
         (!s.busy).then_some(())
     });
+    // The console shows the user-facing "stopped by user at line N", not
+    // rhai's generic "Script terminated".
+    {
+        let s = ctl.shared.read().unwrap();
+        assert!(
+            s.console
+                .iter()
+                .any(|l| l.contains("stopped by user at line")),
+            "expected 'stopped by user at line N' in console, got: {:?}",
+            s.console
+        );
+    }
     // The worker must still be alive: a follow-up eval answers.
     ctl.send(Cmd::Eval("sim.time()".into()));
     wait_for(Duration::from_secs(10), || {

@@ -182,6 +182,13 @@ fn worker(
         env.set_progress(200, cb);
     }
 
+    // Stop also lands inside slow native builders (create_connections,
+    // grid builders) — they poll this every few thousand rows.
+    {
+        let ab = abort.clone();
+        env.set_cancel(std::rc::Rc::new(move || ab.load(Ordering::Relaxed)));
+    }
+
     // Rhai op-level abort: the chunked `sim.run` hook only fires between
     // chunks, so a pure-script loop (`while true {}`) would never see the
     // abort flag. on_progress runs inside the eval loop — a `Some` return

@@ -16,9 +16,29 @@ pub fn create_2d_grid(
     distance: f32,
     center: [f32; 3],
 ) {
+    create_2d_grid_checked(net, group, width, height, distance, center, &|| false);
+}
+
+/// `create_2d_grid` that polls `cancel()` every few thousand neurons and
+/// stops early (returning `true` = cancelled) when it fires — the editor's
+/// Stop button works even inside a huge grid build. A cancelled build
+/// leaves the group's partial members and NO grid metadata.
+pub fn create_2d_grid_checked(
+    net: &mut Network,
+    group: &str,
+    width: usize,
+    height: usize,
+    distance: f32,
+    center: [f32; 3],
+    cancel: &dyn Fn() -> bool,
+) -> bool {
     let gi = net.add_group(group);
     let mut members = Vec::with_capacity(width * height);
     for x in 0..width {
+        if x % 64 == 0 && cancel() {
+            net.groups[gi].members.extend(members);
+            return true;
+        }
         for y in 0..height {
             let pos = [
                 center[0],
@@ -44,6 +64,7 @@ pub fn create_2d_grid(
         axes: [2, 1, 0],
     };
     g.grid = grid.matches(&net.neurons, &g.members).then_some(grid);
+    false
 }
 
 /// 3D extension: w×h×d grid centred on `center`.
@@ -56,10 +77,32 @@ pub fn create_3d_grid(
     distance: f32,
     center: [f32; 3],
 ) {
+    create_3d_grid_checked(net, group, width, height, depth, distance, center, &|| {
+        false
+    });
+}
+
+/// `create_3d_grid` with the same early-out cancel check as
+/// `create_2d_grid_checked` (true = cancelled, partial members, no
+/// grid metadata).
+pub fn create_3d_grid_checked(
+    net: &mut Network,
+    group: &str,
+    width: usize,
+    height: usize,
+    depth: usize,
+    distance: f32,
+    center: [f32; 3],
+    cancel: &dyn Fn() -> bool,
+) -> bool {
     let gi = net.add_group(group);
     let mut members = Vec::with_capacity(width * height * depth);
     for z in 0..depth {
         for x in 0..width {
+            if (z * width + x) % 64 == 0 && cancel() {
+                net.groups[gi].members.extend(members);
+                return true;
+            }
             for y in 0..height {
                 let pos = [
                     center[0] + (x as f32 - width as f32 / 2.0) * distance,
@@ -84,6 +127,7 @@ pub fn create_3d_grid(
         axes: [0, 1, 2],
     };
     g.grid = grid.matches(&net.neurons, &g.members).then_some(grid);
+    false
 }
 
 /// `Group::create_connections(connection_scaling, lambda)` —
@@ -97,11 +141,29 @@ pub fn create_connections(
     weight: f32,
     rng: &mut Rng,
 ) {
+    create_connections_checked(net, group, scaling, lambda, weight, rng, &|| false);
+}
+
+/// `create_connections` that polls `cancel()` every few thousand rows of
+/// the O(m²) member pair loop and stops early when it fires (true =
+/// cancelled; synapses made so far are kept).
+pub fn create_connections_checked(
+    net: &mut Network,
+    group: &str,
+    scaling: f64,
+    lambda: f64,
+    weight: f32,
+    rng: &mut Rng,
+    cancel: &dyn Fn() -> bool,
+) -> bool {
     let members = match net.group(group) {
         Some(g) => g.members.clone(),
-        None => return,
+        None => return false,
     };
-    for &n1 in &members {
+    for (i, &n1) in members.iter().enumerate() {
+        if i % 64 == 0 && cancel() {
+            return true;
+        }
         for &n2 in &members {
             if n1 == n2 {
                 continue;
@@ -115,6 +177,7 @@ pub fn create_connections(
             }
         }
     }
+    false
 }
 
 /// `Group::set_synapse_weights(mean, var)` — gaussian weights for all synapses
