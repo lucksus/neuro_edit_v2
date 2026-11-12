@@ -10,6 +10,7 @@ cuda = ["dep:cudarc"]
 
 [dependencies]
 net-format = { path = "../net-format" }
+proto = { path = "../proto" }
 rhai = "1"
 serde = { version = "1", features = ["derive"] }
 cudarc = { version = "0.19", features = ["nvrtc", "cuda-12090"], optional = true }

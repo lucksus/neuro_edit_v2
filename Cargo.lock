@@ -2963,6 +2963,7 @@ dependencies = [
  "clap",
  "cudarc",
  "net-format",
+ "proto",
  "rhai",
  "serde",
 ]

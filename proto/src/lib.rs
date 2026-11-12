@@ -158,6 +158,8 @@ pub struct GeoDelta {
     pub syn_added: Vec<SynRow>,
     /// (src, tgt) pairs removed.
     pub syn_removed: Vec<(u32, u32)>,
+    /// (synapse index, new delay_steps) — moves recompute delays.
+    pub syn_delays: Vec<(u32, u16)>,
     /// Per-source display-edge lists that changed: (src, edges).
     pub disp_changed: Vec<(u32, Vec<(u32, u16)>)>,
     /// Groups whose content changed: (group idx, name, members).
@@ -263,14 +265,20 @@ pub enum NetEdit {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClientMsg {
     /// First frame on a connection.
-    Hello { proto: u32 },
+    Hello {
+        proto: u32,
+    },
     /// Re-request full state (Geo + Status + GridTraces) — used on
     /// (re)connect and by later subscribers on a shared run.
     Subscribe,
     /// Run a Rhai script on the worker.
-    Eval { code: String },
+    Eval {
+        code: String,
+    },
     /// Replace the whole network from a .ne2 path resolved server-side.
-    LoadNet { path: String },
+    LoadNet {
+        path: String,
+    },
     /// Replace with an empty network.
     NewNet,
     /// Continuous run at `speed × realtime`.
@@ -284,16 +292,33 @@ pub enum ClientMsg {
     /// Neuron ids to record v(t) for (plots).
     Watch(Vec<u32>),
     /// Apply an edit against `base` — refused when `base` is stale.
-    Edit { base: u64, edit: NetEdit },
+    Edit {
+        base: u64,
+        edit: NetEdit,
+    },
     /// Serialize the subnet on these ids to JSON; the server answers with
     /// `ServerMsg::Clipboard`.
-    CopySubnet { ids: Vec<u32> },
+    CopySubnet {
+        ids: Vec<u32>,
+    },
     SetBackend(Backend),
     SetDtMs(f32),
-    SetNoise { hz: f32, kick: f32 },
-    SetInputConst { name: String, value: f32 },
-    PlayInput { name: String, series: Vec<f32> },
-    SetExternal { neuron: u32, amps: f32 },
+    SetNoise {
+        hz: f32,
+        kick: f32,
+    },
+    SetInputConst {
+        name: String,
+        value: f32,
+    },
+    PlayInput {
+        name: String,
+        series: Vec<f32>,
+    },
+    SetExternal {
+        neuron: u32,
+        amps: f32,
+    },
     /// Polite disconnect.
     Bye,
 }

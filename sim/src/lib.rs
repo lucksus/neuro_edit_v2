@@ -8,6 +8,7 @@ pub mod bench;
 pub mod cpu;
 pub mod readout;
 pub mod script;
+pub mod serve;
 pub mod state;
 pub mod stim;
 

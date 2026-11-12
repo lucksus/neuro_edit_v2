@@ -56,6 +56,10 @@ pub struct Env {
     /// `set_cancel`. Wrapped in `RefCell` so it can be swapped after the
     /// API closures captured it.
     pub cancel: Rc<RefCell<CancelFn>>,
+    /// Sandbox root for every file path a script touches (`net.save`,
+    /// `net.load`, `samples_*`, `write_to_file`, `read_to_vec`). Set by
+    /// the server; `None` = local mode, paths used verbatim.
+    pub data_dir: Rc<RefCell<Option<std::path::PathBuf>>>,
 }
 
 impl Env {
@@ -84,6 +88,7 @@ impl Env {
         let progress_chunk = Rc::new(std::cell::Cell::new(200usize));
         let backend: BackendCell = Rc::new(std::cell::Cell::new(backend));
         let cancel: Rc<RefCell<CancelFn>> = Rc::new(RefCell::new(Rc::new(|| false)));
+        let data_dir: Rc<RefCell<Option<std::path::PathBuf>>> = Rc::new(RefCell::new(None));
         register_api(
             &mut engine,
             net.clone(),
@@ -96,6 +101,7 @@ impl Env {
             progress.clone(),
             progress_chunk.clone(),
             cancel.clone(),
+            data_dir.clone(),
         );
         Env {
             engine,
@@ -110,7 +116,14 @@ impl Env {
             progress,
             progress_chunk,
             cancel,
+            data_dir,
         }
+    }
+
+    /// Resolve a user-supplied path inside `data_dir` when set; `..`
+    /// components and absolute paths are refused. `None` = verbatim.
+    pub fn resolve_path(&self, p: &str) -> Result<String, String> {
+        resolve_in(&self.data_dir.borrow(), p)
     }
 
     /// Editor mode: `cb` runs between run chunks so the UI can stream state.
@@ -320,6 +333,33 @@ fn run_chunked(
     }
 }
 
+/// Shared resolver: a path relative to `dir`, refusing `..` and
+/// absolute paths. `None` = local mode, verbatim.
+fn resolve_in(dir: &Option<std::path::PathBuf>, p: &str) -> Result<String, String> {
+    match dir {
+        None => Ok(p.to_string()),
+        Some(dir) => {
+            let rel = std::path::Path::new(p);
+            if rel.is_absolute()
+                || rel
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(format!("path {p:?} escapes --data-dir"));
+            }
+            Ok(dir.join(rel).to_string_lossy().into_owned())
+        }
+    }
+}
+
+/// Script-facing resolver — escape attempts are script errors, not silent.
+fn rdir(
+    dd: &Rc<RefCell<Option<std::path::PathBuf>>>,
+    p: &str,
+) -> Result<String, Box<rhai::EvalAltResult>> {
+    resolve_in(&dd.borrow(), p).map_err(s_err)
+}
+
 /// Register the whole API on an engine, capturing the shared handles.
 #[allow(clippy::too_many_arguments)]
 pub fn register_api(
@@ -334,6 +374,7 @@ pub fn register_api(
     progress: Rc<RefCell<Option<ProgressFn>>>,
     progress_chunk: Rc<std::cell::Cell<usize>>,
     cancel: Rc<RefCell<CancelFn>>,
+    data_dir: Rc<RefCell<Option<std::path::PathBuf>>>,
 ) {
     engine
         .register_type_with_name::<NetHandle>("Net")
@@ -754,18 +795,31 @@ pub fn register_api(
             n.borrow_mut().scripts.retain(|(nm, _)| nm != name);
         });
     }
-    engine.register_fn("save", |n: &mut NetHandle, path: &str| {
-        if let Err(e) = net_format::io::save(&n.borrow(), path) {
-            eprintln!("save {path}: {e}");
-        }
-    });
     {
-        let (s, v, g) = (sim.clone(), net_version.clone(), net_gen.clone());
+        let dd = data_dir.clone();
+        engine.register_fn(
+            "save",
+            move |n: &mut NetHandle, path: &str| -> Result<(), Box<rhai::EvalAltResult>> {
+                let p = rdir(&dd, path)?;
+                net_format::io::save(&n.borrow(), &p)
+                    .map_err(|e| s_err(format!("save {path}: {e}")))?;
+                Ok(())
+            },
+        );
+    }
+    {
+        let (s, v, g, dd) = (
+            sim.clone(),
+            net_version.clone(),
+            net_gen.clone(),
+            data_dir.clone(),
+        );
         engine.register_fn(
             "load",
             move |n: &mut NetHandle, path: &str| -> Result<(), Box<rhai::EvalAltResult>> {
+                let p = rdir(&dd, path)?;
                 let loaded =
-                    net_format::io::load(path).map_err(|e| s_err(format!("load {path}: {e}")))?;
+                    net_format::io::load(&p).map_err(|e| s_err(format!("load {path}: {e}")))?;
                 *n.borrow_mut() = loaded;
                 g.set(g.get() + 1);
                 invalidate(&s, &v);
@@ -773,14 +827,18 @@ pub fn register_api(
             },
         );
     }
-    engine.register_fn(
-        "net_load",
-        move |path: &str| -> Result<NetHandle, Box<rhai::EvalAltResult>> {
-            Ok(Rc::new(RefCell::new(
-                net_format::io::load(path).map_err(|e| s_err(format!("load {path}: {e}")))?,
-            )))
-        },
-    );
+    {
+        let dd = data_dir.clone();
+        engine.register_fn(
+            "net_load",
+            move |path: &str| -> Result<NetHandle, Box<rhai::EvalAltResult>> {
+                let p = rdir(&dd, path)?;
+                Ok(Rc::new(RefCell::new(
+                    net_format::io::load(&p).map_err(|e| s_err(format!("load {path}: {e}")))?,
+                )))
+            },
+        );
+    }
 
     // ---- sim methods ----
     {
@@ -1171,34 +1229,40 @@ pub fn register_api(
         );
     }
     {
-        let v = net_version.clone();
+        let (v, dd) = (net_version.clone(), data_dir.clone());
         engine.register_fn(
             "samples_save",
             move |n: &mut NetHandle, name: &str, path: &str| {
                 bump(&v);
                 let b = n.borrow();
                 if let Some(s) = b.samples(name) {
-                    if let Err(e) = net_format::io::save_samples(s, path) {
-                        eprintln!("samples_save {path}: {e}");
+                    match rdir(&dd, path) {
+                        Ok(p) => {
+                            if let Err(e) = net_format::io::save_samples(s, &p) {
+                                eprintln!("samples_save {path}: {e}");
+                            }
+                        }
+                        Err(e) => eprintln!("samples_save {path}: {e}"),
                     }
                 }
             },
         );
     }
     {
-        let v = net_version.clone();
+        let (v, dd) = (net_version.clone(), data_dir.clone());
         engine.register_fn(
             "samples_load",
-            move |n: &mut NetHandle, name: &str, path: &str| match net_format::io::load_samples(
-                path, name,
-            ) {
-                Ok(s) => {
-                    bump(&v);
-                    let mut b = n.borrow_mut();
-                    let slot = b.samples_mut(name);
-                    slot.times = s.times;
-                    slot.values = s.values;
-                }
+            move |n: &mut NetHandle, name: &str, path: &str| match rdir(&dd, path) {
+                Ok(p) => match net_format::io::load_samples(&p, name) {
+                    Ok(s) => {
+                        bump(&v);
+                        let mut b = n.borrow_mut();
+                        let slot = b.samples_mut(name);
+                        slot.times = s.times;
+                        slot.values = s.values;
+                    }
+                    Err(e) => eprintln!("samples_load {path}: {e}"),
+                },
                 Err(e) => eprintln!("samples_load {path}: {e}"),
             },
         );
@@ -1216,25 +1280,43 @@ pub fn register_api(
             })
             .unwrap_or_default()
     });
-    engine.register_fn("write_to_file", |path: &str, values: rhai::Array| {
-        let mut out = String::new();
-        for v in values {
-            out.push_str(&format!("{}\n", d_f64(&v)));
-        }
-        if let Err(e) = std::fs::write(path, out) {
-            eprintln!("write_to_file {path}: {e}");
-        }
-    });
-    engine.register_fn("read_to_vec", |path: &str| -> rhai::Array {
-        std::fs::read_to_string(path)
-            .map(|s| {
-                s.lines()
-                    .filter_map(|l| l.trim().parse::<f64>().ok())
-                    .map(dyn_f64)
-                    .collect()
-            })
-            .unwrap_or_default()
-    });
+    {
+        let dd = data_dir.clone();
+        engine.register_fn("write_to_file", move |path: &str, values: rhai::Array| {
+            let mut out = String::new();
+            for v in values {
+                out.push_str(&format!("{}\n", d_f64(&v)));
+            }
+            match rdir(&dd, path) {
+                Ok(p) => {
+                    if let Err(e) = std::fs::write(&p, out) {
+                        eprintln!("write_to_file {path}: {e}");
+                    }
+                }
+                Err(e) => eprintln!("write_to_file {path}: {e}"),
+            }
+        });
+    }
+    {
+        let dd = data_dir.clone();
+        engine.register_fn("read_to_vec", move |path: &str| -> rhai::Array {
+            let p = match rdir(&dd, path) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("read_to_vec {path}: {e}");
+                    return Vec::new();
+                }
+            };
+            std::fs::read_to_string(p)
+                .map(|s| {
+                    s.lines()
+                        .filter_map(|l| l.trim().parse::<f64>().ok())
+                        .map(dyn_f64)
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+    }
 }
 
 /// Seeded multi-source bit-stream generator for the hidden-signal example.
