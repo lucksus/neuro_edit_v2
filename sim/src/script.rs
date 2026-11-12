@@ -491,6 +491,7 @@ pub fn register_api(
                 let mut g = n.borrow_mut();
                 g.neuron_mut(id).pos = [d_f64(&x) as f32, d_f64(&y) as f32, d_f64(&z) as f32];
                 g.refresh_delays_of(id);
+                g.invalidate_grids();
                 Ok(())
             },
         );
@@ -555,6 +556,7 @@ pub fn register_api(
             let mut b = n.borrow_mut();
             let gi = b.add_group(g);
             b.groups[gi].members.extend(ids);
+            b.invalidate_grids();
             Ok(())
         },
     );

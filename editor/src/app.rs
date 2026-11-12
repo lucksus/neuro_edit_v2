@@ -340,6 +340,7 @@ impl EditorApp {
             for (id, _) in &moves {
                 net.refresh_delays_of(*id);
             }
+            net.invalidate_grids();
         });
     }
 
@@ -863,6 +864,7 @@ impl EditorApp {
                         self.edit_net(move |n| {
                             n.neuron_mut(id).pos = p;
                             n.refresh_delays_of(id);
+                            n.invalidate_grids();
                         });
                     }
                 });
@@ -1474,6 +1476,7 @@ impl EditorApp {
                                         net.groups[gi].members.push(*id);
                                     }
                                 }
+                                net.invalidate_grids();
                             });
                             keep = false;
                         }

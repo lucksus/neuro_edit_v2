@@ -15,7 +15,8 @@ pub mod rng;
 mod network;
 
 pub use network::{
-    Group, Input, Meta, Network, Neuron, NeuronKind, NeuronModel, Readout, Samples, SynCsr, Synapse,
+    GridShape, Group, Input, Meta, Network, Neuron, NeuronKind, NeuronModel, Readout, Samples,
+    SynCsr, Synapse,
 };
 pub use rng::Rng;
 

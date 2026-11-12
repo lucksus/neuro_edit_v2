@@ -62,7 +62,102 @@ pub struct Synapse {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Group {
     pub name: String,
+    /// Indices into `Network::neurons`, stored in creation order.
     pub members: Vec<u32>,
+    /// Regular-lattice layout when the group was created as a grid. Purely
+    /// descriptive metadata — the editor uses it to draw the group as a
+    /// textured activity plane instead of per-neuron cubes. `serde(default)`
+    /// keeps JSON written before the field existed loadable; the bincode
+    /// path handles the same via its format version (see `io.rs`).
+    #[serde(default)]
+    pub grid: Option<GridShape>,
+}
+
+/// Regular-lattice layout of a group's members, as created by
+/// `builders::create_2d_grid` / `create_3d_grid`.
+///
+/// Convention: `members[k]` sits at lattice index `k`, decomposed as
+/// `k = (i2 * dims[0] + i0) * dims[1] + i1` — lattice dim 1 varies fastest,
+/// then dim 0, then dim 2. Each lattice dim runs along a world axis given
+/// by `axes` (for a 2D grid, `dims[2] == 1` and `axes[2]` is the plane
+/// normal). World position of lattice index `i` is
+/// `origin + spacing * (i0*unit(axes[0]) + i1*unit(axes[1]) + i2*unit(axes[2]))`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+pub struct GridShape {
+    /// Texel counts per lattice dim: `[w, h, d]`. `d == 1` is a 2D grid.
+    pub dims: [u32; 3],
+    /// World position of lattice texel (0,0,0).
+    pub origin: [f32; 3],
+    /// World distance between neighbouring texels.
+    pub spacing: f32,
+    /// World axis (0=x, 1=y, 2=z) each lattice dim runs along.
+    /// `create_2d_grid` produces `[2, 1, 0]` (w along +z, h along +y,
+    /// normal +x); `create_3d_grid` produces `[0, 1, 2]`.
+    pub axes: [u8; 3],
+}
+
+impl GridShape {
+    /// Total texel count — must equal `members.len()` for a valid grid.
+    pub fn texels(&self) -> usize {
+        self.dims[0] as usize * self.dims[1] as usize * self.dims[2] as usize
+    }
+
+    /// Lattice index of texel (i0, i1, i2) — its position in the member list.
+    pub fn member_index(&self, i: [u32; 3]) -> usize {
+        (i[2] as usize * self.dims[0] as usize + i[0] as usize) * self.dims[1] as usize
+            + i[1] as usize
+    }
+
+    /// Inverse of `member_index`.
+    pub fn lattice_of(&self, k: usize) -> [u32; 3] {
+        let (w, h) = (self.dims[0] as usize, self.dims[1] as usize);
+        let i1 = k % h;
+        let r = k / h;
+        [(r % w) as u32, i1 as u32, (r / w) as u32]
+    }
+
+    /// World position of lattice texel `i`.
+    pub fn world(&self, i: [u32; 3]) -> [f32; 3] {
+        let mut p = self.origin;
+        for k in 0..3 {
+            p[self.axes[k] as usize] += self.spacing * i[k] as f32;
+        }
+        p
+    }
+
+    /// Lattice coords of a member whose world position is `pos`
+    /// (snapped to the nearest texel, clamped to the lattice).
+    pub fn lattice_at(&self, pos: [f32; 3]) -> [u32; 3] {
+        let mut i = [0u32; 3];
+        for k in 0..3 {
+            let a = self.axes[k] as usize;
+            let v = ((pos[a] - self.origin[a]) / self.spacing).round();
+            i[k] = (v as i64).clamp(0, self.dims[k].saturating_sub(1) as i64) as u32;
+        }
+        i
+    }
+
+    /// Does this metadata still describe `members`? True when the member
+    /// list has exactly one member per texel, in texel order, each at its
+    /// lattice position (within a small tolerance for float rebuilds).
+    pub fn matches(&self, neurons: &[Neuron], members: &[u32]) -> bool {
+        if members.is_empty() || members.len() != self.texels() {
+            return false;
+        }
+        let tol = (self.spacing.abs() * 1e-3).max(1e-4);
+        for (k, &m) in members.iter().enumerate() {
+            let Some(n) = neurons.get(m as usize) else {
+                return false;
+            };
+            let w = self.world(self.lattice_of(k));
+            for a in 0..3 {
+                if (n.pos[a] - w[a]).abs() > tol {
+                    return false;
+                }
+            }
+        }
+        true
+    }
 }
 
 /// A named scalar drive onto a set of neurons — the generalization of the
@@ -287,6 +382,7 @@ impl Network {
         self.groups.push(Group {
             name: name.to_string(),
             members: Vec::new(),
+            grid: None,
         });
         self.groups.len() - 1
     }
@@ -387,6 +483,21 @@ impl Network {
                 }
             }
         }
+        self.invalidate_grids();
+    }
+
+    /// Drop grid metadata that no longer describes its group's members —
+    /// e.g. after a member was deleted, moved, added, or reordered. Called
+    /// by the mutating methods here; editor/script code that moves neurons
+    /// through `neuron_mut` must call it too.
+    pub fn invalidate_grids(&mut self) {
+        let neurons = &self.neurons;
+        for g in &mut self.groups {
+            let ok = g.grid.is_some_and(|gs| gs.matches(neurons, &g.members));
+            if g.grid.is_some() && !ok {
+                g.grid = None;
+            }
+        }
     }
 
     /// Delete a set of neurons at once.
@@ -428,9 +539,16 @@ impl Network {
                 .filter_map(|m| map.get(m).copied())
                 .collect();
             if !members.is_empty() {
+                // A grid survives a copy only when every member came along —
+                // the subnet then has the same lattice at the same coords.
+                let grid = g
+                    .grid
+                    .filter(|gs| members.len() == gs.texels())
+                    .filter(|gs| gs.matches(&sub.neurons, &members));
                 sub.groups.push(Group {
                     name: g.name.clone(),
                     members,
+                    grid,
                 });
             }
         }
@@ -474,6 +592,7 @@ impl Network {
                 .collect();
             self.groups[i].members.extend(members);
         }
+        self.invalidate_grids();
         map
     }
 
@@ -527,6 +646,109 @@ impl Network {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Texel index <-> lattice coords <-> world position round-trip, for
+    /// both builder layouts (2D in the y–z plane, 3D in xyz).
+    #[test]
+    fn grid_shape_index_math() {
+        let g2 = GridShape {
+            dims: [5, 3, 1],
+            origin: [100.0, -15.0, -25.0],
+            spacing: 10.0,
+            axes: [2, 1, 0],
+        };
+        for i0 in 0..5 {
+            for i1 in 0..3 {
+                let k = g2.member_index([i0, i1, 0]);
+                assert_eq!(g2.lattice_of(k), [i0, i1, 0]);
+                let w = g2.world([i0, i1, 0]);
+                // 2D lattice lives in the y–z plane: i0 along +z, i1 +y.
+                assert_eq!(
+                    w,
+                    [100.0, -15.0 + i1 as f32 * 10.0, -25.0 + i0 as f32 * 10.0]
+                );
+                assert_eq!(g2.lattice_at(w), [i0, i1, 0]);
+            }
+        }
+        let g3 = GridShape {
+            dims: [4, 3, 2],
+            origin: [0.0; 3],
+            spacing: 5.0,
+            axes: [0, 1, 2],
+        };
+        assert_eq!(g3.texels(), 24);
+        assert_eq!(g3.member_index([2, 1, 1]), (1 * 4 + 2) * 3 + 1);
+        assert_eq!(g3.world([2, 1, 1]), [10.0, 5.0, 5.0]);
+        for k in 0..g3.texels() {
+            assert_eq!(g3.member_index(g3.lattice_of(k)), k);
+        }
+    }
+
+    #[test]
+    fn builders_record_grid_metadata() {
+        use crate::builders;
+        let mut net = Network::new();
+        builders::create_2d_grid(&mut net, "p", 5, 3, 10.0, [100.0, 0.0, 0.0]);
+        let g = net.group("p").unwrap().grid.unwrap();
+        assert_eq!(g.dims, [5, 3, 1]);
+        assert_eq!(g.axes, [2, 1, 0]);
+        assert_eq!(net.group("p").unwrap().members.len(), 15);
+
+        builders::create_3d_grid(&mut net, "v", 4, 3, 2, 5.0, [0.0; 3]);
+        let g = net.group("v").unwrap().grid.unwrap();
+        assert_eq!(g.dims, [4, 3, 2]);
+        assert_eq!(g.axes, [0, 1, 2]);
+        // member k's world position == world(lattice_of(k)) — checked by
+        // matches(), which the builder itself ran before storing.
+        let members = &net.group("v").unwrap().members;
+        assert!(g.matches(&net.neurons, members));
+    }
+
+    /// Edits that break the lattice drop the metadata; the plain member
+    /// list and group survive.
+    #[test]
+    fn grid_drops_on_member_delete_and_move() {
+        use crate::builders;
+        let mut net = Network::new();
+        builders::create_2d_grid(&mut net, "p", 4, 4, 10.0, [0.0; 3]);
+        assert!(net.group("p").unwrap().grid.is_some());
+
+        // delete a member -> no longer one member per texel
+        let m = net.group("p").unwrap().members[5];
+        net.delete_neuron(m);
+        assert!(net.group("p").unwrap().grid.is_none());
+        assert_eq!(net.group("p").unwrap().members.len(), 15);
+
+        // move a member -> position no longer matches the lattice
+        builders::create_3d_grid(&mut net, "v", 3, 3, 3, 10.0, [500.0; 3]);
+        let m = net.group("v").unwrap().members[7];
+        net.neuron_mut(m).pos[0] += 3.0;
+        net.invalidate_grids();
+        assert!(net.group("v").unwrap().grid.is_none());
+        assert_eq!(net.group("v").unwrap().members.len(), 27);
+    }
+
+    #[test]
+    fn grid_survives_full_copy_but_not_partial_or_offset_paste() {
+        use crate::builders;
+        let mut net = Network::new();
+        builders::create_2d_grid(&mut net, "p", 3, 3, 10.0, [0.0; 3]);
+        let all: std::collections::HashSet<u32> =
+            net.group("p").unwrap().members.iter().copied().collect();
+        let sub = net.subnet(&all);
+        assert_eq!(sub.groups[0].grid, net.group("p").unwrap().grid);
+
+        // partial copy keeps the group but drops the lattice metadata
+        let part: std::collections::HashSet<u32> = all.iter().take(4).copied().collect();
+        let sub = net.subnet(&part);
+        assert!(sub.groups[0].grid.is_none());
+
+        // pasting the full grid at an offset breaks positions -> dropped
+        let sub = net.subnet(&all);
+        net.insert_subnet(&sub, [50.0, 0.0, 0.0]);
+        assert_eq!(net.groups.len(), 1); // same name merges into "p"
+        assert!(net.group("p").unwrap().grid.is_none());
+    }
 
     #[test]
     fn subnet_insert_roundtrip() {

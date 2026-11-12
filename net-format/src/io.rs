@@ -9,7 +9,42 @@ use std::path::Path;
 use crate::Network;
 
 const MAGIC: &[u8; 4] = b"NE2\0";
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
+
+/// `Group` as serialized by format v1 — before the `grid` field existed.
+#[derive(serde::Deserialize)]
+struct GroupV1 {
+    name: String,
+    members: Vec<u32>,
+}
+
+/// Decode a v1 stream field-by-field (bincode has no defaults for missing
+/// trailing struct fields), lifting each v1 `Group` into today's `Group`.
+fn load_v1(r: &mut impl Read) -> Result<Network, LoadError> {
+    fn de<T: serde::de::DeserializeOwned>(t: &str, r: &mut impl Read) -> Result<T, LoadError> {
+        bincode::deserialize_from(r).map_err(|e| LoadError::Decode(format!("{t}: {e}")))
+    }
+    let net = Network {
+        neurons: de("neurons", r)?,
+        synapses: de("synapses", r)?,
+        groups: {
+            let gs: Vec<GroupV1> = de("groups", r)?;
+            gs.into_iter()
+                .map(|g| crate::Group {
+                    name: g.name,
+                    members: g.members,
+                    grid: None,
+                })
+                .collect()
+        },
+        inputs: de("inputs", r)?,
+        samples: de("samples", r)?,
+        readouts: de("readouts", r)?,
+        scripts: de("scripts", r)?,
+        meta: de("meta", r)?,
+    };
+    Ok(net)
+}
 
 #[derive(Debug)]
 pub enum LoadError {
@@ -56,12 +91,15 @@ pub fn load(path: impl AsRef<Path>) -> Result<Network, LoadError> {
     let mut ver = [0u8; 4];
     r.read_exact(&mut ver)?;
     let version = u32::from_le_bytes(ver);
-    if version != FORMAT_VERSION {
-        return Err(LoadError::UnsupportedVersion(version));
-    }
-    let net: Network =
-        bincode::deserialize_from(&mut r).map_err(|e| LoadError::Decode(e.to_string()))?;
+    let mut net = match version {
+        1 => load_v1(&mut r)?,
+        FORMAT_VERSION => {
+            bincode::deserialize_from(&mut r).map_err(|e| LoadError::Decode(e.to_string()))?
+        }
+        other => return Err(LoadError::UnsupportedVersion(other)),
+    };
     net.validate().map_err(LoadError::Decode)?;
+    net.invalidate_grids(); // corrupt/stale metadata in a hand-edited file
     Ok(net)
 }
 
@@ -73,8 +111,10 @@ pub fn save_json(net: &Network, path: impl AsRef<Path>) -> io::Result<()> {
 
 pub fn load_json(path: impl AsRef<Path>) -> Result<Network, LoadError> {
     let s = std::fs::read_to_string(path)?;
-    let net: Network = serde_json::from_str(&s).map_err(|e| LoadError::Decode(e.to_string()))?;
+    let mut net: Network =
+        serde_json::from_str(&s).map_err(|e| LoadError::Decode(e.to_string()))?;
     net.validate().map_err(LoadError::Decode)?;
+    net.invalidate_grids();
     Ok(net)
 }
 
@@ -85,8 +125,9 @@ pub fn to_json(net: &Network) -> io::Result<String> {
 
 /// Parse a JSON string produced by `to_json`.
 pub fn from_json(s: &str) -> Result<Network, LoadError> {
-    let net: Network = serde_json::from_str(s).map_err(|e| LoadError::Decode(e.to_string()))?;
+    let mut net: Network = serde_json::from_str(s).map_err(|e| LoadError::Decode(e.to_string()))?;
     net.validate().map_err(LoadError::Decode)?;
+    net.invalidate_grids();
     Ok(net)
 }
 
@@ -196,6 +237,87 @@ mod tests {
         assert_eq!(s.value_at(5.0), 50.0);
         assert_eq!(s.value_at(15.0), 50.0);
         assert_eq!(s.value_at(25.0), 0.0);
+    }
+
+    #[test]
+    fn grid_metadata_round_trips() {
+        let mut net = Network::new();
+        builders::create_2d_grid(&mut net, "p", 4, 3, 10.0, [100.0; 3]);
+        builders::create_3d_grid(&mut net, "v", 2, 2, 2, 10.0, [-100.0; 3]);
+        let path = tempdir().join("grid.ne2");
+        save(&net, &path).unwrap();
+        let back = load(&path).unwrap();
+        assert_eq!(back.group("p").unwrap().grid, net.group("p").unwrap().grid);
+        assert_eq!(back.group("v").unwrap().grid, net.group("v").unwrap().grid);
+        std::fs::remove_file(&path).ok();
+
+        // JSON keeps it too, and a file written before the field existed
+        // (no "grid" key) still parses with grid == None.
+        let s = to_json(&net).unwrap();
+        assert_eq!(
+            from_json(&s).unwrap().group("p").unwrap().grid,
+            net.group("p").unwrap().grid
+        );
+        let mut v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        for g in v["groups"].as_array_mut().unwrap() {
+            g.as_object_mut().unwrap().remove("grid");
+        }
+        let old = from_json(&serde_json::to_string(&v).unwrap()).unwrap();
+        assert!(old.group("p").unwrap().grid.is_none());
+    }
+
+    /// A format-v1 `.ne2` (groups without the `grid` field) still loads.
+    #[test]
+    fn loads_v1_files() {
+        let mut net = Network::new();
+        builders::create_2d_grid(&mut net, "p", 3, 2, 10.0, [0.0; 3]);
+        net.connect(0, 5, 1.0);
+        net.add_input("i", vec![(0, 1.0)], [0.0; 3]);
+        net.scripts.push(("s".into(), "print(1)".into()));
+
+        // Hand-serialize the v1 layout: fields in Network order, groups as
+        // (name, members) pairs — bincode encodes a struct as field order.
+        let path = tempdir().join("v1.ne2");
+        let mut w = Vec::new();
+        w.extend_from_slice(b"NE2\0");
+        w.extend_from_slice(&1u32.to_le_bytes());
+        bincode::serialize_into(&mut w, &net.neurons).unwrap();
+        bincode::serialize_into(&mut w, &net.synapses).unwrap();
+        let g1: Vec<(String, Vec<u32>)> = net
+            .groups
+            .iter()
+            .map(|g| (g.name.clone(), g.members.clone()))
+            .collect();
+        bincode::serialize_into(&mut w, &g1).unwrap();
+        bincode::serialize_into(&mut w, &net.inputs).unwrap();
+        bincode::serialize_into(&mut w, &net.samples).unwrap();
+        bincode::serialize_into(&mut w, &net.readouts).unwrap();
+        bincode::serialize_into(&mut w, &net.scripts).unwrap();
+        bincode::serialize_into(&mut w, &net.meta).unwrap();
+        std::fs::write(&path, &w).unwrap();
+
+        let back = load(&path).unwrap();
+        assert_eq!(back.neurons.len(), net.neurons.len());
+        assert_eq!(back.synapses.len(), net.synapses.len());
+        assert_eq!(back.group("p").unwrap().members.len(), 6);
+        assert!(back.group("p").unwrap().grid.is_none());
+        assert_eq!(back.scripts.len(), 1);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A stale/wrong grid in a hand-edited file is dropped, not trusted.
+    #[test]
+    fn stale_grid_in_file_is_dropped() {
+        let mut net = Network::new();
+        builders::create_2d_grid(&mut net, "p", 3, 3, 10.0, [0.0; 3]);
+        // corrupt the shape so it no longer matches the member list
+        net.groups[0].grid.as_mut().unwrap().dims = [3, 3, 3];
+        let path = tempdir().join("stale.ne2");
+        save(&net, &path).unwrap();
+        let back = load(&path).unwrap();
+        assert!(back.group("p").unwrap().grid.is_none());
+        assert_eq!(back.group("p").unwrap().members.len(), 9);
+        std::fs::remove_file(&path).ok();
     }
 
     /// A net with one dangling reference of each kind — `validate` must

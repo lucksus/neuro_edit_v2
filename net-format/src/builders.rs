@@ -28,7 +28,22 @@ pub fn create_2d_grid(
             members.push(net.add_neuron(pos, NeuronKind::Excitatory));
         }
     }
-    net.groups[gi].members.extend(members);
+    let g = &mut net.groups[gi];
+    g.members.extend(members);
+    // Lattice: i0 (width) runs along +z, i1 (height) along +y, normal +x.
+    // Only recorded when the group is exactly this lattice — a reused
+    // same-named group with extra members is not a clean grid.
+    let grid = crate::GridShape {
+        dims: [width as u32, height as u32, 1],
+        origin: [
+            center[0],
+            center[1] - height as f32 / 2.0 * distance,
+            center[2] - width as f32 / 2.0 * distance,
+        ],
+        spacing: distance,
+        axes: [2, 1, 0],
+    };
+    g.grid = grid.matches(&net.neurons, &g.members).then_some(grid);
 }
 
 /// 3D extension: w×h×d grid centred on `center`.
@@ -55,7 +70,20 @@ pub fn create_3d_grid(
             }
         }
     }
-    net.groups[gi].members.extend(members);
+    let g = &mut net.groups[gi];
+    g.members.extend(members);
+    // Lattice: i0 (width) → +x, i1 (height) → +y, i2 (depth) → +z.
+    let grid = crate::GridShape {
+        dims: [width as u32, height as u32, depth as u32],
+        origin: [
+            center[0] - width as f32 / 2.0 * distance,
+            center[1] - height as f32 / 2.0 * distance,
+            center[2] - depth as f32 / 2.0 * distance,
+        ],
+        spacing: distance,
+        axes: [0, 1, 2],
+    };
+    g.grid = grid.matches(&net.neurons, &g.members).then_some(grid);
 }
 
 /// `Group::create_connections(connection_scaling, lambda)` —
