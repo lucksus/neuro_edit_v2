@@ -1663,3 +1663,146 @@ Test: `scene_key_changes_with_app_state` builds a real `EditorApp`
 (`SimCtl::offline`) and flips each input — show_grid, hover,
 preview_delta, plane_key, geo_version, camera orbit — asserting the
 key moves, plus buffer-side inputs (sel/size/show_syn/planes_on).
+
+## Stage 16 — hosted-server security and crash fixes (fable-review-1112)
+
+Source: `review/fable-review-1112.md` §2 (S1–S22) and §3.1 (Q1–Q3, Q10).
+Every item was re-confirmed against the code before fixing; "skipped"
+below means the finding was wrong, already done, or deferred with a
+reason. No changes below `f6581b6`.
+
+### P1 — done
+
+- **S1** `/ws` cookie upgrades now require `origin_ok`; only Bearer
+  clients may omit `Origin`. `session_full` reports the auth source.
+  Test: `ws_cookie_requires_our_origin` (foreign Origin→403, missing
+  Origin→403, own Origin→101, Bearer+none→101).
+- **S2** stop/freeze: `ServeOpts`/`Server`/`UserRun` carry a separate
+  `shutdown` flag that nothing clears; once set, the worker drops every
+  command except `Bye`. `drop_user`/`reap` remove the run from the map
+  in a separate statement before `stop()` (lock released), and the join
+  is bounded (`STOP_JOIN_TIMEOUT`, detach instead of block). Test:
+  `drop_user_during_eval_is_fast` (two queued evals + stop + `GET /`
+  answers).
+- **S3** `ClientMsg::Abort` sets the run's abort atomic before the
+  queued copy — a `while true {}` eval dies on the flag (rhai
+  `on_progress` hook also checks `shutdown`). Test:
+  `abort_over_socket_ends_loop_eval` (worker answers "alive" after).
+- **S4** `admin add` on an existing email replaces password+name,
+  forces `active`/`is_admin`, deletes that user's sessions, and prints
+  "replaced". deploy.md now says to create the first admin before
+  exposing the service. Test: `admin_add_replaces_existing_account`.
+- **S5** memory ceilings: `SimLimits {max_neurons,max_synapses,
+  max_ring_bytes}` checked in `ensure_sim` before any sim build
+  (neurons, synapses, depth×neurons×4 all gated); flags
+  `--max-neurons/--max-syns/--max-ring-mb`; rhai engine gets
+  `set_max_array_size(10M)/set_max_string_size(64MiB)/set_max_map_size(1M)`;
+  `MemoryMax=12G` added to the systemd unit. Tests:
+  `sim_limits_refuse_oversized_build`, `grid_dims_validated`.
+
+### P2 — done
+
+- **S6** jobs: `--max-jobs` live-job cap per user (default 2),
+  `--job-hours` wall-clock deadline (default 2h) checked in the rhai
+  progress hook, `UserRun::stop` cancels that user's jobs via
+  `JobRegistry::cancel_all`, progress rows capped at 2000, finished
+  jobs pruned at 64 kept, `script.rhai`/`result.json`/`metrics.json`
+  written through `checked_write`. Tests: `job_cap_and_cancel_all`,
+  `job_wall_clock_limit`.
+- **S7** quota on every write path: `checked_write`/`quota_fits`
+  centralised; `Mkdir` counts entries. Test:
+  `quota_covers_all_write_paths` (save/samples_save/write_to_file/
+  dataset_gen/Mkdir/job output).
+- **S8** `proto::decode` inflates through `.take(DECODE_LIMIT)` (256
+  MiB) and deserializes with `bincode::options().with_limit(..)` —
+  fixint+allow_trailing preserved. WS `max_message_size`/`max_frame_size`
+  =16 MiB via `server_ws_config()`. Test:
+  `decode_refuses_oversized_payloads`.
+- **S9** login limits: `client_ip` takes the LAST `X-Forwarded-For`
+  entry (attacker can't pick the bucket behind a trusted proxy);
+  failure keys are ip + (ip,email) pair at 10/10min + email ceiling
+  30/10min — a distributed attacker can't lock one account, a local
+  brute force still dies. `limited()` no longer inserts on lookup;
+  stale buckets sweep on touch. Tests: `trust_proxy_gates_xff`
+  (updated to the pair semantics), `rate_limiter_lookup_does_not_insert`.
+- **S10** signup: per-IP `signup:` bucket at 5, `pending_count()>=1000`
+  refuses with 503, name≤80 chars, note≤500 chars. Test:
+  `signup_rate_limited`. (Admin-table paging skipped — the pending cap
+  bounds the flood; table renders all rows but they can't pile up.)
+- **S11** live-socket invalidation: `ValidCheck` closure in
+  `ws_client_loop` re-checks `accounts.session` + `status=='active'`
+  per inbound frame (throttled 500ms); reaper also drops runs whose
+  user left `active`. Tests: `cli_disable_drops_live_ws` (second
+  `Accounts` handle = the CLI process),
+  `reaper_drops_disabled_user`.
+- **S12** `get_or_start` replaces a run whose worker `is_finished`;
+  the whole dispatch is inside `catch_unwind` and reports the panic to
+  the client console. Test: `dead_run_is_replaced`.
+- **S13** per-client outbound `sync_channel(CLIENT_QUEUE=512)` —
+  `fanout`/`send_to` `try_send`, drop the client when full, writer
+  sends WS Close on exit; inbound `sync_channel(CMD_QUEUE=256)` — a
+  flooding socket is closed on `Full`. Test:
+  `fanout_drops_stalled_client`.
+- **S20** `verify_login` reads the hash under the db lock, releases,
+  then runs argon2 (no session lookups stall behind logins). Covered
+  by `login_roundtrip` (no dedicated timing test).
+
+### P3 — done
+
+- **S14** HTML responses carry `X-Frame-Options: DENY`,
+  `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+  `Cache-Control: no-store`, `Content-Security-Policy: default-src
+  'self'; style-src 'self' 'unsafe-inline'`; non-HTML gets `nosniff`.
+  Verified through existing `admin_gated_and_post_checks`/`signup_*`
+  response paths.
+- **S15** `url_decode_form` decodes on bytes — `%` before a
+  multibyte char can't panic. Test: `url_decode_never_panics`.
+- **S16** HTTP sockets get 120s read/write timeouts;
+  `--max-connections` (default 512) answers 503+`Retry-After: 5`
+  instead of spawning a thread. Test: `conn_cap_answers_503`.
+- **S17** login POST requires `origin_ok`; Bearer `POST /logout` now
+  deletes the bearer session (was cookie-only); accounts mode refuses
+  a non-loopback bind without `--public-url`; `delete_expired_sessions`
+  sweeps on login. Password change: skipped — `admin add` on an
+  existing email is now a real reset path (S4), and a self-service
+  flow needs mail verification we don't have.
+- **S18** admin POSTs: unknown id → `did=no+such+user`; self-disable/
+  delete/revoke refused; last-active-admin guarded via
+  `has_other_admin`; `mb*(1<<20)` saturates; live quota pushed through
+  `ClientMsg::SetQuota` to the run. Test: `admin_post_guards`.
+- **S19** `server admin list` prints `default` for `quota_bytes==0`
+  (page-side part was already done at stage 12).
+- **S21** `DeleteFile`/`RenameFile` on `""` (the sandbox root) refuse.
+  Test: `sandbox_root_cannot_be_deleted_or_renamed`.
+- **S22** `UploadChunk` without `UploadStart` refused; open uploads
+  track declared vs received bytes — over-declared data is an error
+  and partial files are removed; `Hello` with wrong proto version
+  emits an Error notice; >8 bad frames closes the conn. Test:
+  `upload_chunks_need_start_and_count_bytes`. (`Watch`/`PlayInput`/
+  `WriteFile`/`ReadFile` sizes now bounded by the 16 MiB ws cap +
+  quota — no separate per-call limits added.)
+
+### §3.1 crash fixes — done
+
+- **Q1** echo/`Console` truncation walks back to a char boundary.
+  Test: `eval_echo_truncates_on_char_boundary` (>400B echo with an
+  umlaut at the cut — panicked before).
+- **Q2** `Network::validate` rejects grids with axes out of range /
+  duplicated dims / zero dims; `InsertSubnetJson` errors instead of
+  panicking. Test: `paste_grid_bad_axes_refused_not_panic`.
+- **Q3** `check_dt` shared by `ClientMsg::SetDtMs` and `sim.set_dt` —
+  0, negative, NaN, or <0.01ms refuse. Test:
+  `set_dt_validated_both_paths`.
+- **Q10** the whole per-command dispatch in `serve::run` is inside
+  `catch_unwind`; a panic reports `Error(panicked: …)` to the client
+  and the worker survives. Verified structurally — every historically
+  panicking input now has a dedicated test (Q1/Q2, S5 limits).
+
+### Verification
+
+- `cargo fmt --all -- --check` clean
+- `cargo test --workspace --release` — all green (33 suites)
+- `cargo test --workspace --release --features sim/cuda` — all green
+- `cargo check --target wasm32-unknown-unknown -p editor
+  --no-default-features --features web` — clean
+- `node editor/web/webgpu-help.test.mjs` — 12/12
