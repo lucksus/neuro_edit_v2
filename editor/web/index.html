@@ -4,18 +4,30 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>neuro_edit v2</title>
+<link rel="icon" href="favicon.ico" sizes="48x48">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="site.webmanifest">
+<meta name="theme-color" content="#101014">
 <style>
   html, body { margin: 0; height: 100%; background: #101014; overflow: hidden; }
   #ne_canvas { width: 100%; height: 100%; display: block; }
   #loading {
     position: fixed; inset: 0; display: grid; place-items: center;
-    color: #888; font: 14px/1.5 monospace;
+    align-content: center; gap: 18px;
+    color: #8b97a8; font: 13px/1.5 monospace;
   }
+  #loading img { width: min(360px, 60vw); animation: ne-pulse 1.6s ease-in-out infinite; }
+  @keyframes ne-pulse { 50% { opacity: .55; } }
+  @media (prefers-reduced-motion: reduce) { #loading img { animation: none; } }
 </style>
 </head>
 <body>
 <canvas id="ne_canvas"></canvas>
-<div id="loading">checking WebGPU…</div>
+<div id="loading">
+  <img src="loading-logo.svg" alt="neuro_edit">
+  <span id="loading-status">checking WebGPU…</span>
+</div>
 <script type="module">
   // Check WebGPU BEFORE the wasm bundle loads: without it the editor
   // can't start anyway, and a clear how-to page beats a dead canvas.

@@ -285,8 +285,16 @@ export function renderHelp(doc, env, gpuState, detail) {
     doc.body.appendChild(box);
 }
 
+/// Write the loading line into #loading-status, so the logo next to it
+/// in #loading stays. Falls back to #loading for an older index.html.
+export function setLoadingStatus(doc, text) {
+    const el = doc.getElementById('loading-status') ?? doc.getElementById('loading');
+    if (el) {
+        el.textContent = text;
+    }
+}
+
 export async function boot(loadEditor) {
-    const loading = document.getElementById('loading');
     const env = detectBrowser(
         navigator.userAgent, await isBraveBrowser(), navigator.platform);
     // exposed so the wasm fallback path can render the same page when a
@@ -300,10 +308,8 @@ export async function boot(loadEditor) {
         renderHelp(document, env, r.state, r.detail);
         return;
     }
-    if (loading) {
-        loading.textContent =
-            `loading neuro_edit v2… WebGPU adapter${r.info ? `: ${r.info}` : ''}`;
-    }
+    setLoadingStatus(document,
+        `loading neuro_edit v2… WebGPU adapter${r.info ? `: ${r.info}` : ''}`);
     try {
         await loadEditor();
     } finally {

@@ -3,7 +3,8 @@
 // {browser, os, steps} out.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { detectBrowser, stepsFor } from './webgpu-help.mjs';
+import { readFileSync } from 'node:fs';
+import { detectBrowser, setLoadingStatus, stepsFor } from './webgpu-help.mjs';
 
 const CHROME_LINUX_UA =
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
@@ -112,4 +113,32 @@ test('android chromium: linux-style flag steps', () => {
     assert.equal(env.os, 'android');
     const txt = flat(stepsFor(env, 'missing', HOST).steps);
     assert.ok(txt.includes('chrome://flags/#enable-unsafe-webgpu'), txt);
+});
+
+// minimal stand-in for `document`: elements by id, textContent recorded
+const fakeDoc = (ids) => {
+    const els = Object.fromEntries(ids.map((id) => [id, { id, textContent: `<${id}>` }]));
+    return { els, getElementById: (id) => els[id] ?? null };
+};
+
+test('loading status goes to #loading-status, the logo in #loading stays', () => {
+    const doc = fakeDoc(['loading', 'loading-status']);
+    setLoadingStatus(doc, 'loading neuro_edit v2… WebGPU adapter: nvidia');
+    assert.equal(doc.els['loading-status'].textContent, 'loading neuro_edit v2… WebGPU adapter: nvidia');
+    assert.equal(doc.els.loading.textContent, '<loading>');
+});
+
+test('loading status falls back to #loading without a status span', () => {
+    const doc = fakeDoc(['loading']);
+    setLoadingStatus(doc, 'x');
+    assert.equal(doc.els.loading.textContent, 'x');
+});
+
+test('index.html: #loading holds the logo and the #loading-status span', () => {
+    const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+    const loading = html.match(/<div id="loading">([\s\S]*?)<\/div>/);
+    assert.ok(loading, 'no #loading div');
+    assert.match(loading[1], /<img src="loading-logo.svg"/);
+    assert.match(loading[1], /<span id="loading-status">/);
+    assert.match(html, /<link rel="icon" href="favicon.svg"/);
 });

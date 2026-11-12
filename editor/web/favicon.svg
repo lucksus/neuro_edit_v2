@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#16203a"/><stop offset="1" stop-color="#070a12"/></linearGradient>
+    <linearGradient id="trace" gradientUnits="userSpaceOnUse" x1="0" y1="10" x2="0" y2="30"><stop offset="0" stop-color="#ffc35a"/><stop offset=".45" stop-color="#ffb547"/><stop offset="1" stop-color="#3fd8f5"/></linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#tile)"/>
+  <path d="M14 40 H25 L33 10 L40 52 L44 40 H56" fill="none" stroke="url(#trace)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="14" cy="40" r="8" fill="#3fd8f5"/>
+</svg>
