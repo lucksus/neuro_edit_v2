@@ -169,6 +169,12 @@ fn main() -> anyhow::Result<()> {
                 width: icon_img.width(),
                 height: icon_img.height(),
             }),
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            // Cap the GPU queue at one frame: drags read back the cursor
+            // position a frame sooner (Stage 14 D).
+            desired_maximum_frame_latency: Some(1),
+            ..Default::default()
+        },
         ..Default::default()
     };
     eframe::run_native(
@@ -236,6 +242,8 @@ fn main() {
             },
             ..Default::default()
         });
+    // Same latency cap as native — harmless where unsupported (Stage 14 D).
+    opts.wgpu_options.desired_maximum_frame_latency = Some(1);
 
     wasm_bindgen_futures::spawn_local(async move {
         let runner = eframe::WebRunner::new();
