@@ -11,6 +11,8 @@ sim = { path = "../sim" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 tungstenite = "0.29"
+serde_json = "1"
+rhai = "1"
 
 [features]
 default = ["sim/cuda"]

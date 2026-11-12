@@ -14,6 +14,9 @@ use net_format::Network;
 use proto::{ClientMsg, ServerEvent, ServerMsg};
 use sim::serve::{Emit, ServeOpts};
 
+pub mod jobs;
+use jobs::{Bcast, JobCtx, JobRegistry};
+
 /// One connected client's outbound channel (encoded WS frames).
 type ClientTx = mpsc::Sender<Vec<u8>>;
 type Clients = Arc<Mutex<HashMap<u64, ClientTx>>>;
@@ -23,6 +26,7 @@ pub struct Server {
     clients: Clients,
     next_id: Arc<AtomicU64>,
     worker: JoinHandle<()>,
+    jobs: Arc<JobRegistry>,
     /// Shared stop flag (same one the worker watches).
     pub abort: Arc<AtomicBool>,
 }
@@ -35,6 +39,12 @@ impl Server {
         let next_id = Arc::new(AtomicU64::new(1));
 
         let abort = opts.abort.clone();
+        let jobs = Arc::new(JobRegistry::new(JobCtx {
+            backend: opts.backend,
+            seed: opts.seed,
+            cfg: opts.cfg.clone(),
+            data_dir: opts.data_dir.clone(),
+        }));
         let cls = clients.clone();
         let worker = std::thread::Builder::new()
             .name("sim-serve".into())
@@ -65,6 +75,7 @@ impl Server {
             clients,
             next_id,
             worker,
+            jobs,
             abort,
         }
     }
@@ -95,8 +106,9 @@ impl Server {
             let cmd_tx = self.cmd_tx.clone();
             let clients = self.clients.clone();
             let dir = web_dir.clone();
+            let jobs = self.jobs.clone();
             std::thread::spawn(move || {
-                if let Err(e) = handle_client(stream, id, cmd_tx, clients, dir) {
+                if let Err(e) = handle_client(stream, id, cmd_tx, clients, dir, jobs) {
                     eprintln!("client {id}: {e}");
                 }
             });
@@ -119,6 +131,7 @@ impl Server {
         let cmd_tx = self.cmd_tx.clone();
         let clients = self.clients.clone();
         let next_id = self.next_id.clone();
+        let jobs = self.jobs.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let stream = match stream {
@@ -132,8 +145,9 @@ impl Server {
                 let cmd_tx = cmd_tx.clone();
                 let clients = clients.clone();
                 let dir = web_dir.clone();
+                let jobs = jobs.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = handle_client(stream, id, cmd_tx, clients, dir) {
+                    if let Err(e) = handle_client(stream, id, cmd_tx, clients, dir, jobs) {
                         eprintln!("client {id}: {e}");
                     }
                 });
@@ -265,12 +279,76 @@ fn serve_http(
     Ok(())
 }
 
+/// Reply to one client (its outbound queue → writer thread).
+fn send_to(clients: &Clients, id: u64, m: ServerMsg) {
+    if let Some(tx) = clients.lock().unwrap().get(&id) {
+        let _ = tx.send(proto::encode(&m));
+    }
+}
+
+/// Broadcast a `ServerMsg` to every connected client — the fan-out job
+/// threads use for progress/done events.
+fn bcast_fn(clients: &Clients) -> Bcast {
+    let cls = clients.clone();
+    Arc::new(move |m: ServerMsg| {
+        let bytes = proto::encode(&m);
+        for tx in cls.lock().unwrap().values() {
+            let _ = tx.send(bytes.clone());
+        }
+    })
+}
+
+/// Job protocol messages are owned by the registry, not the sim
+/// worker — they spawn/describe threads that must outlive this client.
+/// Returns `true` when the message was consumed.
+fn handle_job_msg(m: &ClientMsg, id: u64, jobs: &JobRegistry, clients: &Clients) -> bool {
+    match m {
+        ClientMsg::StartJob { name, script } => {
+            let name = if name.is_empty() {
+                format!("job{}", jobs.list().len() + 1)
+            } else {
+                name.clone()
+            };
+            let jid = jobs.start(name.clone(), script.clone(), bcast_fn(clients));
+            bcast_fn(clients)(ServerMsg::JobStarted { id: jid, name });
+        }
+        ClientMsg::CancelJob { id: jid } => {
+            if let Err(e) = jobs.cancel(*jid) {
+                send_to(clients, id, ServerMsg::Error(e));
+            }
+        }
+        ClientMsg::ListJobs => {
+            send_to(clients, id, ServerMsg::JobList { jobs: jobs.list() });
+        }
+        ClientMsg::OpenJob { id: jid } => match jobs.detail(*jid) {
+            Some((name, script, result_json, progress)) => {
+                send_to(
+                    clients,
+                    id,
+                    ServerMsg::JobDetail {
+                        id: *jid,
+                        name,
+                        status: jobs.status_of(*jid).unwrap_or("done").into(),
+                        script,
+                        result_json,
+                        progress,
+                    },
+                );
+            }
+            None => send_to(clients, id, ServerMsg::Error(format!("no job {jid}"))),
+        },
+        _ => return false,
+    }
+    true
+}
+
 fn handle_client(
     stream: std::net::TcpStream,
     id: u64,
     cmd_tx: mpsc::Sender<(u64, ClientMsg)>,
     clients: Clients,
     web_dir: Option<std::path::PathBuf>,
+    jobs: Arc<JobRegistry>,
 ) -> anyhow::Result<()> {
     stream.set_nodelay(true).ok();
     let ws = match &web_dir {
@@ -322,15 +400,16 @@ fn handle_client(
         }
     });
 
-    // inbound: bincode frames → the worker. `Bye` is swallowed: a
-    // client leaving must not stop the shared worker — `Server::shutdown`
-    // injects Bye straight into cmd_tx, and the socket close cleans this
-    // client up either way.
+    // inbound: bincode frames → the worker, except job messages (owned
+    // by the registry) and `Bye` (a client leaving must not stop the
+    // shared worker — `Server::shutdown` injects Bye straight into
+    // cmd_tx; the socket close cleans this client up either way).
     let r = (|| -> anyhow::Result<()> {
         loop {
             match w_read.read() {
                 Ok(tungstenite::Message::Binary(b)) => match proto::decode::<ClientMsg>(&b) {
                     Ok(ClientMsg::Bye) => {}
+                    Ok(m) if handle_job_msg(&m, id, &jobs, &clients) => {}
                     Ok(m) => {
                         if cmd_tx.send((id, m)).is_err() {
                             return Ok(()); // worker gone

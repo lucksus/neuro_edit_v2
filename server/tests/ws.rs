@@ -135,6 +135,184 @@ fn ws_second_client_sees_edits() {
     w.srv.shutdown();
 }
 
+/// A job script: builds a small noisy net, runs a few epochs streaming
+/// `job_progress`, then burns script time so a client can disconnect
+/// mid-job, then writes a marker into `job_dir()`.
+fn job_script() -> String {
+    r#"
+        net.create_2d_grid("g", 8, 8, 10.0);
+        net.create_connections("g", 1.0, 2.0, 1.0);
+        net.set_synapse_weights("g", 0.6, 0.2);
+        sim.set_noise(15.0, 8.0);
+        for i in 0..4 {
+            sim.run(150);
+            job_progress(#{epoch: i, t_ms: sim.time()});
+        }
+        for j in 0..1500000 { let q = j % 7; }
+        job_progress(#{epoch: 99});
+        write_to_file(job_dir() + "/marker.txt", [1.0]);
+    "#
+    .to_string()
+}
+
+#[test]
+fn ws_job_progress_survives_client() {
+    let dir = std::env::temp_dir().join(format!("ws_job_{}_{}", std::process::id(), line!()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let w = start(Network::new(), Some(dir.clone()), 7);
+    let mut c1 = w.client();
+    hydrate(&mut c1);
+
+    c1.send(&ClientMsg::StartJob {
+        name: "detector-smoke".into(),
+        script: job_script(),
+    })
+    .unwrap();
+    // JobStarted + the first JobProgress broadcast, then drop the
+    // starter — the job must keep running without it.
+    let msgs = until(&mut c1, |m| matches!(m, ServerMsg::JobProgress { .. }));
+    let job_id = msgs
+        .iter()
+        .find_map(|m| match m {
+            ServerMsg::JobStarted { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("JobStarted before progress");
+    drop(c1);
+
+    let mut c2 = w.client();
+    hydrate(&mut c2);
+    c2.send(&ClientMsg::ListJobs).unwrap();
+    let msgs = until(&mut c2, |m| matches!(m, ServerMsg::JobList { .. }));
+    let listed = msgs
+        .iter()
+        .find_map(|m| match m {
+            ServerMsg::JobList { jobs } => Some(jobs.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let entry = listed
+        .iter()
+        .find(|j| j.id == job_id)
+        .expect("job listed after starter disconnected");
+    assert_eq!(entry.name, "detector-smoke");
+
+    // it finishes on its own and broadcasts the result
+    let msgs = until(
+        &mut c2,
+        |m| matches!(m, ServerMsg::JobDone { id, .. } if *id == job_id),
+    );
+    let done = msgs
+        .iter()
+        .find_map(|m| match m {
+            ServerMsg::JobDone { id, status, error } if *id == job_id => {
+                Some((status.clone(), error.clone()))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(done.0, "done", "job failed: {:?}", done.1);
+
+    // runs/<id>/ got the script, metrics, result + the script's own file
+    let run = dir.join("runs").join(job_id.to_string());
+    assert!(run.join("script.rhai").is_file());
+    assert!(run.join("metrics.json").is_file());
+    assert!(run.join("result.json").is_file());
+    assert!(run.join("marker.txt").is_file());
+    let result: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run.join("result.json")).unwrap()).unwrap();
+    assert_eq!(result["name"], "detector-smoke");
+
+    // re-open: the detail carries script + accumulated progress
+    c2.send(&ClientMsg::OpenJob { id: job_id }).unwrap();
+    let msgs = until(
+        &mut c2,
+        |m| matches!(m, ServerMsg::JobDetail { id, .. } if *id == job_id),
+    );
+    let (status, script, progress, result_json) = msgs
+        .iter()
+        .find_map(|m| match m {
+            ServerMsg::JobDetail {
+                status,
+                script,
+                progress,
+                result_json,
+                ..
+            } => Some((
+                status.clone(),
+                script.clone(),
+                progress.len(),
+                result_json.is_some(),
+            )),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(status, "done");
+    assert!(script.contains("job_progress"));
+    assert_eq!(progress, 5, "four epoch rows + the tail row");
+    assert!(result_json);
+
+    w.srv.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ws_job_cancel() {
+    let dir = std::env::temp_dir().join(format!("ws_jc_{}_{}", std::process::id(), line!()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let w = start(Network::new(), Some(dir.clone()), 7);
+    let mut c = w.client();
+    hydrate(&mut c);
+
+    // an infinite loop — only cancellation can end it
+    c.send(&ClientMsg::StartJob {
+        name: "forever".into(),
+        script: r#"
+            let i = 0;
+            while true {
+                i += 1;
+                if i % 50000 == 0 { job_progress(#{i: i}); }
+            }
+        "#
+        .into(),
+    })
+    .unwrap();
+    let msgs = until(&mut c, |m| matches!(m, ServerMsg::JobProgress { .. }));
+    let job_id = msgs
+        .iter()
+        .find_map(|m| match m {
+            ServerMsg::JobStarted { id, .. } => Some(*id),
+            _ => None,
+        })
+        .unwrap();
+    c.send(&ClientMsg::CancelJob { id: job_id }).unwrap();
+    let msgs = until(&mut c, |m| matches!(m, ServerMsg::JobDone { .. }));
+    let status = msgs
+        .iter()
+        .find_map(|m| match m {
+            ServerMsg::JobDone { status, .. } => Some(status.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(status, "cancelled");
+
+    // the interactive worker never noticed — it's still answering
+    c.send(&ClientMsg::Eval {
+        code: "print(\"alive\")".into(),
+    })
+    .unwrap();
+    let msgs = until(
+        &mut c,
+        |m| matches!(m, ServerMsg::Console(s) if s == "alive"),
+    );
+    assert!(msgs
+        .iter()
+        .any(|m| matches!(m, ServerMsg::Console(s) if s == "alive")));
+
+    w.srv.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A client saying Bye (editor quit) must not kill the shared worker —
 /// the server swallows it; only `Server::shutdown` injects Bye into the
 /// command channel.

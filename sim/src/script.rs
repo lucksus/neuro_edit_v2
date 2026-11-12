@@ -68,6 +68,9 @@ pub struct Env {
     /// `job_progress(#{…})` fields land here (console print locally,
     /// `ServerMsg::JobProgress` under a server job).
     pub job_sink: Rc<RefCell<JobSinkFn>>,
+    /// `job_dir()` — the `runs/<id>` path scripts write job outputs to;
+    /// `None` outside a job (interactive eval returns "").
+    pub job_dir: Rc<RefCell<Option<String>>>,
 }
 
 impl Env {
@@ -109,6 +112,7 @@ impl Env {
                 p(&format!("job: {s}"));
             }) as JobSinkFn))
         };
+        let job_dir: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         register_api(
             &mut engine,
             net.clone(),
@@ -123,6 +127,7 @@ impl Env {
             cancel.clone(),
             data_dir.clone(),
             job_sink.clone(),
+            job_dir.clone(),
         );
         Env {
             engine,
@@ -139,6 +144,7 @@ impl Env {
             cancel,
             data_dir,
             job_sink,
+            job_dir,
         }
     }
 
@@ -479,6 +485,7 @@ pub fn register_api(
     cancel: Rc<RefCell<CancelFn>>,
     data_dir: Rc<RefCell<Option<std::path::PathBuf>>>,
     job_sink: Rc<RefCell<JobSinkFn>>,
+    job_dir: Rc<RefCell<Option<String>>>,
 ) {
     engine
         .register_type_with_name::<NetHandle>("Net")
@@ -1520,6 +1527,10 @@ pub fn register_api(
                 })
                 .collect();
             (js.borrow_mut())(fields);
+        });
+        let jd = job_dir.clone();
+        engine.register_fn("job_dir", move || -> String {
+            jd.borrow().clone().unwrap_or_default()
         });
     }
 }
