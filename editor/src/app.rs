@@ -1916,7 +1916,7 @@ impl EditorApp {
                     } else {
                         self.files.cwd.clone()
                     });
-                    if ui.button("↑").clicked() && !self.files.cwd.is_empty() {
+                    if ui.button("^").clicked() && !self.files.cwd.is_empty() {
                         let cwd = std::path::Path::new(&self.files.cwd);
                         self.files.cwd = cwd
                             .parent()
@@ -2618,7 +2618,7 @@ impl EditorApp {
                         });
                         self.status = format!("script {:?} saved to net", self.script_name);
                     }
-                    ui.menu_button("Examples ▾", |ui| {
+                    ui.menu_button("Examples", |ui| {
                         for ex in crate::examples::EXAMPLES {
                             if ui.button(ex.name).clicked() {
                                 self.load_example(ex);
@@ -2772,7 +2772,7 @@ impl EditorApp {
                                     "hint",
                                     egui_plot::PlotPoint::new(cx, -25.0),
                                     "no watched neurons — click a neuron to watch it,\n\
-                                     or right-click → \"Watch v(t)\" · Inspector → \"Plot v(t)\"",
+                                     or right-click -> \"Watch v(t)\" · Inspector -> \"Plot v(t)\"",
                                 ));
                             }
                             // watch_sent order → stable per-neuron colors,

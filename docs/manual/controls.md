@@ -34,6 +34,6 @@ auto-placed above their units.
 
 ## Context menu
 
-Right-click: neuron → Watch v(t) / Connect from here / Delete;
-input → Set value / Connect; readout → Plot weights; empty space →
+Right-click: neuron -> Watch v(t) / Connect from here / Delete;
+input -> Set value / Connect; readout -> Plot weights; empty space ->
 insert, paste, frame.

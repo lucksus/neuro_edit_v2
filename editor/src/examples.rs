@@ -1,5 +1,5 @@
-//! Loadable examples (Stage 13 H): Help → Examples and the console
-//! window's "Examples ▾" load one of these into the script editor; Run
+//! Loadable examples (Stage 13 H): Help > Examples and the console
+//! window's "Examples" menu load one of these into the script editor; Run
 //! sends it to the worker. `watch` lists neuron ids to auto-watch after
 //! a Run so first_spikes shows traces without further setup.
 

@@ -14,7 +14,7 @@ The Plots window (Ctrl+2) has tabs:
 ## Watching
 
 v(t) and v–u plot *watched* neurons. Watch by selecting — click a
-neuron, box-select a few, right-click → "Watch v(t)", or use the
+neuron, box-select a few, right-click -> "Watch v(t)", or use the
 inspector's "Plot v(t)" button. Up to 8 neurons are watched at once.
 
 ## Window + follow

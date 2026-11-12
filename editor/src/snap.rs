@@ -375,7 +375,7 @@ impl Fold {
                 sh.file_op = Some(format!("deleted {path}"));
             }
             proto::ServerMsg::FileRenamed { from, to } => {
-                sh.file_op = Some(format!("renamed {from} → {to}"));
+                sh.file_op = Some(format!("renamed {from} -> {to}"));
             }
             proto::ServerMsg::Usage { used, quota } => {
                 sh.usage = Some((used, quota));

@@ -42,12 +42,12 @@ Semantics to know:
 ## Building networks — `net.*`
 
 ```rhai
-let id  = net.add_neuron(10, 20, 30);        // x,y,z → new neuron index
+let id  = net.add_neuron(10, 20, 30);        // x,y,z -> new neuron index
 net.clear();                                  // empty network
-net.neuron_count()                            // → INT
-net.synapse_count()                           // → INT
-net.input_count()                             // → INT
-net.connect(a, b, w)                          // a→b synapse, weight w → index
+net.neuron_count()                            // -> INT
+net.synapse_count()                           // -> INT
+net.input_count()                             // -> INT
+net.connect(a, b, w)                          // a->b synapse, weight w -> index
 ```
 
 ### Grids and random connectivity
@@ -59,17 +59,17 @@ net.create_connections("group", scaling, lambda, weight);
 //     probability p(d) = scaling * exp(-(d/lambda)^2) per ordered pair
 //     (a Gaussian in distance, as in Maass 2002 — not an exponential)
 net.set_synapse_weights("group", mean, sd);      // gaussian on existing synapses
-net.set_exc_inh("group", frac);                  // frac → inhibitory kind
+net.set_exc_inh("group", frac);                  // frac -> inhibitory kind
 
 // per-synapse current-trace time constants (ms). 0 = default merged
 // path (each synapse's current folded into the target's single decay,
 // global synapse_tau). >0 gives that synapse its own exponential trace.
-net.set_syn_tau("src_g", "tgt_g", tau);          // every src→tgt edge
+net.set_syn_tau("src_g", "tgt_g", tau);          // every src->tgt edge
 net.set_syn_tau_dist("src_g", "tgt_g", mean, sd);// gaussian per edge
 net.set_syn_tau_inh("g", tau);                   // inhibitory-source edges
 net.set_syn_tau_one(src, tgt, tau);              // one edge
 net.set_syn_tau_idx(i, tau);                     // by synapse index
-net.syn_tau(src, tgt)                            // → ms (0 = merged)
+net.syn_tau(src, tgt)                            // -> ms (0 = merged)
 ```
 
 Grid builders record persistent lattice metadata on the group (member
@@ -84,10 +84,10 @@ drops the metadata and the group draws as cubes again.
 ```rhai
 net.set_izh(id, a, b, c, d);            // Izhikevich parameters
 net.set_pos(id, x, y, z);               // move + recompute axonal delays
-net.pos(id)                             // → [x,y,z]
-net.neuron_name(id)                     // → name
+net.pos(id)                             // -> [x,y,z]
+net.neuron_name(id)                     // -> name
 net.set_neuron_name(id, "name");
-net.neuron("name")                      // → index or -1
+net.neuron("name")                      // -> index or -1
 net.delete_neuron(id);
 net.delete_neurons([id1, id2, …]);
 ```
@@ -95,8 +95,8 @@ net.delete_neurons([id1, id2, …]);
 ### Groups
 
 ```rhai
-net.neurons_of("group")                 // → [id, …]
-net.group_names()                       // → ["liquid", …]
+net.neurons_of("group")                 // -> [id, …]
+net.group_names()                       // -> ["liquid", …]
 net.add_to_group("group", [ids]);       // creates the group if needed
 ```
 
@@ -106,12 +106,12 @@ net.add_to_group("group", [ids]);       // creates the group if needed
 net.add_input("src0", [[neuron_id, weight], [id2, w2], …]);
 net.add_readout("ro", [unit_ids]);      // named unit list (no dedup)
 net.set_readout_weights("ro", [w,…]);   // persisted in .ne2, drawn in editor
-net.readout_weights("ro")               // → [w,…]
+net.readout_weights("ro")               // -> [w,…]
 
 net.samples_write("sm", [t,…], [v,…]);  // replaces the samples channel
 net.samples_save("sm", "sm.bin");
 net.samples_load("sm", "sm.bin");
-net.samples("sm")                       // → [[t,v],…]
+net.samples("sm")                       // -> [[t,v],…]
 ```
 
 ### Persistence and stored scripts
@@ -131,7 +131,7 @@ sim.run(500);            // ms (converted to steps via dt)
 sim.run_steps(5000);     // raw steps
 sim.build();             // force-build now (also lazily on first run)
 sim.rebuild();           // drop the sim; rebuild on next use
-sim.time()               // → ms
+sim.time()               // -> ms
 sim.reset();             // reset state, keep weights/topology
 sim.rate()               // mean firing rate, Hz
 sim.spikes()             // total spikes since reset
@@ -160,7 +160,7 @@ sim.set_dt(0.1);                       // step size (rebuilds the ring)
 sim.set_synapse_tau(5.0);              // synaptic current decay, ms
 sim.set_readout_tau(20.0);             // readout feature decay, ms
 sim.set_int_weights(1);                // fixed-point CUDA accumulation
-                                       // → bitwise-reproducible GPU runs
+                                       // -> bitwise-reproducible GPU runs
 ```
 
 ## Readouts and metrics
@@ -172,15 +172,15 @@ let ro = delta_new(n_features);
 ro.init_random(-0.02, 0.02);
 ro.set_proper(1);                       // corrected delta rule
 ro.learn(trace_features, target, rate); // one sample
-ro.output(trace_features)               // → f64 score
-ro.weights()                            // → [w,…]
+ro.output(trace_features)               // -> f64 score
+ro.weights()                            // -> [w,…]
 ```
 
 Batch ridge regression + metrics:
 
 ```rhai
 let w = fit_ridge(X_flat, n_rows, n_feat, y, lambda);
-ridge_output(w, x)                      // → f64
+ridge_output(w, x)                      // -> f64
 accuracy(scores, labels)                // 0/1 labels, threshold 0.5
 auc(scores, labels)
 ```
@@ -210,7 +210,7 @@ m[0][3]                                             // bit of source 3, step 0
 
 ```rhai
 write_to_file("out.txt", [1.0, 2.5, 3]);   // one value per line
-read_to_vec("out.txt")                     // → [f64,…]
+read_to_vec("out.txt")                     // -> [f64,…]
 ```
 
 ## Datasets
@@ -218,7 +218,7 @@ read_to_vec("out.txt")                     // → [f64,…]
 Reproducible multi-channel series live in `data_dir/datasets/<name>/`.
 `dataset_gen(#{...})` generates (or loads the cached) series from a
 spec; `dataset(name)` loads one (including uploads); `datasets()` lists
-names. Everything is deterministic — same spec + seed ⇒ same bytes.
+names. Everything is deterministic — same spec + seed => same bytes.
 
 ```rhai
 let d = dataset_gen(#{
@@ -228,7 +228,7 @@ let d = dataset_gen(#{
                window_ms: 12.0, strength: 35.0, seed: 17 }],
 });
 d.n_channels;  d.steps;  d.len_ms;          // dimensions
-d.channel(i);                              // → [f32; steps]
+d.channel(i);                              // -> [f32; steps]
 d.events();  d.events(lo_ms, hi_ms);       // event label times
 ```
 
