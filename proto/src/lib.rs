@@ -238,6 +238,12 @@ pub enum NetEdit {
         id: u32,
         pos: [f32; 3],
     },
+    /// Flip a neuron's Dale kind — the inspector's kind selector.
+    /// Re-signs its outgoing synapses at the next sim build.
+    SetNeuronKind {
+        id: u32,
+        kind: NeuronKind,
+    },
     /// Paste a serialized subnet at an offset.
     InsertSubnetJson {
         json: String,

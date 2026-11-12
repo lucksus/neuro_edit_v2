@@ -2644,10 +2644,25 @@ impl EditorApp {
                         self.edit_net(NetEdit::SetNeuronPos { id, pos: p });
                     }
                 });
-                ui.label(format!(
-                    "kind: {}",
-                    if g.kind[i] == 0 { "exc" } else { "inh" }
-                ));
+                // U2: the kind is editable — Dale's law re-signs its
+                // outgoing synapses at the next sim build.
+                ui.horizontal(|ui| {
+                    ui.label("kind:");
+                    let mut inh = g.kind[i] != 0;
+                    for (v, label) in [(false, "exc"), (true, "inh")] {
+                        if ui.selectable_label(inh == v, label).clicked() && inh != v {
+                            self.edit_net(NetEdit::SetNeuronKind {
+                                id,
+                                kind: if v {
+                                    proto::NeuronKind::Inhibitory
+                                } else {
+                                    proto::NeuronKind::Excitatory
+                                },
+                            });
+                            inh = v;
+                        }
+                    }
+                });
                 // Discoverable watching: one click to the plots window.
                 if ui.button("Plot v(t)").clicked() {
                     self.watch(vec![id]);

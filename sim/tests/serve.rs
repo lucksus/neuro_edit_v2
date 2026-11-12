@@ -1109,7 +1109,9 @@ fn save_and_load_carry_typed_acks() {
     rig.send(ClientMsg::Hello { proto: 1 });
     rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
 
-    rig.send(ClientMsg::SaveNet { path: "q6.ne2".into() });
+    rig.send(ClientMsg::SaveNet {
+        path: "q6.ne2".into(),
+    });
     let evs = rig.until(|m| matches!(m, ServerMsg::Saved { .. }));
     let saved = evs
         .iter()
@@ -1123,7 +1125,9 @@ fn save_and_load_carry_typed_acks() {
     assert!(dir.join("q6.ne2").exists(), "file landed");
 
     // a save that can't resolve comes back as an Error, not a Saved
-    rig.send(ClientMsg::SaveNet { path: "../escape/x.ne2".into() });
+    rig.send(ClientMsg::SaveNet {
+        path: "../escape/x.ne2".into(),
+    });
     let evs = rig.until(|m| matches!(m, ServerMsg::Error(_)));
     assert!(evs.iter().any(|e| matches!(
         &e.msg,
@@ -1131,15 +1135,53 @@ fn save_and_load_carry_typed_acks() {
     )));
 
     // load success → NetLoaded; bogus path → Error, no NetLoaded
-    rig.send(ClientMsg::LoadNet { path: "q6.ne2".into() });
+    rig.send(ClientMsg::LoadNet {
+        path: "q6.ne2".into(),
+    });
     let evs = rig.until(|m| matches!(m, ServerMsg::NetLoaded { .. }));
     assert!(evs.iter().any(|e| matches!(
         &e.msg,
         ServerMsg::NetLoaded { path, .. } if path == "q6.ne2"
     )));
-    rig.send(ClientMsg::LoadNet { path: "nope.ne2".into() });
+    rig.send(ClientMsg::LoadNet {
+        path: "nope.ne2".into(),
+    });
     let evs = rig.until(|m| matches!(m, ServerMsg::Error(_)));
-    assert!(!evs.iter().any(|e| matches!(e.msg, ServerMsg::NetLoaded { .. })));
+    assert!(!evs
+        .iter()
+        .any(|e| matches!(e.msg, ServerMsg::NetLoaded { .. })));
     rig.stop();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// U2-kind: the inspector's kind selector round-trips — SetNeuronKind
+/// applies Dale's law server-side and the delta carries the new kind.
+#[test]
+fn set_neuron_kind_edit_round_trips() {
+    let mut net = Network::new();
+    net.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
+    net.add_neuron([10.0, 0.0, 0.0], net_format::NeuronKind::Excitatory);
+    let rig = start(net, None);
+    rig.send(ClientMsg::Hello { proto: 1 });
+    let evs = rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+    let base = first_geo(&evs).version;
+
+    rig.send(ClientMsg::Edit {
+        base,
+        edit: NetEdit::SetNeuronKind {
+            id: 0,
+            kind: proto::NeuronKind::Inhibitory,
+        },
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::GeoDelta(_)));
+    let d = evs
+        .iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::GeoDelta(d) => Some(d.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(d.neurons_changed.len(), 1);
+    assert_eq!(d.neurons_changed[0].kind, 1, "delta carries inh kind");
+    rig.stop();
 }

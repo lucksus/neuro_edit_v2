@@ -436,8 +436,7 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                         let done = resolve(&env, &path).and_then(|p| {
                             let mut n = env.net.borrow_mut();
                             crate::cfg_to_meta(&env.cfg.borrow(), &mut n.meta);
-                            let bytes = net_format::io::to_bytes(&n)
-                                .map_err(|e| e.to_string())?;
+                            let bytes = net_format::io::to_bytes(&n).map_err(|e| e.to_string())?;
                             crate::script::quota_fits(
                                 &env.data_dir.borrow(),
                                 &p,
@@ -1608,6 +1607,17 @@ fn apply_edit(net: &mut Network, dt: f32, e: &NetEdit) -> Result<Applied, String
         NetEdit::SetNeuronName { id, name } => {
             check_ids(net, &[*id])?;
             net.neuron_mut(*id).name = name.clone();
+            d.neurons_changed.push(row(net, *id));
+        }
+        NetEdit::SetNeuronKind { id, kind } => {
+            check_ids(net, &[*id])?;
+            net.set_kind(
+                *id,
+                match kind {
+                    proto::NeuronKind::Excitatory => net_format::NeuronKind::Excitatory,
+                    proto::NeuronKind::Inhibitory => net_format::NeuronKind::Inhibitory,
+                },
+            );
             d.neurons_changed.push(row(net, *id));
         }
         NetEdit::SetNeuronPos { id, pos } => {
