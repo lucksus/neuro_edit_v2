@@ -25,6 +25,10 @@ pub struct EditorApp {
     /// Frame the camera on the next geometry publish (grid dialogs, load).
     frame_pending: bool,
     last_snap_seq: u64,
+    /// Smoothed per-frame cost (egui+GPU submit), drawn when `show_fps`.
+    pub frame_ms: f32,
+    last_frame_ms: f64,
+    pub show_fps: bool,
     /// Set this frame when any ServerMsg landed (dirty_seq moved) —
     /// drives the conditional repaint at the end of `update`.
     pub net_touched: bool,
@@ -523,6 +527,9 @@ impl EditorApp {
             geo_version: 0,
             frame_pending: false,
             last_snap_seq: 0,
+            frame_ms: 0.0,
+            last_frame_ms: 0.0,
+            show_fps: false,
             net_touched: false,
             last_dirty_seq: 0,
             plane_key: 0,
@@ -1419,6 +1426,7 @@ impl EditorApp {
                         (&mut self.show_script, &ic.script, "Script editor"),
                         (&mut self.show_inputs, &ic.connect, "Inputs"),
                         (&mut self.show_files, &ic.save, "Files"),
+                        (&mut self.show_fps, &ic.speed, "frame stats"),
                     ] {
                         if ui.add(icons::button(icon, label).selected(*flag)).clicked() {
                             *flag = !*flag;
@@ -3590,6 +3598,17 @@ impl eframe::App for EditorApp {
             }
         }
         self.wall_ms = ctx.input(|i| i.time) * 1000.0;
+        // Smoothed frame cost (10% EMA) for the fps readout. Gaps over
+        // 200 ms are idle sleeps, not slow frames — skip them.
+        let dt_ms = (self.wall_ms - self.last_frame_ms) as f32;
+        self.last_frame_ms = self.wall_ms;
+        if dt_ms > 0.0 && dt_ms < 200.0 {
+            self.frame_ms = if self.frame_ms <= 0.0 {
+                dt_ms
+            } else {
+                self.frame_ms * 0.9 + dt_ms * 0.1
+            };
+        }
         crate::view::with_gpu(rs, |gpu| self.sync_shared(gpu));
         self.update_watch();
         if self.mode != self.last_mode {

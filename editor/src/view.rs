@@ -406,6 +406,20 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
 
             overlay_2d(app, ui, rect, aspect);
 
+            if app.show_fps {
+                ui.painter().text(
+                    rect.right_top() + egui::vec2(-6.0, 6.0),
+                    egui::Align2::RIGHT_TOP,
+                    format!(
+                        "{:5.1} ms  {:3.0} fps",
+                        app.frame_ms,
+                        1000.0 / app.frame_ms.max(0.01)
+                    ),
+                    egui::FontId::monospace(12.0),
+                    egui::Color32::LIGHT_GRAY,
+                );
+            }
+
             if let Some((a, b)) = app.box_sel {
                 ui.painter().rect_stroke(
                     egui::Rect::from_two_pos(a, b),
