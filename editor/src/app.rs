@@ -727,12 +727,11 @@ impl EditorApp {
         }
     }
 
-    /// Load a file through the worker and remember it in recents.
+    /// Load a file through the worker. `net_path`/recents update on the
+    /// server's `NetLoaded` ack (Q7) — a failed load leaves the document
+    /// named as it was.
     pub fn load_net(&mut self, path: String) {
-        self.send(ClientMsg::LoadNet { path: path.clone() });
-        self.net_path = Some(path.clone());
-        self.push_recent(path);
-        self.selection.clear();
+        self.send(ClientMsg::LoadNet { path });
     }
 
     pub fn push_recent(&mut self, path: String) {
@@ -923,6 +922,7 @@ impl EditorApp {
             }
         }
         // One-shot consumables the worker answered for us.
+        let (mut saved, mut loaded) = (Vec::new(), Vec::new());
         {
             let mut sh = self.ctl.shared.write().unwrap();
             if let Some((path, text)) = sh.file_data.take() {
@@ -967,6 +967,15 @@ impl EditorApp {
                     sh.download = Some((path, bytes, done));
                 }
             }
+            // Q6: the document goes clean only on the server's Saved —
+            // the ack carries the version it actually wrote.
+            if let Some((path, version)) = sh.saved_ack.take() {
+                saved.push((path, version));
+            }
+            // Q7: net_path/recent move on confirmed load only.
+            if let Some((path, version)) = sh.loaded_ack.take() {
+                loaded.push((path, version));
+            }
             self.jobs = sh.jobs.clone();
             self.job_progress = sh.job_progress.clone();
             if let Some(d) = sh.job_detail.take() {
@@ -974,6 +983,18 @@ impl EditorApp {
                 self.job_progress.insert(d.id, d.progress.clone());
                 self.job_detail = Some(d);
             }
+        }
+        for (path, version) in saved {
+            self.saved_version = version;
+            self.net_path = Some(path.clone());
+            self.push_recent(path.clone());
+            self.status = format!("saved {path}");
+        }
+        for (path, _) in loaded {
+            self.net_path = Some(path.clone());
+            self.push_recent(path.clone());
+            self.selection.clear();
+            self.status = format!("loaded {path}");
         }
         let (geo_new, snap, running, sim_built, busy, net_gen, cfg, backend) = {
             let sh = self.ctl.shared.read().unwrap();
@@ -1254,21 +1275,11 @@ impl EditorApp {
                     );
                     if ui.add(icons::button(&ic.save, "Save")).clicked() {
                         match &self.net_path {
+                            // Q6: ask for the file; saved_version/recent
+                            // follow the server's Saved ack, not the ask.
                             Some(p) => {
-                                self.send(ClientMsg::Eval {
-                                    code: format!("net.save({p:?})"),
-                                });
-                                self.saved_version = self
-                                    .ctl
-                                    .shared
-                                    .read()
-                                    .unwrap()
-                                    .geo
-                                    .as_ref()
-                                    .map(|g| g.version)
-                                    .unwrap_or(0);
                                 let p = p.clone();
-                                self.push_recent(p);
+                                self.send(ClientMsg::SaveNet { path: p });
                             }
                             None => {
                                 self.dlg = Some(Dialog::SaveAs {
@@ -3608,20 +3619,7 @@ impl EditorApp {
                     ui.text_edit_singleline(path);
                     if ui.button("Save").clicked() {
                         let p = path.clone();
-                        self.send(ClientMsg::Eval {
-                            code: format!("net.save({p:?})"),
-                        });
-                        self.saved_version = self
-                            .ctl
-                            .shared
-                            .read()
-                            .unwrap()
-                            .geo
-                            .as_ref()
-                            .map(|g| g.version)
-                            .unwrap_or(0);
-                        self.net_path = Some(p.clone());
-                        self.push_recent(p);
+                        self.send(ClientMsg::SaveNet { path: p });
                         keep = false;
                     }
                 });

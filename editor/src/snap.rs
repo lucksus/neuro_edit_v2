@@ -166,6 +166,12 @@ pub struct Shared {
     /// Bumped by `Fold::apply` for every ServerMsg — the app's cheap
     /// "server traffic arrived" repaint signal (Stage 14 E).
     pub dirty_seq: u64,
+    /// Q6: latest `Saved` ack — (path, version). The app consumes it to
+    /// mark the document clean; it is set ONLY on server confirmation.
+    pub saved_ack: Option<(String, u64)>,
+    /// Q7: latest `NetLoaded` ack — (path, version). `net_path` and the
+    /// recent list move only when this lands, not on the request.
+    pub loaded_ack: Option<(String, u64)>,
 }
 
 /// Snapshot of an `OpenJob` reply for the jobs panel.
@@ -204,6 +210,8 @@ impl Default for Shared {
             job_progress: std::collections::BTreeMap::new(),
             job_detail: None,
             dirty_seq: 0,
+            saved_ack: None,
+            loaded_ack: None,
         }
     }
 }
@@ -405,6 +413,13 @@ impl Fold {
                     sh.edits_in_flight = sh.edits_in_flight.saturating_sub(1);
                 }
                 sh.log(format!("! {e}"));
+            }
+            proto::ServerMsg::Saved { path, version } => {
+                sh.log(format!("saved {path}"));
+                sh.saved_ack = Some((path, version));
+            }
+            proto::ServerMsg::NetLoaded { path, version } => {
+                sh.loaded_ack = Some((path, version));
             }
         }
     }
