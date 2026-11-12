@@ -86,6 +86,8 @@ pub struct Snap {
     /// Spike-trace value per texel for each `GeoSnap::grids` entry
     /// (same order; `exp` decay, tau ~20 ms — see `simctl::PLANE_TAU_MS`).
     pub grid_traces: Vec<Arc<Vec<f32>>>,
+    /// Live constant drive per input (same order as `GeoSnap::inputs`).
+    pub input_values: Arc<Vec<f32>>,
     /// Measured wall-time speed (steps/s) while running.
     pub steps_per_sec: f32,
 }

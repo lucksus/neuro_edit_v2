@@ -44,6 +44,8 @@ pub struct EditorApp {
     pub plane_cfgs: HashMap<u32, crate::plane::PlaneCfg>,
     /// Last snap's per-grid spike traces (fed to the plane textures).
     grid_traces: Vec<std::sync::Arc<Vec<f32>>>,
+    /// Last snap's per-input constant values (drives the Inputs panel).
+    input_values: std::sync::Arc<Vec<f32>>,
     /// Upload caches for `plane_frame` — textures only re-upload on change.
     plane_snap: u64,
     plane_geo: u64,
@@ -146,6 +148,7 @@ pub enum Dialog {
     NewInput {
         name: String,
         weight: f32,
+        value: f32,
     },
     NewSamples {
         name: String,
@@ -215,6 +218,7 @@ impl EditorApp {
             grid_view: crate::plane::GridView::Auto,
             plane_cfgs: HashMap::new(),
             grid_traces: Vec::new(),
+            input_values: std::sync::Arc::new(Vec::new()),
             plane_snap: 0,
             plane_geo: 0,
             plane_cfgs_last: Vec::new(),
@@ -388,6 +392,7 @@ impl EditorApp {
             self.speed_actual = snap.steps_per_sec;
             self.activity = snap.activity.to_vec();
             self.grid_traces = snap.grid_traces.clone();
+            self.input_values = snap.input_values.clone();
             if let Some(g) = &self.geo {
                 self.particles.feed(g, &snap.counts, snap.time_ms);
             }
@@ -653,6 +658,7 @@ impl EditorApp {
                         self.dlg = Some(Dialog::NewInput {
                             name: "input".into(),
                             weight: 20.0,
+                            value: 1.0,
                         });
                         ui.close();
                     }
@@ -975,14 +981,15 @@ impl EditorApp {
                     for (k, inp) in g.inputs.iter().enumerate() {
                         ui.horizontal(|ui| {
                             ui.label(&inp.name);
-                            let mut v = 0.0f32;
+                            // seeded from the live sim value, not 0 — the
+                            // field must show what the sim is doing
+                            let mut v = self.input_values.get(k).copied().unwrap_or(0.0);
                             if ui.add(egui::DragValue::new(&mut v).speed(0.5)).changed() {
                                 self.send(Cmd::SetInputConst {
                                     name: inp.name.clone(),
                                     value: v,
                                 });
                             }
-                            let _ = k;
                         });
                     }
                     if g.inputs.is_empty() {
@@ -1043,7 +1050,7 @@ impl EditorApp {
                 let inp = &g.inputs[k as usize];
                 ui.label(format!("input: {}", inp.name));
                 ui.label(format!("{} targets", inp.targets.len()));
-                let mut v = 0.0f32;
+                let mut v = self.input_values.get(k as usize).copied().unwrap_or(0.0);
                 if ui
                     .add(egui::Slider::new(&mut v, -50.0..=50.0).text("value"))
                     .changed()
@@ -1537,7 +1544,11 @@ impl EditorApp {
                         }
                     });
             }
-            Dialog::NewInput { name, weight } => {
+            Dialog::NewInput {
+                name,
+                weight,
+                value,
+            } => {
                 egui::Window::new("New input on selection")
                     .open(&mut open)
                     .show(ctx, |ui| {
@@ -1546,6 +1557,7 @@ impl EditorApp {
                             ui.text_edit_singleline(name);
                         });
                         ui.add(egui::DragValue::new(weight).prefix("w "));
+                        ui.add(egui::DragValue::new(value).prefix("value ").speed(0.1));
                         let targets: Vec<u32> = self
                             .selection
                             .iter()
@@ -1561,6 +1573,12 @@ impl EditorApp {
                             let tw: Vec<(u32, f32)> = targets.iter().map(|&t| (t, wt)).collect();
                             self.edit_net(move |net| {
                                 net.add_input(&n2, tw, [0.0; 3]);
+                            });
+                            // a new input at value 0 drives nothing —
+                            // apply the dialog's value right after create
+                            self.send(Cmd::SetInputConst {
+                                name: name.clone(),
+                                value: *value,
                             });
                             keep = false;
                         }

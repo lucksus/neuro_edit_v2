@@ -140,6 +140,40 @@ fn worker_publishes_grid_traces() {
     );
 }
 
+/// The Inputs panel binds to `snap.input_values` — a `set_input`/`SetInputConst`
+/// value must be visible to the UI, not a hardcoded 0.
+#[test]
+fn worker_publishes_input_values() {
+    let ctl = SimCtl::start(Network::new(), BackendKind::Cpu, 1);
+    ctl.send(Cmd::Eval(
+        r#"
+        net.create_2d_grid("g", 4, 4, 30.0);
+        net.add_input("src0", [[0, 12.0], [1, 12.0]]);
+        sim.set_input("src0", 0.7);
+        sim.run(20.0);
+        "#
+        .to_string(),
+    ));
+    let vals = wait_for(Duration::from_secs(10), || {
+        let s = ctl.shared.read().ok()?;
+        let v = s.snap.input_values.clone();
+        (s.snap.time_ms >= 19.9 && !v.is_empty()).then_some(v)
+    });
+    assert_eq!(vals.len(), 1);
+    assert!((vals[0] - 0.7).abs() < 1e-6, "input_values={vals:?}");
+
+    // Same via the panel's command path.
+    ctl.send(Cmd::SetInputConst {
+        name: "src0".into(),
+        value: 2.5,
+    });
+    wait_for(Duration::from_secs(10), || {
+        let s = ctl.shared.read().ok()?;
+        let v = s.snap.input_values.clone();
+        ((v.first().copied().unwrap_or(0.0) - 2.5).abs() < 1e-6).then_some(())
+    });
+}
+
 /// Same path on the CUDA backend (skipped gracefully if no GPU).
 #[test]
 fn worker_cuda_smoke() {

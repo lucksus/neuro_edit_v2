@@ -195,6 +195,16 @@ impl Sim {
         }
     }
 
+    /// Current constant drive per input (same order as `net.inputs`) —
+    /// what the editor's Inputs panel should display.
+    pub fn input_values(&self) -> Vec<f32> {
+        match self {
+            Sim::Cpu(s) => s.stimulus.constants.clone(),
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.stimulus.constants.clone(),
+        }
+    }
+
     /// Play a per-step series on `input` starting at the current step.
     pub fn play_input(&mut self, input: usize, series: Vec<f32>) {
         match self {

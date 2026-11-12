@@ -124,6 +124,13 @@ impl Env {
         self.build_sim()
     }
 
+    /// The sim handle only if one is already built — callers that publish
+    /// state after an eval use this so a read-only `net.*` eval doesn't
+    /// trigger a sim build nobody asked for.
+    pub fn existing_sim(&self) -> Option<Rc<RefCell<Sim>>> {
+        self.sim.borrow().as_ref().cloned()
+    }
+
     /// Mark the sim stale — next `sim.run` rebuilds from the edited net.
     pub fn invalidate_sim(&self) {
         *self.sim.borrow_mut() = None;

@@ -250,6 +250,14 @@ fn worker(
                         Err(_) => log(&shared, "! script panicked (worker survived)".into()),
                     }
                     set_busy(&shared, false);
+                    // sim.* calls inside the eval (set_input, set_noise…)
+                    // leave state the UI shows — push one snapshot, but
+                    // only when a sim exists (don't build one for a
+                    // read-only `net.*` eval).
+                    if env.existing_sim().is_some() {
+                        let mut p = pub_rc.borrow_mut();
+                        publish_env(&env, &shared, &mut p);
+                    }
                 }
                 Cmd::LoadNet(path) => match net_format::io::load(&path) {
                     Ok(n) => {
@@ -316,6 +324,8 @@ fn worker(
                     if let (Some(i), Ok(h)) = (idx, env.sim_handle()) {
                         h.borrow_mut().set_input_constant(i, value);
                     }
+                    let mut p = pub_rc.borrow_mut();
+                    publish_env(&env, &shared, &mut p);
                 }
                 Cmd::PlayInput { name, series } => {
                     let idx = env.net.borrow().input_index(&name);
@@ -474,6 +484,7 @@ fn publish_sim(
             counts: Arc::new(counts),
             watched_v,
             grid_traces,
+            input_values: Arc::new(sim.input_values()),
             steps_per_sec: p.sps,
         };
         w.sim_built = true;
