@@ -60,19 +60,18 @@ pub(crate) fn blocks(md: &str) -> Vec<Block> {
     let mut pending = String::new();
     let mut bullet = false;
     let mut open = false;
-    let mut flush =
-        |out: &mut Vec<Block>, pending: &mut String, bullet: &mut bool, open: &mut bool| {
-            if *open {
-                let text = std::mem::take(pending);
-                out.push(if *bullet {
-                    Block::Bullet(text)
-                } else {
-                    Block::Para(text)
-                });
-                *open = false;
-                *bullet = false;
-            }
-        };
+    let flush = |out: &mut Vec<Block>, pending: &mut String, bullet: &mut bool, open: &mut bool| {
+        if *open {
+            let text = std::mem::take(pending);
+            out.push(if *bullet {
+                Block::Bullet(text)
+            } else {
+                Block::Para(text)
+            });
+            *open = false;
+            *bullet = false;
+        }
+    };
     for raw in md.lines() {
         let line = raw.trim_end();
         if line.trim_start().starts_with("```") {

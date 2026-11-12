@@ -118,9 +118,9 @@ pub enum Sim {
 pub fn cuda_available() -> bool {
     #[cfg(feature = "cuda")]
     {
-        let mut n = Network::new();
-        n.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
-        cuda::CudaSim::new(&n, SimConfig::default()).is_ok()
+        // Device + driver probe only — CudaSim::new would NVRTC-compile
+        // every kernel just to answer this question.
+        cudarc::driver::CudaContext::new(0).is_ok()
     }
     #[cfg(not(feature = "cuda"))]
     {

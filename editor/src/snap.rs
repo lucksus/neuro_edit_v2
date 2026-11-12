@@ -297,10 +297,11 @@ impl Fold {
             }
             proto::ServerMsg::GeoDelta(d) => {
                 let gen = d.gen;
-                if let Some(g) = sh.geo.as_deref().cloned() {
-                    let mut g = g;
-                    apply_delta(&mut g, &mut self.disp, &mut self.non_grid, *d);
-                    sh.geo = Some(Arc::new(g));
+                if let Some(geo) = sh.geo.as_mut() {
+                    // Sole owner in steady state → mutate in place
+                    // instead of cloning the whole snapshot per delta.
+                    let g = Arc::make_mut(geo);
+                    apply_delta(g, &mut self.disp, &mut self.non_grid, *d);
                 }
                 if let Some(g) = &sh.geo {
                     sh.net_version = g.version;
@@ -643,8 +644,17 @@ fn apply_delta(
         g.syn.push((s.src, s.tgt));
         g.syn_delay_steps.push(s.delay_steps);
     }
-    for (src, tgt) in d.syn_removed {
-        if let Some(i) = g.syn.iter().position(|&(a, b)| a == src && b == tgt) {
+    if !d.syn_removed.is_empty() {
+        // Linear position()+remove() per edge is O(removed × |syn|);
+        // one retain pass keeps it linear in |syn|.
+        let gone: std::collections::HashSet<(u32, u32)> = d.syn_removed.into_iter().collect();
+        let mut drop_idx = Vec::new();
+        for (i, &e) in g.syn.iter().enumerate() {
+            if gone.contains(&e) {
+                drop_idx.push(i);
+            }
+        }
+        for &i in drop_idx.iter().rev() {
             g.syn.remove(i);
             g.syn_delay_steps.remove(i);
         }
@@ -807,5 +817,67 @@ mod tests {
         // and a fresh edit now bases on the true version again
         sh.edits_in_flight += 1;
         assert_eq!(sh.net_version + sh.edits_in_flight - 1, 5);
+    }
+
+    /// Q13: a delta must not clone the whole snapshot, and a batch of
+    /// removed edges must not do a linear `position()` search each.
+    /// The old shape is replicated inline for the before/after number.
+    #[test]
+    fn geo_delta_inplace_and_batch_removal() {
+        use std::time::Instant;
+        let (n, m) = (20_000usize, 60_000u32);
+        let syn: Vec<(u32, u32)> = (0..m)
+            .map(|i| (i % n as u32, m - 1 - i % n as u32))
+            .collect();
+        let removed: Vec<(u32, u32)> = syn.iter().step_by(2).copied().collect();
+
+        let geo = proto::Geo {
+            version: 1,
+            gen: 1,
+            pos: vec![[0.0; 3]; n],
+            names: vec![String::new(); n],
+            kind: vec![0; n],
+            syn: syn.clone(),
+            syn_delay_steps: vec![1; m as usize],
+            ..Default::default()
+        };
+
+        // old shape: clone the snapshot, then position()+remove() per edge.
+        let g = geo_snap_from(&geo);
+        let t = Instant::now();
+        let mut g_old = g.clone();
+        for (src, tgt) in &removed {
+            if let Some(i) = g_old.syn.iter().position(|&(a, b)| a == *src && b == *tgt) {
+                g_old.syn.remove(i);
+                g_old.syn_delay_steps.remove(i);
+            }
+        }
+        let old = t.elapsed();
+
+        let mut fold = Fold::default();
+        let mut sh = Shared::default();
+        fold.apply(&mut sh, proto::ServerMsg::Geo(Box::new(geo.clone())));
+        let t = Instant::now();
+        fold.apply(
+            &mut sh,
+            proto::ServerMsg::GeoDelta(Box::new(proto::GeoDelta {
+                version: 2,
+                gen: 1,
+                syn_removed: removed,
+                ..Default::default()
+            })),
+        );
+        let new = t.elapsed();
+        let g_new = sh.geo.as_ref().unwrap();
+        eprintln!(
+            "Q13 GeoDelta remove {}/{} edges: old {old:?} new {new:?}",
+            m / 2,
+            m
+        );
+        assert_eq!(g_new.syn, g_old.syn);
+        assert_eq!(g_new.syn_delay_steps, g_old.syn_delay_steps);
+        // the second Arc is ours — refcount 2 forces one clone, but no
+        // per-edge rescan; still far under the old total.
+        assert!(new < old / 5, "expected a big win: {old:?} vs {new:?}");
     }
 }

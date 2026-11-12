@@ -443,6 +443,23 @@ impl Network {
         }
     }
 
+    /// `refresh_delays_of` for a set of moved neurons — one synapse pass
+    /// instead of one per neuron (box-select drags on a large net).
+    pub fn refresh_delays_moved(&mut self, moved: &std::collections::HashSet<u32>) {
+        if moved.is_empty() {
+            return;
+        }
+        let (speed, neurons) = (self.meta.conduction_speed, &self.neurons);
+        for s in &mut self.synapses {
+            if moved.contains(&s.src) || moved.contains(&s.tgt) {
+                let (a, b) = (neurons[s.src as usize].pos, neurons[s.tgt as usize].pos);
+                let d =
+                    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+                s.delay_ms = (d / speed).max(1e-3);
+            }
+        }
+    }
+
     /// Source-sorted CSR for `dt` ms steps. Delay steps are rounded, min 1;
     /// a delay over `u16::MAX` steps is an error — the ring is indexed by
     /// u16, so silently clamping would deliver spikes early (M4).

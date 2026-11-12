@@ -1576,18 +1576,16 @@ fn apply_edit(net: &mut Network, dt: f32, e: &NetEdit) -> Result<Applied, String
             for (id, pos) in items {
                 net.neuron_mut(*id).pos = *pos;
             }
-            for id in &ids {
-                net.refresh_delays_of(*id);
-            }
+            // delays of every synapse touching a moved neuron may change;
+            // sources whose TARGET moved recompute too — their display
+            // edge lists carry the delay.
+            let moved: HashSet<u32> = ids.into_iter().collect();
+            net.refresh_delays_moved(&moved);
             net.invalidate_grids();
             grid_delta_membership(net, &grid_before, &mut d);
             for (id, _) in items {
                 d.neurons_changed.push(row(net, *id));
             }
-            // delays of every synapse touching a moved neuron may change;
-            // sources whose TARGET moved recompute too — their display
-            // edge lists carry the delay.
-            let moved: HashSet<u32> = ids.into_iter().collect();
             let mut disp_srcs: HashSet<u32> = moved.iter().copied().collect();
             for (i, s) in net.synapses.iter().enumerate() {
                 if moved.contains(&s.src) || moved.contains(&s.tgt) {
@@ -1597,12 +1595,7 @@ fn apply_edit(net: &mut Network, dt: f32, e: &NetEdit) -> Result<Applied, String
                     disp_srcs.insert(s.src);
                 }
             }
-            for id in &disp_srcs {
-                let dl = disp_list(net, *id, dt);
-                if !dl.is_empty() {
-                    d.disp_changed.push((*id, dl));
-                }
-            }
+            d.disp_changed = disp_lists(net, &disp_srcs, dt);
         }
         NetEdit::SetNeuronName { id, name } => {
             check_ids(net, &[*id])?;
@@ -1799,8 +1792,11 @@ fn apply_edit(net: &mut Network, dt: f32, e: &NetEdit) -> Result<Applied, String
             }
             {
                 let g = &mut net.groups[gi];
+                // O(ids × members) contains() → box-select on a big
+                // net stalls the worker; dedupe with a set.
+                let have: HashSet<u32> = g.members.iter().copied().collect();
                 for id in ids {
-                    if !g.members.contains(id) {
+                    if !have.contains(id) {
                         g.members.push(*id);
                     }
                 }
@@ -1860,4 +1856,129 @@ fn disp_list(net: &Network, src: u32, dt: f32) -> Vec<(u32, u16)> {
         }
     }
     out
+}
+
+/// `disp_list` for a set of sources in one synapse pass — batch moves
+/// would otherwise rescan the synapse table per source.
+fn disp_lists(net: &Network, srcs: &HashSet<u32>, dt: f32) -> Vec<(u32, Vec<(u32, u16)>)> {
+    let mut map: std::collections::HashMap<u32, Vec<(u32, u16)>> =
+        srcs.iter().map(|&s| (s, Vec::new())).collect();
+    let dtm = dt.max(1e-6);
+    for s in &net.synapses {
+        if let Some(v) = map.get_mut(&s.src) {
+            if v.len() < GEO_EDGES_PER_NEURON {
+                v.push((s.tgt, (s.delay_ms / dtm).round().max(1.0) as u16));
+            }
+        }
+    }
+    let mut out: Vec<(u32, Vec<(u32, u16)>)> =
+        map.into_iter().filter(|(_, v)| !v.is_empty()).collect();
+    out.sort_by_key(|(src, _)| *src);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 20k-neuron net with `syn` random synapses, no groups.
+    fn big_net(n: usize, syn: usize) -> Network {
+        let mut net = Network::new();
+        for i in 0..n {
+            net.add_neuron(
+                [
+                    (i % 100) as f32,
+                    ((i / 100) % 100) as f32,
+                    (i / 10_000) as f32,
+                ],
+                net_format::NeuronKind::Excitatory,
+            );
+        }
+        let mut s = 1u64;
+        for _ in 0..syn {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let a = (s >> 33) as u32 % n as u32;
+            let b = (s >> 17) as u32 % n as u32;
+            if a != b {
+                net.connect(a, b, 1.0);
+            }
+        }
+        net
+    }
+
+    /// Q13: `AddToGroup` on a crowded group must not do a
+    /// `Vec::contains` per incoming id. Times the old pattern inline so
+    /// the before/after lives next to the fix.
+    #[test]
+    fn add_to_group_large_net_is_not_quadratic() {
+        let mut net = big_net(100_000, 0);
+        net.add_group("g");
+        net.groups[0].members = (0..50_000).collect();
+        let ids: Vec<u32> = (40_000..90_000).collect();
+
+        // old shape: contains() per id — measured, not run through apply.
+        let t = Instant::now();
+        for id in &ids {
+            if !net.groups[0].members.contains(id) {
+                net.groups[0].members.push(*id);
+            }
+        }
+        let old = t.elapsed();
+
+        let mut net = big_net(100_000, 0);
+        net.add_group("g");
+        net.groups[0].members = (0..50_000).collect();
+        let t = Instant::now();
+        apply_edit(
+            &mut net,
+            0.1,
+            &NetEdit::AddToGroup {
+                name: "g".into(),
+                ids: ids.clone(),
+            },
+        )
+        .unwrap();
+        let new = t.elapsed();
+        eprintln!("Q13 AddToGroup 50k ids on 50k members: old {old:?} new {new:?}");
+        assert_eq!(net.groups[0].members.len(), 90_000);
+        assert!(
+            new < old / 10,
+            "set-based add should be much faster: {old:?} vs {new:?}"
+        );
+    }
+
+    /// Q13: dragging many neurons must refresh delays in one synapse
+    /// pass, not one pass per neuron.
+    #[test]
+    fn move_neurons_large_net_is_one_pass() {
+        let (n, syn) = (20_000usize, 400_000usize);
+        let moved: Vec<u32> = (0..5_000).collect();
+        let items: Vec<(u32, [f32; 3])> = moved.iter().map(|&i| (i, [0.0, 0.0, 9.0])).collect();
+
+        // old shape: refresh_delays_of per moved neuron.
+        let mut net = big_net(n, syn);
+        let t = Instant::now();
+        for (id, pos) in &items {
+            net.neuron_mut(*id).pos = *pos;
+        }
+        for id in &moved {
+            net.refresh_delays_of(*id);
+        }
+        let old = t.elapsed();
+        let old_delays: Vec<f32> = net.synapses.iter().map(|s| s.delay_ms).collect();
+
+        let mut net = big_net(n, syn);
+        let t = Instant::now();
+        apply_edit(&mut net, 0.1, &NetEdit::MoveNeurons { items }).unwrap();
+        let new = t.elapsed();
+        eprintln!("Q13 MoveNeurons 5k of 20k/400k: old {old:?} new {new:?}");
+        assert_eq!(
+            old_delays,
+            net.synapses.iter().map(|s| s.delay_ms).collect::<Vec<_>>()
+        );
+        assert!(
+            new < old / 5,
+            "one-pass refresh should be much faster: {old:?} vs {new:?}"
+        );
+    }
 }
