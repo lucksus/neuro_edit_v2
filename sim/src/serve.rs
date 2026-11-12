@@ -1679,11 +1679,21 @@ fn apply_edit(net: &mut Network, dt: f32, e: &NetEdit) -> Result<Applied, String
             d.grids_changed = grid_snaps(net);
         }
         NetEdit::AddInput { name, targets, pos } => {
+            // Q4: dangling ids/non-finite weights must not reach the net.
+            check_ids(net, &targets.iter().map(|(id, _)| *id).collect::<Vec<_>>())?;
+            for (_, w) in targets {
+                if !w.is_finite() {
+                    return Err(format!("input {name}: non-finite weight {w}"));
+                }
+            }
             net.add_input(name, targets.clone(), *pos);
             d.inputs = Some(inputs_proto(net));
         }
         NetEdit::AddInputTarget { name, target, w } => {
             check_ids(net, &[*target])?;
+            if !w.is_finite() {
+                return Err(format!("input {name}: non-finite weight {w}"));
+            }
             let k = net
                 .inputs
                 .iter()
@@ -1714,6 +1724,7 @@ fn apply_edit(net: &mut Network, dt: f32, e: &NetEdit) -> Result<Applied, String
             );
         }
         NetEdit::AddReadout { name, units } => {
+            check_ids(net, units)?; // Q4: dangling readout units refused
             net.add_readout(name, units.clone());
             d.readouts = Some(
                 net.readouts

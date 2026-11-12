@@ -1040,3 +1040,57 @@ fn sim_settings_persist_across_sessions() {
     rig.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Q4: AddInput/AddReadout with dangling neuron ids are refused — and
+/// the refusal doesn't wedge the edit stream (a valid edit after still
+/// applies, Q5's server half).
+#[test]
+fn dangling_ids_refused_then_next_edit_applies() {
+    let mut net = Network::new();
+    net.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
+    let rig = start(net, None);
+    rig.send(ClientMsg::Hello { proto: 1 });
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+
+    rig.send(ClientMsg::Edit {
+        base: 1,
+        edit: NetEdit::AddInput {
+            name: "bad".into(),
+            targets: vec![(0, 1.0), (999, 1.0)],
+            pos: [0.0; 3],
+        },
+    });
+    rig.send(ClientMsg::Edit {
+        base: 1,
+        edit: NetEdit::AddReadout {
+            name: "bad_ro".into(),
+            units: vec![0, 12345],
+        },
+    });
+    rig.send(ClientMsg::Edit {
+        base: 1,
+        edit: NetEdit::AddReadout {
+            name: "ok_ro".into(),
+            units: vec![0],
+        },
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::GeoDelta(_)));
+    let errors: Vec<String> = evs
+        .iter()
+        .filter_map(|e| match &e.msg {
+            ServerMsg::Error(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 2, "both dangling edits refused: {errors:?}");
+    assert!(errors.iter().all(|e| e.starts_with("edit refused:")));
+    let d = evs
+        .iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::GeoDelta(d) => Some(d),
+            _ => None,
+        })
+        .expect("the valid edit must still produce a delta");
+    assert!(d.readouts.is_some(), "ok_ro landed: {d:?}");
+    rig.stop();
+}
