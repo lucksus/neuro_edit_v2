@@ -46,7 +46,8 @@ fn set_backend_is_respected_by_scripts() {
     }
     let mut env = sim::script::Env::new(Network::new(), BackendKind::Cpu, 1).unwrap();
     env.set_backend(BackendKind::Cuda);
-    env.eval_str("net.add_neuron(0.0,0.0,0.0); sim.run(1.0);")
+    let _ = env
+        .eval_str("net.add_neuron(0.0,0.0,0.0); sim.run(1.0);")
         .unwrap();
     let h = env.sim_handle().unwrap();
     let kind = match &*h.borrow() {

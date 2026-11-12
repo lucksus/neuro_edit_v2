@@ -242,6 +242,7 @@ pub enum Dialog {
 /// Files-window state: a listing of the user's space (remote per-user
 /// root over the file protocol, or the local app-data dir when running
 /// without --connect). One window, two backends.
+#[derive(Default)]
 pub struct FilesUi {
     /// Remote: path inside the user's root ("" = root). Local: absolute
     /// path under `local_root`.
@@ -266,26 +267,6 @@ pub struct FilesUi {
     /// egui drag-drop payloads stashed by `files_window` for `files_pump`.
     pub ctx_dropped: Option<Vec<egui::DroppedFile>>,
     pub status: String,
-}
-
-impl Default for FilesUi {
-    fn default() -> Self {
-        Self {
-            cwd: String::new(),
-            entries: Vec::new(),
-            local_root: None,
-            usage: None,
-            sel: None,
-            mkdir: String::new(),
-            rename_to: String::new(),
-            confirm_delete: None,
-            upload: None,
-            upload_q: std::collections::VecDeque::new(),
-            opened: false,
-            ctx_dropped: None,
-            status: String::new(),
-        }
-    }
 }
 
 fn fmt_size(b: u64) -> String {
@@ -828,7 +809,7 @@ impl EditorApp {
                 if let Some(p) = op.strip_prefix("upload ready ") {
                     // drop the lock: upload_ready sends client messages
                     drop(sh);
-                    self.upload_ready(&p.to_string());
+                    self.upload_ready(p);
                     sh = self.ctl.shared.write().unwrap();
                 } else {
                     drop(sh);
@@ -893,7 +874,7 @@ impl EditorApp {
                     .as_ref()
                     .map(|s| s.inst_half.clone())
                     .unwrap_or_default();
-                let was_empty = self.geo.as_ref().map_or(true, |old| old.pos.is_empty());
+                let was_empty = self.geo.as_ref().is_none_or(|old| old.pos.is_empty());
                 if !g.pos.is_empty() && (was_empty || self.frame_pending) {
                     let (mn, mx) = gpu.scene.as_ref().unwrap().bounds;
                     self.camera.frame(mn, mx);
@@ -1591,11 +1572,9 @@ impl EditorApp {
         self.show_inputs = open;
     }
 
-    /// `?` — every mode key and mouse gesture in one small overlay.
-    /// (WASD/QE pan the camera, so tools use other letters.)
     // ------------------------------------------------------------------
     // Files window — one UI, two backends: the file protocol (remote,
-    /// per-user root) or std::fs on the local app-data dir.
+    // per-user root) or std::fs on the local app-data dir.
     // ------------------------------------------------------------------
 
     /// Refresh `files.entries` for the current `cwd` (remote → ListFiles;
@@ -1655,7 +1634,9 @@ impl EditorApp {
             });
             off = end;
         }
-        self.files.upload.as_mut().map(|u| u.2 = off);
+        if let Some(u) = self.files.upload.as_mut() {
+            u.2 = off;
+        }
     }
 
     /// Completed `DownloadFile` stream — hand the bytes to the user.
@@ -1916,34 +1897,26 @@ impl EditorApp {
             format!("{}/{}", self.files.cwd, e.name)
         };
         if e.name.ends_with(".ne2") {
-            if self.files.local_root.is_none() {
-                self.ctl.send(ClientMsg::LoadNet { path });
-            } else {
-                let p = self
-                    .files
-                    .local_root
-                    .as_ref()
-                    .unwrap()
-                    .join(&self.files.cwd)
-                    .join(&e.name);
-                self.ctl.send(ClientMsg::LoadNet {
-                    path: p.to_string_lossy().into_owned(),
-                });
+            match self.files.local_root.clone() {
+                Some(root) => {
+                    let p = root.join(&self.files.cwd).join(&e.name);
+                    self.ctl.send(ClientMsg::LoadNet {
+                        path: p.to_string_lossy().into_owned(),
+                    });
+                }
+                None => self.ctl.send(ClientMsg::LoadNet { path }),
             }
             self.status = format!("loading {e}", e = e.name);
         } else if e.name.ends_with(".rhai") {
-            if self.files.local_root.is_none() {
-                self.ctl.send(ClientMsg::ReadFile { path });
-            } else if let Some(p) = self
-                .files
-                .local_root
-                .as_ref()
-                .map(|r| r.join(&self.files.cwd).join(&e.name))
-            {
-                if let Ok(t) = std::fs::read_to_string(&p) {
-                    self.script_file = p.to_string_lossy().into_owned();
-                    self.script_text = t;
+            match self.files.local_root.clone() {
+                Some(root) => {
+                    let p = root.join(&self.files.cwd).join(&e.name);
+                    if let Ok(t) = std::fs::read_to_string(&p) {
+                        self.script_file = p.to_string_lossy().into_owned();
+                        self.script_text = t;
+                    }
                 }
+                None => self.ctl.send(ClientMsg::ReadFile { path }),
             }
             self.show_script = true;
         }
@@ -2138,6 +2111,8 @@ impl EditorApp {
         }
     }
 
+    /// `?` — every mode key and mouse gesture in one small overlay.
+    /// (WASD/QE pan the camera, so tools use other letters.)
     fn keys_window(&mut self, ctx: &egui::Context) {
         if !self.show_keys {
             return;

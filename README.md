@@ -133,6 +133,17 @@ editor). The detection + instruction choice is a plain ES module
 (`editor/web/webgpu-help.mjs`) tested with
 `node --test editor/web/webgpu-help.test.mjs`.
 
+### Hosted multi-user mode
+
+`server --accounts <state-dir> --data-dir <root> --web editor/dist-web`
+turns the same binary into a small web app: a landing page with
+signup/login, an admin back office at `/admin`, the browser editor at
+`/app`, and a per-user simulator run + per-user file space behind it.
+Passwords are argon2id-hashed, sessions are SHA-256-digested random
+tokens, and the native editor can log in too:
+`editor --connect https://host`. Deployment (nginx in front, TLS,
+systemd, backups) is in `docs/deploy.md`.
+
 ## Architecture notes
 
 - One `Network` (flat arrays) is shared by the CPU sim, CUDA sim and the

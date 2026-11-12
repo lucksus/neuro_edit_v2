@@ -88,9 +88,6 @@ struct Cli {
 enum Cmd {
     /// Back-office operations on the accounts store.
     Admin {
-        /// STATE-DIR holding accounts.db.
-        #[arg(long)]
-        accounts: std::path::PathBuf,
         #[command(subcommand)]
         action: AdminAction,
     },
@@ -101,17 +98,31 @@ enum AdminAction {
     /// Create (or re-activate) an admin account. The password is read
     /// from stdin — never argv, so it stays out of history/ps.
     Add {
+        /// STATE-DIR holding accounts.db.
+        #[arg(long)]
+        accounts: std::path::PathBuf,
         #[arg(long)]
         email: String,
         #[arg(long)]
         name: String,
     },
     /// List all users.
-    List,
+    List {
+        #[arg(long)]
+        accounts: std::path::PathBuf,
+    },
     /// Activate a pending/disabled account.
-    Activate { email: String },
+    Activate {
+        #[arg(long)]
+        accounts: std::path::PathBuf,
+        email: String,
+    },
     /// Disable an account (sessions die, its run stops).
-    Disable { email: String },
+    Disable {
+        #[arg(long)]
+        accounts: std::path::PathBuf,
+        email: String,
+    },
 }
 
 fn bind_is_loopback(bind: &str) -> bool {
@@ -125,8 +136,8 @@ fn bind_is_loopback(bind: &str) -> bool {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    if let Some(Cmd::Admin { accounts, action }) = &cli.command {
-        return admin(accounts, action);
+    if let Some(Cmd::Admin { action }) = &cli.command {
+        return admin(action);
     }
     let backend = if cli.cpu {
         BackendKind::Cpu
@@ -268,19 +279,22 @@ fn serve_multi(cli: &Cli, state_dir: &std::path::Path, backend: BackendKind) -> 
 
 /// `server admin …` — same store the running server uses (SQLite is
 /// fine with a CLI alongside the server; WAL keeps readers unblocked).
-fn admin(state_dir: &std::path::Path, action: &AdminAction) -> anyhow::Result<()> {
-    let accounts = server::accounts::Accounts::open(state_dir)?;
+fn admin(action: &AdminAction) -> anyhow::Result<()> {
     match action {
-        AdminAction::Add { email, name } => {
+        AdminAction::Add {
+            accounts: dir,
+            email,
+            name,
+        } => {
             eprint!("password for {email} (12+ chars): ");
             let mut pw = String::new();
             std::io::stdin().read_to_string(&mut pw)?;
             let pw = pw.trim_end_matches(['\n', '\r']);
-            let u = accounts.create_admin(email, name, pw)?;
+            let u = server::accounts::Accounts::open(dir)?.create_admin(email, name, pw)?;
             eprintln!("admin {} ({}) active", u.email, u.id);
         }
-        AdminAction::List => {
-            for u in accounts.list() {
+        AdminAction::List { accounts: dir } => {
+            for u in server::accounts::Accounts::open(dir)?.list() {
                 println!(
                     "{}\t{}\t{}\t{}MB\t{}{}",
                     u.id,
@@ -292,14 +306,22 @@ fn admin(state_dir: &std::path::Path, action: &AdminAction) -> anyhow::Result<()
                 );
             }
         }
-        AdminAction::Activate { email } => {
+        AdminAction::Activate {
+            accounts: dir,
+            email,
+        } => {
+            let accounts = server::accounts::Accounts::open(dir)?;
             let u = accounts
                 .by_email(email)
                 .with_context(|| format!("no user {email}"))?;
             accounts.set_status(u.id, "active")?;
             eprintln!("{email} active");
         }
-        AdminAction::Disable { email } => {
+        AdminAction::Disable {
+            accounts: dir,
+            email,
+        } => {
+            let accounts = server::accounts::Accounts::open(dir)?;
             let u = accounts
                 .by_email(email)
                 .with_context(|| format!("no user {email}"))?;
