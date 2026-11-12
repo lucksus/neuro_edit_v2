@@ -60,8 +60,31 @@ pub struct ServeOpts {
     /// `UploadDataset` refuses payloads over this many bytes (the
     /// server's `--max-upload-mb`; local mode uses a large default).
     pub max_upload_bytes: usize,
+    /// Per-run storage cap on `data_dir` (multi-user mode's per-user
+    /// quota; 0 = unlimited — local mode). Checked on every protocol
+    /// write: `WriteFile`, `UploadDataset`, `UploadStart`/`UploadChunk`.
+    pub quota_bytes: u64,
     /// Shared stop flag — UI Stop button / server shutdown.
     pub abort: std::sync::Arc<AtomicBool>,
+}
+
+/// Recursive byte count of `dir` (0 on missing/inaccessible) — used
+/// for quota checks and the per-user usage bar.
+pub fn dir_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if let Ok(md) = std::fs::symlink_metadata(&p) {
+                if md.is_dir() {
+                    total = total.saturating_add(dir_size(&p));
+                } else {
+                    total = total.saturating_add(md.len());
+                }
+            }
+        }
+    }
+    total
 }
 
 fn emit_b(emit: &Emit, m: impl Into<ServerMsg>) {
@@ -102,6 +125,7 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
         cfg,
         data_dir,
         max_upload_bytes,
+        quota_bytes,
         abort,
     } = opts;
     let mut env = Env::with_print(net, backend, seed, {
@@ -509,6 +533,12 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                                     name: e.file_name().to_string_lossy().into_owned(),
                                     is_dir: md.is_dir(),
                                     size: md.len(),
+                                    mtime_ms: md
+                                        .modified()
+                                        .ok()
+                                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                        .map(|d| d.as_millis() as u64)
+                                        .unwrap_or(0),
                                 })
                             })
                             .collect();
@@ -535,9 +565,16 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                     }
                 }
                 ClientMsg::WriteFile { path, data } => {
-                    match resolve(&env, &path)
-                        .and_then(|p| std::fs::write(&p, &data).map_err(|e| e.to_string()))
-                    {
+                    let r = resolve(&env, &path).and_then(|p| {
+                        quota_check(
+                            &env,
+                            quota_bytes,
+                            data.len() as u64,
+                            std::path::Path::new(&p),
+                        )?;
+                        std::fs::write(&p, &data).map_err(|e| e.to_string())
+                    });
+                    match r {
                         Ok(()) => emit_to(&emit, client, ServerMsg::FileWritten { path }),
                         Err(e) => emit_to(
                             &emit,
@@ -573,6 +610,12 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                     } else {
                         resolve(&env, &format!("datasets/{name}")).and_then(|dir| {
                             let dir = std::path::PathBuf::from(dir);
+                            quota_check(
+                                &env,
+                                quota_bytes,
+                                (signal.len() + meta_json.len() + labels_json.len()) as u64,
+                                &dir,
+                            )?;
                             std::fs::create_dir_all(&dir)
                                 .and_then(|()| {
                                     std::fs::write(dir.join(format!("signal.{ext}")), &signal)?;
@@ -599,6 +642,163 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                             },
                         ),
                         Err(e) => emit_to(&emit, client, ServerMsg::Error(format!("upload: {e}"))),
+                    }
+                }
+                ClientMsg::Mkdir { path } => {
+                    let r = resolve(&env, &path)
+                        .and_then(|p| std::fs::create_dir_all(&p).map_err(|e| e.to_string()));
+                    match r {
+                        Ok(()) => emit_to(&emit, client, ServerMsg::DirCreated { path }),
+                        Err(e) => emit_to(
+                            &emit,
+                            client,
+                            ServerMsg::Error(format!("mkdir {path}: {e}")),
+                        ),
+                    }
+                }
+                ClientMsg::DeleteFile { path } => {
+                    let r = resolve(&env, &path).and_then(|p| {
+                        let p = std::path::PathBuf::from(&p);
+                        if p.is_dir() {
+                            std::fs::remove_dir_all(&p).map_err(|e| e.to_string())
+                        } else {
+                            std::fs::remove_file(&p).map_err(|e| e.to_string())
+                        }
+                    });
+                    match r {
+                        Ok(()) => emit_to(&emit, client, ServerMsg::FileDeleted { path }),
+                        Err(e) => emit_to(
+                            &emit,
+                            client,
+                            ServerMsg::Error(format!("delete {path}: {e}")),
+                        ),
+                    }
+                }
+                ClientMsg::RenameFile { from, to } => {
+                    let r = resolve(&env, &from).and_then(|f| {
+                        resolve(&env, &to)
+                            .and_then(|t| std::fs::rename(&f, &t).map_err(|e| e.to_string()))
+                    });
+                    match r {
+                        Ok(()) => emit_to(&emit, client, ServerMsg::FileRenamed { from, to }),
+                        Err(e) => emit_to(
+                            &emit,
+                            client,
+                            ServerMsg::Error(format!("rename {from} → {to}: {e}")),
+                        ),
+                    }
+                }
+                ClientMsg::FileUsage => {
+                    let used = env
+                        .data_dir
+                        .borrow()
+                        .as_ref()
+                        .map(|d| dir_size(d))
+                        .unwrap_or(0);
+                    emit_to(
+                        &emit,
+                        client,
+                        ServerMsg::Usage {
+                            used,
+                            quota: quota_bytes,
+                        },
+                    );
+                }
+                ClientMsg::UploadStart { path, size } => {
+                    let r = resolve(&env, &path).and_then(|p| {
+                        if size > max_upload_bytes as u64 {
+                            return Err(format!(
+                                "{size} B over the {} B per-file limit",
+                                max_upload_bytes
+                            ));
+                        }
+                        let p = std::path::PathBuf::from(&p);
+                        quota_check(&env, quota_bytes, size, &p)?;
+                        // Fresh upload: replace any stale part file.
+                        let _ = std::fs::remove_file(part_path(&p));
+                        if let Some(parent) = p.parent() {
+                            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                        }
+                        Ok(())
+                    });
+                    match r {
+                        Ok(()) => emit_to(&emit, client, ServerMsg::UploadReady { path }),
+                        Err(e) => emit_to(
+                            &emit,
+                            client,
+                            ServerMsg::Error(format!("upload {path}: {e}")),
+                        ),
+                    }
+                }
+                ClientMsg::UploadChunk { path, data, last } => {
+                    let r = resolve(&env, &path).and_then(|p| {
+                        let p = std::path::PathBuf::from(&p);
+                        let part = part_path(&p);
+                        quota_check(&env, quota_bytes, data.len() as u64, &p)?;
+                        use std::io::Write;
+                        let mut f = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&part)
+                            .map_err(|e| e.to_string())?;
+                        f.write_all(&data).map_err(|e| e.to_string())?;
+                        drop(f);
+                        if last {
+                            std::fs::rename(&part, &p).map_err(|e| e.to_string())?;
+                        }
+                        Ok(())
+                    });
+                    match r {
+                        Ok(()) if last => emit_to(&emit, client, ServerMsg::FileWritten { path }),
+                        Ok(()) => {}
+                        Err(e) => {
+                            // No partial file: drop the part on any error.
+                            if let Ok(p) = resolve(&env, &path) {
+                                let _ = std::fs::remove_file(part_path(std::path::Path::new(&p)));
+                            }
+                            emit_to(
+                                &emit,
+                                client,
+                                ServerMsg::Error(format!("upload {path}: {e}")),
+                            )
+                        }
+                    }
+                }
+                ClientMsg::DownloadFile { path } => {
+                    match resolve(&env, &path)
+                        .and_then(|p| std::fs::read(&p).map_err(|e| e.to_string()))
+                    {
+                        Ok(data) => {
+                            const CHUNK: usize = 256 * 1024;
+                            let mut i = 0;
+                            while i < data.len() {
+                                let end = (i + CHUNK).min(data.len());
+                                emit_to(
+                                    &emit,
+                                    client,
+                                    ServerMsg::FileChunk {
+                                        path: path.clone(),
+                                        data: data[i..end].to_vec(),
+                                        done: false,
+                                    },
+                                );
+                                i = end;
+                            }
+                            emit_to(
+                                &emit,
+                                client,
+                                ServerMsg::FileChunk {
+                                    path,
+                                    data: Vec::new(),
+                                    done: true,
+                                },
+                            );
+                        }
+                        Err(e) => emit_to(
+                            &emit,
+                            client,
+                            ServerMsg::Error(format!("download {path}: {e}")),
+                        ),
                     }
                 }
                 // Jobs are a `server` feature — they need a shared
@@ -926,6 +1126,37 @@ fn run_published(
 /// Refuses `..` components and absolute paths outright.
 pub fn resolve(env: &Env, p: &str) -> Result<String, String> {
     env.resolve_path(p)
+}
+
+/// `.upload` staging name next to the target — committed by rename on
+/// the last chunk, removed on any failure so a failed upload leaves
+/// no partial file behind.
+fn part_path(p: &std::path::Path) -> std::path::PathBuf {
+    let mut s = p.as_os_str().to_os_string();
+    s.push(".upload");
+    std::path::PathBuf::from(s)
+}
+
+/// Quota gate for protocol writes: `usage(data_dir) + extra` must fit
+/// inside `quota` (0 = unlimited). Subtracts the bytes `target`
+/// already occupies when the write overwrites it. The `.upload` part
+/// file counts toward usage, so chunk-by-chunk growth stays honest.
+fn quota_check(env: &Env, quota: u64, extra: u64, target: &std::path::Path) -> Result<(), String> {
+    if quota == 0 {
+        return Ok(());
+    }
+    let Some(dir) = env.data_dir.borrow().clone() else {
+        return Ok(());
+    };
+    let existing = std::fs::metadata(target).map(|m| m.len()).unwrap_or(0);
+    let used = dir_size(&dir).saturating_sub(existing);
+    if used.saturating_add(extra) > quota {
+        return Err(format!(
+            "over quota: {} + {} B would exceed the {} B limit",
+            used, extra, quota
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

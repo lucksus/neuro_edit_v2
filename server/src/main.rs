@@ -90,6 +90,7 @@ fn main() -> anyhow::Result<()> {
             },
             data_dir: cli.data_dir.clone(),
             max_upload_bytes: cli.max_upload_mb.saturating_mul(1024 * 1024),
+            quota_bytes: 0,
             abort: Arc::new(AtomicBool::new(false)),
         },
     );

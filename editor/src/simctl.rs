@@ -98,6 +98,7 @@ impl SimCtl {
                         cfg,
                         data_dir: None,
                         max_upload_bytes: usize::MAX,
+                        quota_bytes: 0,
                         abort: ab,
                     },
                     rx,

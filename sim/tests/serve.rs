@@ -42,6 +42,7 @@ fn start_limit(net: Network, data_dir: Option<std::path::PathBuf>, max_upload_by
                 cfg: SimConfig::default(),
                 data_dir,
                 max_upload_bytes,
+                quota_bytes: 0,
                 abort: Arc::new(AtomicBool::new(false)),
             },
             rx,

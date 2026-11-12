@@ -394,6 +394,44 @@ pub enum ClientMsg {
     OpenJob {
         id: u64,
     },
+    /// Create a directory (recursive) inside the user's root.
+    /// Answer: `DirCreated` or `Error`.
+    Mkdir {
+        path: String,
+    },
+    /// Delete a file or directory (dirs recursively) inside the user's
+    /// root. Answer: `FileDeleted` or `Error`.
+    DeleteFile {
+        path: String,
+    },
+    /// Rename/move a file or directory inside the user's root.
+    /// Answer: `FileRenamed` or `Error`.
+    RenameFile {
+        from: String,
+        to: String,
+    },
+    /// Storage used / quota for this user. Answer: `Usage`.
+    FileUsage,
+    /// Begin a chunked upload to `path`: checks the declared `size`
+    /// against the per-file cap and the account quota before a byte
+    /// lands. Answer: `UploadReady` or `Error`.
+    UploadStart {
+        path: String,
+        size: u64,
+    },
+    /// One chunk of an upload for `path` (must follow `UploadStart`).
+    /// Appended to `<path>.upload`; `last` commits the rename.
+    /// Answer: `FileWritten` on `last`, `Error` aborts (part removed).
+    UploadChunk {
+        path: String,
+        data: Vec<u8>,
+        last: bool,
+    },
+    /// Chunked download — answers with `FileChunk*` ending `done`,
+    /// or `Error`. Big datasets ride this without one huge frame.
+    DownloadFile {
+        path: String,
+    },
     /// Polite disconnect.
     Bye,
 }
@@ -491,6 +529,23 @@ pub enum ServerMsg {
         /// The `job_progress` history, one row per call.
         progress: Vec<Vec<(String, f64)>>,
     },
+    /// Answer to `ClientMsg::Mkdir`.
+    DirCreated { path: String },
+    /// Answer to `ClientMsg::DeleteFile`.
+    FileDeleted { path: String },
+    /// Answer to `ClientMsg::RenameFile`.
+    FileRenamed { from: String, to: String },
+    /// Answer to `ClientMsg::FileUsage` — `quota` 0 means unlimited.
+    Usage { used: u64, quota: u64 },
+    /// Answer to `ClientMsg::UploadStart` — the upload may proceed.
+    UploadReady { path: String },
+    /// One chunk of a `DownloadFile` reply; `done` closes the stream
+    /// (`data` empty on the last).
+    FileChunk {
+        path: String,
+        data: Vec<u8>,
+        done: bool,
+    },
     /// Refused edit / protocol error / worker failure worth a dialog.
     Error(String),
 }
@@ -513,6 +568,8 @@ pub struct FileEntry {
     pub name: String,
     pub is_dir: bool,
     pub size: u64,
+    /// Unix ms mtime (0 when unknown).
+    pub mtime_ms: u64,
 }
 
 /// A `ServerMsg` plus routing: `to: None` broadcasts to every connected
@@ -668,6 +725,29 @@ mod tests {
             ClientMsg::CancelJob { id: 9 },
             ClientMsg::ListJobs,
             ClientMsg::OpenJob { id: 4 },
+            ClientMsg::Mkdir {
+                path: "new/dir".into(),
+            },
+            ClientMsg::DeleteFile {
+                path: "old.rhai".into(),
+            },
+            ClientMsg::RenameFile {
+                from: "a".into(),
+                to: "b/c".into(),
+            },
+            ClientMsg::FileUsage,
+            ClientMsg::UploadStart {
+                path: "big.bin".into(),
+                size: 12345,
+            },
+            ClientMsg::UploadChunk {
+                path: "big.bin".into(),
+                data: vec![9; 7],
+                last: true,
+            },
+            ClientMsg::DownloadFile {
+                path: "big.bin".into(),
+            },
             ClientMsg::Bye,
         ] {
             round_trip(&m);
@@ -841,11 +921,13 @@ mod tests {
                         name: "a.rhai".into(),
                         is_dir: false,
                         size: 42,
+                        mtime_ms: 7,
                     },
                     FileEntry {
                         name: "nets".into(),
                         is_dir: true,
                         size: 0,
+                        mtime_ms: 8,
                     },
                 ],
             },

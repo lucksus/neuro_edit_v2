@@ -144,6 +144,14 @@ pub struct Shared {
     pub file_data: Option<(String, String)>,
     /// `WriteFile` ack for status display.
     pub file_written: Option<String>,
+    /// `Usage` reply — (used_bytes, quota_bytes); quota 0 = unlimited.
+    pub usage: Option<(u64, u64)>,
+    /// Completed file op that should trigger a list refresh
+    /// (`DirCreated`/`FileDeleted`/`FileRenamed`/`UploadReady` paths).
+    pub file_op: Option<String>,
+    /// Streaming `FileChunk` replies accumulate here until `done` —
+    /// consumed by the Files window's download path.
+    pub download: Option<(String, Vec<u8>, bool)>,
     /// Server job list (`ListJobs` refreshed, JobStarted appended,
     /// JobDone re-stamps status).
     pub jobs: Vec<proto::JobInfo>,
@@ -183,6 +191,9 @@ impl Default for Shared {
             files: None,
             file_data: None,
             file_written: None,
+            usage: None,
+            file_op: None,
+            download: None,
             jobs: Vec::new(),
             job_progress: std::collections::BTreeMap::new(),
             job_detail: None,
@@ -349,6 +360,30 @@ impl Fold {
                     result_json,
                     progress,
                 });
+            }
+            proto::ServerMsg::DirCreated { path } => {
+                sh.file_op = Some(format!("mkdir {path}"));
+            }
+            proto::ServerMsg::FileDeleted { path } => {
+                sh.file_op = Some(format!("deleted {path}"));
+            }
+            proto::ServerMsg::FileRenamed { from, to } => {
+                sh.file_op = Some(format!("renamed {from} → {to}"));
+            }
+            proto::ServerMsg::Usage { used, quota } => {
+                sh.usage = Some((used, quota));
+            }
+            proto::ServerMsg::UploadReady { path } => {
+                sh.file_op = Some(format!("upload ready {path}"));
+            }
+            proto::ServerMsg::FileChunk { path, data, done } => {
+                let entry = sh
+                    .download
+                    .get_or_insert_with(|| (path.clone(), Vec::new(), false));
+                if entry.0 == path {
+                    entry.1.extend_from_slice(&data);
+                    entry.2 = done;
+                }
             }
             proto::ServerMsg::Error(e) => sh.log(format!("! {e}")),
         }

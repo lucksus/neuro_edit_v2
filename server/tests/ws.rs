@@ -29,6 +29,7 @@ fn start(net: Network, data_dir: Option<std::path::PathBuf>, seed: u64) -> Ws {
             cfg: SimConfig::default(),
             data_dir,
             max_upload_bytes: usize::MAX,
+            quota_bytes: 0,
             abort: Arc::new(AtomicBool::new(false)),
         },
     );
@@ -668,6 +669,7 @@ fn ws_local_remote_equivalent() {
                 cfg: SimConfig::default(),
                 data_dir: None,
                 max_upload_bytes: usize::MAX,
+                quota_bytes: 0,
                 abort: Arc::new(AtomicBool::new(false)),
             },
             lrx,
@@ -785,6 +787,7 @@ fn ws_web_serves_http_and_ws_on_one_port() {
             cfg: SimConfig::default(),
             data_dir: None,
             max_upload_bytes: usize::MAX,
+            quota_bytes: 0,
             abort: Arc::new(AtomicBool::new(false)),
         },
     );
@@ -842,6 +845,7 @@ fn ws_plain_http_gets_hint_without_web() {
             cfg: SimConfig::default(),
             data_dir: Some(dir.clone()),
             max_upload_bytes: usize::MAX,
+            quota_bytes: 0,
             abort: Arc::new(AtomicBool::new(false)),
         },
     );
