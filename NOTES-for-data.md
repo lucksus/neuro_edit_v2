@@ -1118,3 +1118,155 @@ Skipped/deferred (per spec): 10 synapse look, 14 vertical-move
 modifier, 15 docking — all waiting on Nico. The 3090 port server
 belongs to Nico — untouched; all shots on 3197, all test
 server/editor processes stopped after capture.
+
+## Stage 12 — hosted web app: accounts, back office, per-user runs + files
+
+Commits (`29edb33..e3f2c32`, all local, nothing pushed):
+
+- `29edb33` proto + serve: `Mkdir`/`DeleteFile`/`RenameFile`/`FileUsage`/
+  `UploadStart`/`UploadChunk`/`DownloadFile` + replies, `FileEntry.mtime_ms`,
+  recursive quota accounting on `ServeOpts`, 256 KiB chunked down/upload
+  (`.upload` staging file renamed on the last chunk).
+- `62f1167` multi-user core: `accounts.rs` (rusqlite bundled SQLite,
+  argon2id hashes, SHA-256-digested 256-bit session tokens, per-IP and
+  per-email login rate limiter, admin CLI ops), `runs.rs` (per-user run
+  registry: lazy start on first WS, idle stop, max-runs cap, drop closes
+  the user's sockets), `pages.rs` (landing/login/signup/admin HTML in the
+  Stage-10 dark+cyan+amber palette), `multi.rs` (HTTP front door, session
+  cookie `ne_session`, Origin/CSRF checks, `--trust-proxy` allowlist for
+  XFF/XFP), `main.rs` (new flags + `admin` subcommand + any-non-loopback
+  bind refusal).
+- `fca125b` `server/tests/multi.rs`: 11 integration tests + the fixes
+  they forced (below).
+- `73e6be7` editor: Files floating window (Ctrl+6, View menu, persisted),
+  remote protocol vs local `dirs::data_dir()/neuro_edit` backend,
+  mkdir/rename/delete/usage bar, chunked uploads (native file dialog +
+  dnd; wasm picker via FileReader, download via Blob), `.ne2` load /
+  `.rhai` script-open; login dialog for `--connect http(s)://` with
+  remember-me token in eframe storage, `connect_secure` wss+Bearer;
+  wasm kept clean (target-gated ureq/rfd/dirs).
+- `622c249` `admin add|list|activate|disable` take `--accounts` after the
+  action (spec's literal order, password stdin-only); `docs/deploy.md`
+  (miguel/Marvin, systemd, nginx WS-upgrade block, `--trust-proxy`,
+  backups); README pointer; clippy pass on new code.
+- `e3f2c32` `/app` serves index.html with `<base href="/app/">` injected
+  (bundle imports stay under the session-gated prefix — without it
+  `editor.js` 404'd and the page hung on "checking WebGPU…"); landing +
+  admin table show the effective quota instead of a raw `0 MB` row.
+
+### The one big default I did not take
+
+The brief defaulted to axum+tokio for HTTP. I kept **blocking I/O**:
+a minimal HTTP/1.1 parser + one thread per connection on the existing
+`TcpListener`, and the WebSocket upgrade reuses the exact same
+reader/writer-thread bridge as shared mode. Reasons: the codebase is
+entirely blocking/threaded (`sim::serve` worker via mpsc, jobs on
+threads, `Rc<RefCell>` per run — none of it Send-safe across an async
+boundary without wrapping); the required surface is small (six routes,
+forms, cookies, one upgrade); and `Connection: close` per request makes
+the per-connection-thread cost irrelevant at this scale. Adding axum/
+tokio would have pulled ~80 crates of async runtime plus a
+`Rc<RefCell>`→`Arc<Mutex>` rework of every serve state for zero
+user-visible gain. If request volume ever matters, the HTTP layer is a
+single file (`multi.rs`) behind a `handle(stream)` boundary — swapping
+in an async front door does not touch runs/accounts/editor.
+
+### Other choices where a default existed
+
+- `--trust-proxy` as an **IP allowlist** (Update 14:5x), not a bool:
+  XFF/XFP honoured only when the direct TCP peer is allowlisted; headers
+  from other peers ignored. `expected_origin` uses XFP only from those
+  peers too.
+- Origin required on `/signup` and all `/admin/*` POSTs; `/login` and
+  `/api/login` skip it (rate-limited credential endpoints — the native
+  client sends no Origin). Missing Origin = reject, matching browsers
+  (which always send it on POST).
+- Admin quota row `0` = "use `--default-quota-mb`" (fallback in
+  `quota_of`), so admin add needs no quota flag.
+- User data dirs get created lazily at run start, not at signup.
+- Login page errors: pending/disabled carry the spec'd texts; wrong
+  password vs unknown email share "wrong email or password" — no
+  account-existence leak. The `429` path returns the pending-style page
+  with the wait text.
+
+### Red checks (tests that failed before their fix/feature)
+
+Genuinely observed red→green during development:
+
+- `signup_pending_activate_login_ws` — login returned the error page
+  because argon2's verify signature was wrong (0.6→0.5 downgrade caught
+  by this test).
+- `disable_kills_session_and_ws` — the run's `Arc::try_unwrap` never
+  fired while a live client held an `Arc` ref, so the socket stayed
+  open; fixed with `Mutex<Option<JoinHandle>>` stop + explicit
+  `shutdown(Both)` on cloned client sockets.
+- `quota_refuses_and_leaves_no_partial` — caught my own overflowing
+  test-byte generator (wrapping mul needed), and verified the `.upload`
+  stage file is cleaned, not just the target.
+- `users_cannot_cross` — `..`, absolute paths, a planted symlink A→B,
+  and cross-id protocol calls all refused.
+- `trust_proxy_gates_xff` — spoofed XFF from an unlisted peer ignored,
+  allowlisted peer honoured (written for the 14:5x update).
+- `max_runs_cap_and_idle_stop`, `login_rate_limit`,
+  `db_holds_no_secrets`, `chunked_round_trip` (multi-MB),
+  `admin_gated_and_post_checks`, `ws_refused_without_session` — written
+  against the implementation; the first two exercise timing/caps that
+  would trivially fail on a shared-run build.
+- Live-verified bug beyond the suite: `/app`'s module imports 404'd
+  under multi mode (screenshot workflow caught it) → the `<base>`
+  injection.
+
+### Verification counts
+
+- `cargo fmt --all` clean; `cargo clippy` — zero warnings in new code
+  (warnings left are all pre-existing in dataset.rs/network.rs/etc).
+- `cargo test --workspace --release`: all targets green —
+  `server/tests/multi.rs` 11/11, `server/tests/ws.rs` 15/15 (shared
+  mode unchanged), sim suites (lsm_null, honest_eval, gpu_vs_cpu
+  custom-tau, serve 13/13…) green, `accounts::tests` 1/1.
+- `cargo test -p sim --release --no-default-features`: all green.
+- `cargo check` editor native + `--target wasm32-unknown-unknown
+  --no-default-features --features web`: clean, zero warnings;
+  `editor/web/build.sh` rebuilt dist-web.
+- node: `node --test editor/web/webgpu-help.test.mjs` — 12/12 (count
+  grew with Stage 10/11 additions).
+- Admin CLI smoke: `admin add` (stdin pw) / `list` verified on a real
+  state dir.
+
+### Screenshots (`review/stage12_*.png`, gitignored, on disk)
+
+Multi-user server on **:3412** (Nico's :3090 untouched throughout;
+the first launch attempt also self-killed a stray `pkill` match once —
+learned to scope the pattern), headful Chromium on Xvfb :99 +
+playwright `drive.js`, seeded users: `nico@neuro.dev` (admin, active),
+`ada@x.dev` (pending):
+
+- `stage12_landing_desktop` / `stage12_landing_phone` — hero art +
+  blurb + stacked Log in / Sign up cards; 375 px layout holds.
+- `stage12_signup` — signup card scrolled into view.
+- `stage12_pending` — "your account is waiting for activation" after
+  logging in as the pending user (verified text via DOM eval too).
+- `stage12_admin` — "Back office — 1 pending activation": ada pending
+  on top (note + 2048 MB quota), nico active·admin; activate/make
+  admin/delete/quota/disable buttons.
+- `stage12_app_boot` — the wasm editor inside the session-gated `/app`.
+- `stage12_browser_files` — Files window listing nico's server-side
+  files (detector.rhai, lsm.ne2, memory_window.rhai) + "92.0 KB of
+  2.0 GB" usage bar — full cookie → /app → /ws → protocol round-trip.
+- `stage12_native_login` — "Log in — http://127.0.0.1:3412" dialog with
+  email/password/remember-me on `--connect http://…`.
+- `stage12_native_files` — native local file space at
+  `~/.local/share/neuro_edit` (no --connect): dir + files + usage.
+- `stage12_viewmenu` — View menu with the Files entry.
+
+### Open / follow-ups
+
+- Pending-user count badge shows on `/` for admins? Not implemented —
+  count lives in the `/admin` header only (spec asks for it there).
+- xdotool synthetic clicks could focus buttons but not the login
+  text fields (worked around by screenshotting the dialog alone; the
+  real flow is covered by the `/api/login` + `connect_secure` paths in
+  tests). Native login UX verified by code path, not pixel-perfect.
+- `UploadChunk` sends the whole remaining tail at once (bounded by
+  `--max-upload-mb`); a progress UI during slow links is a nice-to-have.
+- Nico's stage-10/14/15 items still wait on him, as before.
