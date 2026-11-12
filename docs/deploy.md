@@ -65,8 +65,13 @@ Flags that matter in multi-user mode:
 ```sh
 server admin add --accounts /var/lib/neuroedit/state \
                  --email nico@example.com --name "Nico"
-# reads the password from stdin — it never lands in argv, ps, or history
 ```
+
+On a terminal it prompts `Password:` then `Repeat password:` with echo
+off — minimum 12 characters, a mismatch refuses before anything is
+written. With stdin piped (`echo "$PW" | server admin add …`) it takes
+the first line only, so scripts keep working; either way the password
+never lands in argv, `ps`, or shell history.
 
 `admin list`, `admin activate <email>`, `admin disable <email>` take the
 same `--accounts` flag for ops from cron/ssh. Day-to-day activation is

@@ -596,3 +596,30 @@ impl WsReader {
         }
     }
 }
+
+/// Piped-stdin password reader for `admin add` — first line only, CRLF
+/// stripped. On a real terminal the CLI prompts with echo off instead
+/// (rpassword), so this path serves scripts and tests.
+pub fn first_password_line(mut r: impl std::io::BufRead) -> std::io::Result<String> {
+    let mut s = String::new();
+    r.read_line(&mut s)?;
+    Ok(s.trim_end_matches(['\n', '\r']).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::first_password_line;
+
+    #[test]
+    fn piped_password_reads_first_line_only() {
+        // trailing lines after the password must be ignored
+        let pw = first_password_line(std::io::Cursor::new("s3cret-pw-12345\nextra\ndata")).unwrap();
+        assert_eq!(pw, "s3cret-pw-12345");
+        // CRLF from a Windows-side pipe is stripped
+        let pw = first_password_line(std::io::Cursor::new("s3cret-pw-12345\r\n")).unwrap();
+        assert_eq!(pw, "s3cret-pw-12345");
+        // empty stdin → empty string (the 12-char check rejects it later)
+        let pw = first_password_line(std::io::Cursor::new("")).unwrap();
+        assert_eq!(pw, "");
+    }
+}

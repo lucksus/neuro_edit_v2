@@ -12,7 +12,6 @@
 //! mode every test and local user has always had. With it: per-user
 //! runs + the HTTP front door (landing, signup, back office, /app).
 
-use std::io::Read;
 use std::net::ToSocketAddrs;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -286,11 +285,8 @@ fn admin(action: &AdminAction) -> anyhow::Result<()> {
             email,
             name,
         } => {
-            eprint!("password for {email} (12+ chars): ");
-            let mut pw = String::new();
-            std::io::stdin().read_to_string(&mut pw)?;
-            let pw = pw.trim_end_matches(['\n', '\r']);
-            let u = server::accounts::Accounts::open(dir)?.create_admin(email, name, pw)?;
+            let pw = read_admin_password(email)?;
+            let u = server::accounts::Accounts::open(dir)?.create_admin(email, name, &pw)?;
             eprintln!("admin {} ({}) active", u.email, u.id);
         }
         AdminAction::List { accounts: dir } => {
@@ -331,4 +327,25 @@ fn admin(action: &AdminAction) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Password for `admin add`. On a real terminal: `Password: ` /
+/// `Repeat password: ` prompts with echo off (rpassword). Piped stdin
+/// (scripts, tests, `echo pw | …`): the first line only.
+fn read_admin_password(email: &str) -> anyhow::Result<String> {
+    use server::accounts::MIN_PASSWORD_LEN;
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        eprintln!("creating admin account for {email}");
+        let pw = rpassword::prompt_password("Password: ")?;
+        anyhow::ensure!(
+            pw.len() >= MIN_PASSWORD_LEN,
+            "password needs at least {MIN_PASSWORD_LEN} characters"
+        );
+        let again = rpassword::prompt_password("Repeat password: ")?;
+        anyhow::ensure!(pw == again, "passwords do not match");
+        Ok(pw)
+    } else {
+        Ok(server::first_password_line(std::io::stdin().lock())?)
+    }
 }

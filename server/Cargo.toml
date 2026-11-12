@@ -17,6 +17,7 @@ rusqlite = { version = "0.42.0", features = ["bundled"] }
 argon2 = "0.5.3"
 sha2 = "0.11.1"
 rand = "0.8.5"
+rpassword = "7.5.4"
 
 [features]
 default = ["sim/cuda"]
