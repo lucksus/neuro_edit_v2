@@ -355,6 +355,38 @@ pub enum ClientMsg {
         path: String,
         data: Vec<u8>,
     },
+    /// Upload a dataset into `data_dir/datasets/<name>`: raw signal bytes
+    /// (`f32` LE rows or a `.npy` file), JSON meta (channels/dt/steps…)
+    /// and JSON labels (`{events_ms: […]}`). Server-side size limit;
+    /// answer: `FileWritten` or `Error`.
+    UploadDataset {
+        name: String,
+        /// Stored as `datasets/<name>/signal.<ext>`; the loader reads
+        /// `f32` (raw LE f32) and `npy`.
+        signal_ext: String,
+        signal: Vec<u8>,
+        meta_json: String,
+        labels_json: String,
+    },
+    /// Run a script as a background job on the server: full speed, own
+    /// network/sim, console + `job_progress` calls stream to every
+    /// client; results persist under `data_dir/runs/<id>`. Answer:
+    /// `JobStarted` or `Error`.
+    StartJob {
+        name: String,
+        script: String,
+    },
+    /// Ask the server to stop a running job.
+    CancelJob {
+        id: u64,
+    },
+    /// Live jobs + persisted runs. Answer: `JobList`.
+    ListJobs,
+    /// Re-open a finished/interrupted run's artifacts. Answer:
+    /// `JobDetail` or `Error`.
+    OpenJob {
+        id: u64,
+    },
     /// Polite disconnect.
     Bye,
 }
@@ -429,8 +461,43 @@ pub enum ServerMsg {
     FileData { path: String, data: Vec<u8> },
     /// Answer to `ClientMsg::WriteFile`.
     FileWritten { path: String },
+    /// A job started (or already-known info for `ListJobs`).
+    JobStarted { id: u64, name: String },
+    /// One `job_progress(#{…})` call's numeric fields — streamed for the
+    /// jobs panel's live plot.
+    JobProgress { id: u64, fields: Vec<(String, f64)> },
+    /// Job finished. `status`: "done" | "failed" | "cancelled".
+    JobDone {
+        id: u64,
+        status: String,
+        error: Option<String>,
+    },
+    /// Answer to `ClientMsg::ListJobs` — live jobs and persisted runs.
+    JobList { jobs: Vec<JobInfo> },
+    /// Answer to `ClientMsg::OpenJob` — the run's artifacts.
+    JobDetail {
+        id: u64,
+        name: String,
+        status: String,
+        script: String,
+        result_json: Option<String>,
+        /// The `job_progress` history, one row per call.
+        progress: Vec<Vec<(String, f64)>>,
+    },
     /// Refused edit / protocol error / worker failure worth a dialog.
     Error(String),
+}
+
+/// One row of `JobList` — a live job or a `runs/<id>` artifact.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct JobInfo {
+    pub id: u64,
+    pub name: String,
+    /// "running" | "done" | "failed" | "cancelled" | "lost" (a run whose
+    /// meta says running but no live job owns it — e.g. server restart).
+    pub status: String,
+    /// Wall-clock start time, unix ms (0 for old artifacts).
+    pub started_ms: u64,
 }
 
 /// One entry in a `FileList` reply.
@@ -580,6 +647,20 @@ mod tests {
                 path: "b.rhai".into(),
                 data: b"print(1)".to_vec(),
             },
+            ClientMsg::UploadDataset {
+                name: "d1".into(),
+                signal_ext: "f32".into(),
+                signal: vec![0, 1, 2, 3],
+                meta_json: "{\"channels\":2}".into(),
+                labels_json: "{\"events_ms\":[1.5]}".into(),
+            },
+            ClientMsg::StartJob {
+                name: "train".into(),
+                script: "print(1)".into(),
+            },
+            ClientMsg::CancelJob { id: 9 },
+            ClientMsg::ListJobs,
+            ClientMsg::OpenJob { id: 4 },
             ClientMsg::Bye,
         ] {
             round_trip(&m);
@@ -762,6 +843,35 @@ mod tests {
             },
             ServerMsg::FileWritten {
                 path: "a.rhai".into(),
+            },
+            ServerMsg::JobStarted {
+                id: 3,
+                name: "train".into(),
+            },
+            ServerMsg::JobProgress {
+                id: 3,
+                fields: vec![("epoch".into(), 4.0), ("auc".into(), 0.91)],
+            },
+            ServerMsg::JobDone {
+                id: 3,
+                status: "done".into(),
+                error: None,
+            },
+            ServerMsg::JobList {
+                jobs: vec![JobInfo {
+                    id: 2,
+                    name: "old".into(),
+                    status: "done".into(),
+                    started_ms: 1_700_000_000_000,
+                }],
+            },
+            ServerMsg::JobDetail {
+                id: 2,
+                name: "old".into(),
+                status: "done".into(),
+                script: "print(1)".into(),
+                result_json: Some("{\"auc\":0.9}".into()),
+                progress: vec![vec![("auc".into(), 0.5)], vec![("auc".into(), 0.9)]],
             },
             ServerMsg::Error("stale edit".into()),
         ] {
