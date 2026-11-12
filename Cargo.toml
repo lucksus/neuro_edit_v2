@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["net-format", "sim", "editor"]
+members = ["net-format", "proto", "sim", "editor"]
 
 [workspace.package]
 edition = "2021"
