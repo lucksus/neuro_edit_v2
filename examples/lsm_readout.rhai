@@ -52,9 +52,18 @@ for p in PAIRS {
 
 // Reservoir features after playing a bit window: raw per-neuron spike
 // counts (not rates — the delta rule needs features of order ~1).
+// Only paired sources have inputs — the rest of the stream is pure
+// noise by design and stays silent (play_input errors on a missing
+// name since Stage 18).
+let driven = [];
+for p in PAIRS {
+    for s in p {
+        driven.push(s);
+    }
+}
 let replay = |m| {
     sim.reset();
-    for s in 0..N_SRC {
+    for s in driven {
         let series = [];
         for t in 0..WIN {
             for k in 0..10 { series.push(m[t][s]); } // 0.1 ms steps
