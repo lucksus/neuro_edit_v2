@@ -1475,137 +1475,171 @@ impl EditorApp {
                 } else {
                     (&ic.run, "Run")
                 };
-                if ui.add(icons::button(run_icon, run_label)).clicked() {
-                    if live {
-                        self.ctl.abort_now();
-                        self.send(ClientMsg::AutoRun(false));
-                    } else {
-                        self.send(ClientMsg::AutoRun(true));
+                // Stage 15 B: each control group (icon+widget+label) is a
+                // nested horizontal — wrapping moves a group whole instead
+                // of splitting e.g. the speed slider from its "realtime".
+                toolbar_group(ui, 300.0, |ui| {
+                    if ui.add(icons::button(run_icon, run_label)).clicked() {
+                        if live {
+                            self.ctl.abort_now();
+                            self.send(ClientMsg::AutoRun(false));
+                        } else {
+                            self.send(ClientMsg::AutoRun(true));
+                        }
                     }
-                }
-                if ui
-                    .add(icons::button(&ic.step, "10ms"))
-                    .on_hover_text("Step 10 ms")
-                    .clicked()
-                {
-                    self.send(ClientMsg::RunMs(10.0));
-                }
-                if ui
-                    .add(icons::button(&ic.step_long, "100ms"))
-                    .on_hover_text("Step 100 ms")
-                    .clicked()
-                {
-                    self.send(ClientMsg::RunMs(100.0));
-                }
-                if ui.add(icons::button(&ic.reset, "Reset")).clicked() {
-                    self.send(ClientMsg::Reset);
-                    self.hist.clear();
-                }
-                let fg = ui.visuals().text_color();
-                ui.add(icons::tinted(&ic.speed, fg))
-                    .on_hover_text("Speed (realtime factor)");
-                if ui
-                    .add(egui::Slider::new(&mut self.speed, 0.05..=20.0).logarithmic(true))
-                    .changed()
-                {
-                    self.send(ClientMsg::SetSpeed(self.speed));
-                }
-                // One speed display: requested realtime factor + the best
-                // this machine has reached (peak steps/s → realtime).
-                let max_x = self.speed_peak * self.dt_ms / 1000.0;
-                ui.label(if max_x > 0.05 {
-                    format!("x{:.1} realtime (max x{:.0})", self.speed, max_x)
-                } else {
-                    format!("x{:.1} realtime", self.speed)
+                    if ui
+                        .add(icons::button(&ic.step, "10ms"))
+                        .on_hover_text("Step 10 ms")
+                        .clicked()
+                    {
+                        self.send(ClientMsg::RunMs(10.0));
+                    }
+                    if ui
+                        .add(icons::button(&ic.step_long, "100ms"))
+                        .on_hover_text("Step 100 ms")
+                        .clicked()
+                    {
+                        self.send(ClientMsg::RunMs(100.0));
+                    }
+                    if ui.add(icons::button(&ic.reset, "Reset")).clicked() {
+                        self.send(ClientMsg::Reset);
+                        self.hist.clear();
+                    }
+                });
+                toolbar_group(ui, 430.0, |ui| {
+                    let fg = ui.visuals().text_color();
+                    ui.add(icons::tinted(&ic.speed, fg))
+                        .on_hover_text("Speed (realtime factor)");
+                    if ui
+                        .add(egui::Slider::new(&mut self.speed, 0.05..=20.0).logarithmic(true))
+                        .changed()
+                    {
+                        self.send(ClientMsg::SetSpeed(self.speed));
+                    }
+                    // One speed display: requested realtime factor + the best
+                    // this machine has reached (peak steps/s → realtime).
+                    let max_x = self.speed_peak * self.dt_ms / 1000.0;
+                    ui.label(if max_x > 0.05 {
+                        format!("x{:.1} realtime (max x{:.0})", self.speed, max_x)
+                    } else {
+                        format!("x{:.1} realtime", self.speed)
+                    });
                 });
                 ui.separator();
-                let backend_icon = match self.backend {
-                    proto::Backend::Cuda => &ic.backend_gpu,
-                    proto::Backend::Cpu => &ic.backend_cpu,
-                };
-                ui.add(icons::tinted(backend_icon, fg))
-                    .on_hover_text("Backend");
-                egui::ComboBox::from_id_salt("backend")
-                    .selected_text(match self.backend {
-                        proto::Backend::Cuda => "cuda",
-                        proto::Backend::Cpu => "cpu",
-                    })
-                    .show_ui(ui, |ui| {
-                        if ui.add(icons::button(&ic.backend_gpu, "cuda")).clicked() {
-                            self.send(ClientMsg::SetBackend(proto::Backend::Cuda));
-                        }
-                        if ui.add(icons::button(&ic.backend_cpu, "cpu")).clicked() {
-                            self.send(ClientMsg::SetBackend(proto::Backend::Cpu));
-                        }
-                    });
-                ui.add(icons::tinted(&ic.timestep, fg))
-                    .on_hover_text("Time step dt");
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut self.dt_ms)
-                            .range(0.01..=1.0)
-                            .speed(0.01)
-                            .suffix(" ms"),
-                    )
-                    .changed()
-                {
-                    self.send(ClientMsg::SetDtMs(self.dt_ms));
-                }
-                ui.add(icons::tinted(&ic.noise, fg))
-                    .on_hover_text("Background noise rate");
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut self.noise_hz)
-                            .range(0.0..=5000.0)
-                            .speed(1.0)
-                            .suffix(" Hz"),
-                    )
-                    .changed()
-                {
-                    self.send(ClientMsg::SetNoise {
-                        hz: self.noise_hz,
-                        kick: self.noise_kick,
-                    });
-                }
+                toolbar_group(ui, 120.0, |ui| {
+                    let backend_icon = match self.backend {
+                        proto::Backend::Cuda => &ic.backend_gpu,
+                        proto::Backend::Cpu => &ic.backend_cpu,
+                    };
+                    ui.add(icons::tinted(backend_icon, ui.visuals().text_color()))
+                        .on_hover_text("Backend");
+                    egui::ComboBox::from_id_salt("backend")
+                        .selected_text(match self.backend {
+                            proto::Backend::Cuda => "cuda",
+                            proto::Backend::Cpu => "cpu",
+                        })
+                        .show_ui(ui, |ui| {
+                            if ui.add(icons::button(&ic.backend_gpu, "cuda")).clicked() {
+                                self.send(ClientMsg::SetBackend(proto::Backend::Cuda));
+                            }
+                            if ui.add(icons::button(&ic.backend_cpu, "cpu")).clicked() {
+                                self.send(ClientMsg::SetBackend(proto::Backend::Cpu));
+                            }
+                        });
+                });
+                toolbar_group(ui, 140.0, |ui| {
+                    ui.add(icons::tinted(&ic.timestep, ui.visuals().text_color()))
+                        .on_hover_text("Time step dt");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut self.dt_ms)
+                                .range(0.01..=1.0)
+                                .speed(0.01)
+                                .suffix(" ms"),
+                        )
+                        .changed()
+                    {
+                        self.send(ClientMsg::SetDtMs(self.dt_ms));
+                    }
+                });
+                toolbar_group(ui, 160.0, |ui| {
+                    ui.add(icons::tinted(&ic.noise, ui.visuals().text_color()))
+                        .on_hover_text("Background noise rate");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut self.noise_hz)
+                                .range(0.0..=5000.0)
+                                .speed(1.0)
+                                .suffix(" Hz"),
+                        )
+                        .changed()
+                    {
+                        self.send(ClientMsg::SetNoise {
+                            hz: self.noise_hz,
+                            kick: self.noise_kick,
+                        });
+                    }
+                });
             });
             ui.horizontal_wrapped(|ui| {
-                let m = &mut self.mode;
-                icons::selectable_value(ui, m, Mode::Navigate, &ic.navigate, "Navigate");
-                icons::selectable_value(ui, m, Mode::Insert, &ic.insert, "Insert");
-                icons::selectable_value(ui, m, Mode::Connect, &ic.connect, "Connect");
-                icons::selectable_value(ui, m, Mode::Move, &ic.mv, "Move");
+                // Same wrapping rule as row 1: groups move whole.
+                toolbar_group(ui, 380.0, |ui| {
+                    let m = &mut self.mode;
+                    icons::selectable_value(ui, m, Mode::Navigate, &ic.navigate, "Navigate");
+                    icons::selectable_value(ui, m, Mode::Insert, &ic.insert, "Insert");
+                    icons::selectable_value(ui, m, Mode::Connect, &ic.connect, "Connect");
+                    icons::selectable_value(ui, m, Mode::Move, &ic.mv, "Move");
+                });
                 ui.separator();
-                ui.label("plane");
-                let p = &mut self.plane;
-                icons::selectable_value(ui, p, Plane::XZ, &ic.plane_xz, "x-z");
-                icons::selectable_value(ui, p, Plane::XY, &ic.plane_xy, "x-y");
-                icons::selectable_value(ui, p, Plane::YZ, &ic.plane_yz, "y-z");
+                toolbar_group(ui, 240.0, |ui| {
+                    ui.label("plane");
+                    let p = &mut self.plane;
+                    icons::selectable_value(ui, p, Plane::XZ, &ic.plane_xz, "x-z");
+                    icons::selectable_value(ui, p, Plane::XY, &ic.plane_xy, "x-y");
+                    icons::selectable_value(ui, p, Plane::YZ, &ic.plane_yz, "y-z");
+                });
                 ui.separator();
-                icons::toggle(ui, &mut self.show_synapses, &ic.synapses, "synapses");
-                icons::toggle(ui, &mut self.show_grid, &ic.grid, "grid");
-                icons::toggle(ui, &mut self.show_dots, &ic.raster, "spike dots");
+                toolbar_group(ui, 340.0, |ui| {
+                    icons::toggle(ui, &mut self.show_synapses, &ic.synapses, "synapses");
+                    icons::toggle(ui, &mut self.show_grid, &ic.grid, "grid");
+                    icons::toggle(ui, &mut self.show_dots, &ic.raster, "spike dots");
+                });
                 // Grid-group render mode: the plane LOD keeps big grids
                 // interactive; cubes stay available for editing up close.
-                let view_icon = match self.grid_view {
-                    crate::plane::GridView::Auto => &ic.view_auto,
-                    crate::plane::GridView::Cubes => &ic.view_cubes,
-                    crate::plane::GridView::Planes => &ic.view_planes,
-                };
-                ui.add(icons::tinted(view_icon, ui.visuals().text_color()))
-                    .on_hover_text("Grid view");
-                egui::ComboBox::from_id_salt("grid_view")
-                    .selected_text(match self.grid_view {
-                        crate::plane::GridView::Auto => "auto",
-                        crate::plane::GridView::Cubes => "cubes",
-                        crate::plane::GridView::Planes => "planes",
-                    })
-                    .show_ui(ui, |ui| {
-                        use crate::plane::GridView;
-                        let g = &mut self.grid_view;
-                        icons::selectable_value(ui, g, GridView::Auto, &ic.view_auto, "auto");
-                        icons::selectable_value(ui, g, GridView::Cubes, &ic.view_cubes, "cubes");
-                        icons::selectable_value(ui, g, GridView::Planes, &ic.view_planes, "planes");
-                    });
+                toolbar_group(ui, 150.0, |ui| {
+                    let view_icon = match self.grid_view {
+                        crate::plane::GridView::Auto => &ic.view_auto,
+                        crate::plane::GridView::Cubes => &ic.view_cubes,
+                        crate::plane::GridView::Planes => &ic.view_planes,
+                    };
+                    ui.add(icons::tinted(view_icon, ui.visuals().text_color()))
+                        .on_hover_text("Grid view");
+                    egui::ComboBox::from_id_salt("grid_view")
+                        .selected_text(match self.grid_view {
+                            crate::plane::GridView::Auto => "auto",
+                            crate::plane::GridView::Cubes => "cubes",
+                            crate::plane::GridView::Planes => "planes",
+                        })
+                        .show_ui(ui, |ui| {
+                            use crate::plane::GridView;
+                            let g = &mut self.grid_view;
+                            icons::selectable_value(ui, g, GridView::Auto, &ic.view_auto, "auto");
+                            icons::selectable_value(
+                                ui,
+                                g,
+                                GridView::Cubes,
+                                &ic.view_cubes,
+                                "cubes",
+                            );
+                            icons::selectable_value(
+                                ui,
+                                g,
+                                GridView::Planes,
+                                &ic.view_planes,
+                                "planes",
+                            );
+                        });
+                });
                 if ui
                     .add(icons::icon_button(&ic.frame))
                     .on_hover_text("Frame network (F)")
@@ -1668,16 +1702,40 @@ impl EditorApp {
         });
     }
 
+    /// Reserved strip for the mode/drag hint (Stage 15 C): as a panel it
+    /// shrinks `usable_rect`, so floating windows can never cover it.
+    fn hints_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::bottom("hints").show(ctx, |ui| {
+            if let Some(md) = &self.move_drag {
+                ui.label(format!(
+                    "plane: {} · Shift: vertical · X/Y/Z: axis lock · Esc: cancel",
+                    crate::view::drag_plane_name(md.plane)
+                ));
+            } else {
+                // Narrow viewports wrap to a second line rather than
+                // clipping the hint tail.
+                ui.add(egui::Label::new(crate::view::mode_hint(self.mode)).wrap());
+            }
+        });
+    }
+
     fn inspector(&mut self, ctx: &egui::Context) {
         if !self.show_inspector {
             return;
         }
         let mut open = self.show_inspector;
-        let w = ctx.screen_rect().max.x;
-        egui::Window::new("Inspector")
+        let u = usable_rect(ctx);
+        let dr = clamp_window_rect(
+            egui::Rect::from_min_size(
+                egui::pos2(u.max.x - 248.0, u.min.y + 8.0),
+                egui::vec2(240.0, 200.0),
+            ),
+            u,
+        );
+        app_win(ctx, "Inspector")
             .open(&mut open)
             .default_width(240.0)
-            .default_pos([w - 250.0, 60.0])
+            .default_pos(dr.min)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     let sel: Vec<u32> = self.selection.iter().copied().collect();
@@ -1767,10 +1825,15 @@ impl EditorApp {
             return;
         }
         let mut open = self.show_inputs;
-        egui::Window::new("Inputs")
+        let u = usable_rect(ctx);
+        let dr = clamp_window_rect(
+            egui::Rect::from_min_size(u.min + egui::vec2(260.0, 8.0), egui::vec2(220.0, 140.0)),
+            u,
+        );
+        app_win(ctx, "Inputs")
             .open(&mut open)
-            .default_size([220.0, 140.0])
-            .default_pos([260.0, 60.0])
+            .default_size(dr.size())
+            .default_pos(dr.min)
             .show(ctx, |ui| {
                 if let Some(g) = self.geo.clone() {
                     for (k, inp) in g.inputs.iter().enumerate() {
@@ -1953,9 +2016,18 @@ impl EditorApp {
             self.files_refresh();
         }
         let mut open = self.show_files;
-        egui::Window::new("Files")
+        let u = usable_rect(ctx);
+        let dr = clamp_window_rect(
+            egui::Rect::from_min_size(
+                egui::pos2(u.center().x - 210.0, u.min.y + 24.0),
+                egui::vec2(420.0, 420.0),
+            ),
+            u,
+        );
+        app_win(ctx, "Files")
             .open(&mut open)
-            .default_size([420.0, 420.0])
+            .default_size(dr.size())
+            .default_pos(dr.min)
             .show(ctx, |ui| {
                 // path bar: root label + up + refresh
                 ui.horizontal(|ui| {
@@ -2294,7 +2366,7 @@ impl EditorApp {
             None => {}
         }
         let mut keep = true;
-        egui::Window::new(format!("Log in — {}", lg.url))
+        app_win(ctx, format!("Log in — {}", lg.url))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -2341,7 +2413,7 @@ impl EditorApp {
             return;
         }
         let mut open = self.show_keys;
-        egui::Window::new("Shortcuts")
+        app_win(ctx, "Shortcuts")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -2405,10 +2477,20 @@ impl EditorApp {
             return;
         }
         let mut open = self.show_manual;
-        egui::Window::new("Manual")
+        // Stage 15 A: narrow viewports get a shrunken manual — cap the
+        // default at 70% of the usable strip instead of covering it.
+        let u = usable_rect(ctx);
+        let dr = clamp_window_rect(
+            egui::Rect::from_min_size(
+                u.min + egui::vec2(24.0, 8.0),
+                egui::vec2(640.0, 520.0).min(u.size() * 0.7),
+            ),
+            u,
+        );
+        app_win(ctx, "Manual")
             .open(&mut open)
-            .default_size([640.0, 520.0])
-            .default_pos([90.0, 60.0])
+            .default_size(dr.size())
+            .default_pos(dr.min)
             .show(ctx, |ui| {
                 // horizontal children get an unbounded max_rect in x, so the
                 // body column must be ALLOCATED an explicit rect — otherwise
@@ -2565,11 +2647,18 @@ impl EditorApp {
             return;
         }
         let mut open = self.show_console;
-        let r = ctx.screen_rect();
-        egui::Window::new("Console (Rhai)")
+        let u = usable_rect(ctx);
+        let dr = clamp_window_rect(
+            egui::Rect::from_min_size(
+                egui::pos2(u.max.x - 430.0, u.max.y - 260.0),
+                egui::vec2(420.0, 240.0),
+            ),
+            u,
+        );
+        app_win(ctx, "Console (Rhai)")
             .open(&mut open)
-            .default_size([420.0, 240.0])
-            .default_pos([r.max.x - 430.0, r.max.y - 260.0])
+            .default_size(dr.size())
+            .default_pos(dr.min)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if ui.button("Clear").clicked() {
@@ -2651,10 +2740,15 @@ impl EditorApp {
             return;
         }
         let mut open = self.show_script;
-        egui::Window::new("Script editor")
+        let u = usable_rect(ctx);
+        let dr = clamp_window_rect(
+            egui::Rect::from_min_size(u.min + egui::vec2(12.0, 8.0), egui::vec2(480.0, 360.0)),
+            u,
+        );
+        app_win(ctx, "Script editor")
             .open(&mut open)
-            .default_pos([12.0, 56.0])
-            .default_size([480.0, 360.0])
+            .default_pos(dr.min)
+            .default_size(dr.size())
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("name");
@@ -2764,11 +2858,18 @@ impl EditorApp {
             return;
         }
         let mut open = self.show_plots;
-        let r = ctx.screen_rect();
-        egui::Window::new("Plots")
+        let u = usable_rect(ctx);
+        let dr = clamp_window_rect(
+            egui::Rect::from_min_size(
+                egui::pos2(u.min.x + 12.0, u.max.y - 240.0),
+                egui::vec2(480.0, 220.0),
+            ),
+            u,
+        );
+        app_win(ctx, "Plots")
             .open(&mut open)
-            .default_size([480.0, 220.0])
-            .default_pos([12.0, r.max.y - 240.0])
+            .default_size(dr.size())
+            .default_pos(dr.min)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if let Some(ic) = &self.icons {
@@ -3219,7 +3320,7 @@ impl EditorApp {
                 h,
                 d: dist,
             } => {
-                egui::Window::new("Create 2D grid")
+                app_win(ctx, "Create 2D grid")
                     .open(&mut open)
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
@@ -3252,7 +3353,7 @@ impl EditorApp {
                 d2,
                 spacing,
             } => {
-                egui::Window::new("Create 3D grid")
+                app_win(ctx, "Create 3D grid")
                     .open(&mut open)
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
@@ -3286,7 +3387,7 @@ impl EditorApp {
                 lambda,
                 w,
             } => {
-                egui::Window::new("Create connections")
+                app_win(ctx, "Create connections")
                     .open(&mut open)
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
@@ -3308,7 +3409,7 @@ impl EditorApp {
                     });
             }
             Dialog::Weights { group, mean, sd } => {
-                egui::Window::new("Set synapse weights")
+                app_win(ctx, "Set synapse weights")
                     .open(&mut open)
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
@@ -3327,7 +3428,7 @@ impl EditorApp {
                     });
             }
             Dialog::SynTau { src, dst, mean, sd } => {
-                egui::Window::new("Set synapse tau (ms)")
+                app_win(ctx, "Set synapse tau (ms)")
                     .open(&mut open)
                     .show(ctx, |ui| {
                         ui.label("0 = merged global tau; >0 = own current trace");
@@ -3351,7 +3452,7 @@ impl EditorApp {
                     });
             }
             Dialog::ExcInh { group, frac } => {
-                egui::Window::new("Set excitatory/inhibitory")
+                app_win(ctx, "Set excitatory/inhibitory")
                     .open(&mut open)
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
@@ -3373,7 +3474,7 @@ impl EditorApp {
                 weight,
                 value,
             } => {
-                egui::Window::new("New input on selection")
+                app_win(ctx, "New input on selection")
                     .open(&mut open)
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
@@ -3411,7 +3512,7 @@ impl EditorApp {
                     });
             }
             Dialog::NewSamples { name } => {
-                egui::Window::new("New samples node")
+                app_win(ctx, "New samples node")
                     .open(&mut open)
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
@@ -3427,7 +3528,7 @@ impl EditorApp {
                     });
             }
             Dialog::NewReadout { name } => {
-                egui::Window::new("New readout on selection")
+                app_win(ctx, "New readout on selection")
                     .open(&mut open)
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
@@ -3451,7 +3552,7 @@ impl EditorApp {
                     });
             }
             Dialog::AddToGroup { name } => {
-                egui::Window::new("Add selection to group")
+                app_win(ctx, "Add selection to group")
                     .open(&mut open)
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
@@ -3475,7 +3576,7 @@ impl EditorApp {
                     });
             }
             Dialog::Discard { then } => {
-                egui::Window::new("Unsaved changes")
+                app_win(ctx, "Unsaved changes")
                     .open(&mut open)
                     .show(ctx, |ui| {
                         ui.label("The network has unsaved changes — discard them?");
@@ -3492,32 +3593,30 @@ impl EditorApp {
                     });
             }
             Dialog::SaveAs { path } => {
-                egui::Window::new("Save as")
-                    .open(&mut open)
-                    .show(ctx, |ui| {
-                        ui.text_edit_singleline(path);
-                        if ui.button("Save").clicked() {
-                            let p = path.clone();
-                            self.send(ClientMsg::Eval {
-                                code: format!("net.save({p:?})"),
-                            });
-                            self.saved_version = self
-                                .ctl
-                                .shared
-                                .read()
-                                .unwrap()
-                                .geo
-                                .as_ref()
-                                .map(|g| g.version)
-                                .unwrap_or(0);
-                            self.net_path = Some(p.clone());
-                            self.push_recent(p);
-                            keep = false;
-                        }
-                    });
+                app_win(ctx, "Save as").open(&mut open).show(ctx, |ui| {
+                    ui.text_edit_singleline(path);
+                    if ui.button("Save").clicked() {
+                        let p = path.clone();
+                        self.send(ClientMsg::Eval {
+                            code: format!("net.save({p:?})"),
+                        });
+                        self.saved_version = self
+                            .ctl
+                            .shared
+                            .read()
+                            .unwrap()
+                            .geo
+                            .as_ref()
+                            .map(|g| g.version)
+                            .unwrap_or(0);
+                        self.net_path = Some(p.clone());
+                        self.push_recent(p);
+                        keep = false;
+                    }
+                });
             }
             Dialog::Load { path } => {
-                egui::Window::new("Load network")
+                app_win(ctx, "Load network")
                     .open(&mut open)
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
@@ -3540,7 +3639,7 @@ impl EditorApp {
                     });
             }
             Dialog::About => {
-                egui::Window::new("About neuro_edit v2")
+                app_win(ctx, "About neuro_edit v2")
                     .open(&mut open)
                     .show(ctx, |ui| {
                         if let Some(i) = &self.icons {
@@ -3647,6 +3746,7 @@ impl eframe::App for EditorApp {
 
         self.toolbar(ctx);
         self.status_bar(ctx);
+        self.hints_bar(ctx);
         self.inspector(ctx);
         self.console(ctx);
         self.script_window(ctx);
@@ -3680,6 +3780,56 @@ impl eframe::App for EditorApp {
     }
 }
 
+/// The rect floating windows may occupy: below the toolbar, above the
+/// status + hint strips (Stage 15 A/C). Only valid after those panels
+/// have been shown this frame — update() calls windows last.
+fn usable_rect(ctx: &egui::Context) -> egui::Rect {
+    ctx.available_rect()
+}
+
+/// Clamp `want` fully inside `usable`, shrinking if too big. Used for
+/// window *defaults* so first-run/narrow viewports start on-screen;
+/// `constrain_to` then keeps dragged/resized windows inside too.
+fn clamp_window_rect(want: egui::Rect, usable: egui::Rect) -> egui::Rect {
+    let size = want.size().min(usable.size());
+    let min = egui::pos2(
+        want.min
+            .x
+            .clamp(usable.min.x, (usable.max.x - size.x).max(usable.min.x)),
+        want.min
+            .y
+            .clamp(usable.min.y, (usable.max.y - size.y).max(usable.min.y)),
+    );
+    egui::Rect::from_min_size(min, size)
+}
+
+/// One toolbar control group laid out atomically (Stage 15 B). Inside a
+/// `horizontal_wrapped` row, plain `ui.horizontal` claims the whole
+/// remaining row as its desired size, so egui's wrap check
+/// (`available < desired`) never fires and groups split mid-control.
+/// Claiming an explicit upper-bound width instead makes the wrap check
+/// see the group's real footprint — it moves to the next row whole.
+/// `max_w` must overestimate, never undershoot: overshoot only packs a
+/// little early; undershoot lets content overflow the row edge.
+fn toolbar_group(
+    ui: &mut egui::Ui,
+    max_w: f32,
+    add: impl FnOnce(&mut egui::Ui),
+) -> egui::InnerResponse<()> {
+    ui.allocate_ui_with_layout(
+        egui::vec2(max_w, ui.spacing().interact_size.y),
+        egui::Layout::left_to_right(egui::Align::Center),
+        add,
+    )
+}
+
+/// A floating window pinned to [`usable_rect`]. egui re-applies the
+/// constraint every frame, so persisted off-screen positions and narrow
+/// resizes get pulled back on-screen automatically.
+fn app_win<'open>(ctx: &egui::Context, title: impl Into<egui::WidgetText>) -> egui::Window<'open> {
+    egui::Window::new(title).constrain_to(usable_rect(ctx))
+}
+
 /// Parent dir of a path for a `ListFiles` request ("." at the top).
 fn dir_of(p: &str) -> String {
     match p.rsplit_once('/') {
@@ -3706,6 +3856,76 @@ fn example_geo_covers(base: Option<u64>, geo: Option<&GeoSnap>, ids: &[u32]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_clamp_keeps_rect_inside_usable() {
+        let usable = egui::Rect::from_min_max(egui::pos2(0.0, 60.0), egui::pos2(800.0, 640.0));
+        // Already inside → untouched.
+        let inside = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(300.0, 200.0));
+        assert_eq!(clamp_window_rect(inside, usable), inside);
+        // Hanging off the right → pulled left so it fits.
+        let off_right =
+            egui::Rect::from_min_size(egui::pos2(700.0, 100.0), egui::vec2(300.0, 200.0));
+        let got = clamp_window_rect(off_right, usable);
+        assert!(got.max.x <= usable.max.x && got.min.x >= usable.min.x);
+        // Hanging off the bottom → lifted above the usable strip.
+        let off_bot = egui::Rect::from_min_size(egui::pos2(100.0, 600.0), egui::vec2(300.0, 200.0));
+        let got = clamp_window_rect(off_bot, usable);
+        assert!(got.max.y <= usable.max.y);
+        // Off the left/top → pushed back in.
+        let off_tl = egui::Rect::from_min_size(egui::pos2(-50.0, 10.0), egui::vec2(100.0, 100.0));
+        let got = clamp_window_rect(off_tl, usable);
+        assert!(got.min.x >= usable.min.x && got.min.y >= usable.min.y);
+        // Bigger than the viewport → shrunk to fit, pinned top-left.
+        let huge = egui::Rect::from_min_size(egui::pos2(50.0, 70.0), egui::vec2(2000.0, 2000.0));
+        let got = clamp_window_rect(huge, usable);
+        assert_eq!(got.size(), usable.size());
+        assert_eq!(got.min, usable.min);
+    }
+
+    /// Stage 15 B: `toolbar_group` units inside `horizontal_wrapped` wrap
+    /// whole — a group never splits its icon/control across two rows, and
+    /// a group that doesn't fit moves to the next row instead of
+    /// overflowing the panel edge.
+    #[test]
+    fn wrapped_toolbar_groups_never_split() {
+        let ctx = egui::Context::default();
+        let mut same_row = true;
+        let mut fits = true;
+        let mut h = 0.0f32;
+        for _ in 0..3 {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::pos2(0.0, 0.0),
+                        egui::vec2(300.0, 500.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::TopBottomPanel::top("t").show(ctx, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            let max_x = ui.max_rect().max.x;
+                            for g in 0..4 {
+                                let r = toolbar_group(ui, 260.0, |ui| {
+                                    let a = ui.label(format!("group-{g}")).rect;
+                                    let b = ui.add(egui::Slider::new(&mut 0.5f32, 0.0..=1.0)).rect;
+                                    same_row &= a.center().y == b.center().y;
+                                })
+                                .response
+                                .rect;
+                                fits &= r.max.x <= max_x + 0.5;
+                            }
+                        });
+                        h = ui.min_rect().height();
+                    });
+                },
+            );
+        }
+        assert!(same_row, "a control group split across wrap rows");
+        assert!(fits, "a group overflowed the panel edge");
+        assert!(h > 40.0, "groups did not wrap (panel {h}px)");
+    }
 
     #[test]
     fn example_watch_needs_post_run_geo() {

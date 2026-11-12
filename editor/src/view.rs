@@ -145,6 +145,17 @@ pub fn kept_delta(dp: DragPlane, delta: Vec3) -> Vec3 {
     }
 }
 
+/// Standing bottom-strip hint for the current mode. Stage 15 C moved it
+/// from in-canvas paint to a reserved panel so windows can't cover it.
+pub fn mode_hint(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Navigate => "navigate: click select · drag = box select · right-drag orbit · wheel zoom · WASD/QE pan · dbl-click focus · I insert · C connect · M move · Del delete",
+        Mode::Insert => "insert: click to place a neuron on the work plane · Esc to exit",
+        Mode::Connect => "connect: click a neuron or input source, then a target neuron · Esc to abort",
+        Mode::Move => "move: drag a selected object on the work plane · Esc to exit",
+    }
+}
+
 /// Name for the hint strip ("move plane: …").
 pub fn drag_plane_name(dp: DragPlane) -> String {
     match dp {
@@ -960,20 +971,6 @@ fn inst_pos(g: &GeoSnap, inst: u32) -> Option<Vec3> {
 fn overlay_2d(app: &EditorApp, ui: &mut egui::Ui, rect: egui::Rect, aspect: f32) {
     let painter = ui.painter();
     const SEL_COL: egui::Color32 = egui::Color32::from_rgb(255, 120, 40);
-    // Move-drag hint: live plane + the modifier keys that switch it.
-    // One line above the standing mode hint.
-    if let Some(md) = &app.move_drag {
-        painter.text(
-            rect.left_bottom() + egui::vec2(8.0, -24.0),
-            egui::Align2::LEFT_BOTTOM,
-            format!(
-                "plane: {} · Shift: vertical · X/Y/Z: axis lock · Esc: cancel",
-                drag_plane_name(md.plane)
-            ),
-            egui::FontId::proportional(12.0),
-            egui::Color32::from_rgb(170, 200, 220),
-        );
-    }
     /// Past this many selected objects, per-object brackets turn to noise —
     /// draw one bracket around their union plus a count instead.
     const BIG_SEL: usize = 24;
@@ -1014,19 +1011,6 @@ fn overlay_2d(app: &EditorApp, ui: &mut egui::Ui, rect: egui::Rect, aspect: f32)
             egui::Color32::from_gray(150),
         );
     }
-    let hint = match app.mode {
-        Mode::Navigate => "navigate: click select · drag = box select · right-drag orbit · wheel zoom · WASD/QE pan · dbl-click focus · I insert · C connect · M move · Del delete",
-        Mode::Insert => "insert: click to place a neuron on the work plane · Esc to exit",
-        Mode::Connect => "connect: click a neuron or input source, then a target neuron · Esc to abort",
-        Mode::Move => "move: drag a selected object on the work plane · Esc to exit",
-    };
-    painter.text(
-        egui::pos2(rect.min.x + 8.0, rect.max.y - 8.0),
-        egui::Align2::LEFT_BOTTOM,
-        hint,
-        egui::FontId::monospace(11.0),
-        egui::Color32::from_gray(180),
-    );
 }
 
 /// Project an instance's world-space cube (centre ± `half`) to its screen
