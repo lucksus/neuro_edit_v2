@@ -721,6 +721,38 @@ impl Network {
     /// fail here rather than panic inside a sim build or an editor redraw.
     pub fn validate(&self) -> Result<(), String> {
         let n = self.neurons.len() as u32;
+        // Q11: malformed numerics that would poison the sim build —
+        // huge delay rings, NaN currents, non-finite geometry.
+        if !(self.meta.dt_ms.is_finite() && self.meta.dt_ms > 0.0) {
+            return Err(format!(
+                "meta.dt_ms {} must be positive and finite",
+                self.meta.dt_ms
+            ));
+        }
+        if !(self.meta.conduction_speed.is_finite() && self.meta.conduction_speed > 0.0) {
+            return Err(format!(
+                "meta.conduction_speed {} must be positive and finite",
+                self.meta.conduction_speed
+            ));
+        }
+        for (name, v) in [
+            ("synapse_tau_ms", self.meta.synapse_tau_ms),
+            ("readout_tau_ms", self.meta.readout_tau_ms),
+            ("noise_rate_hz", self.meta.noise_rate_hz),
+            ("noise_kick_mv", self.meta.noise_kick_mv),
+        ] {
+            if !(v.is_finite() && v >= 0.0) {
+                return Err(format!("meta.{name} {v} must be finite and >= 0"));
+            }
+        }
+        for (i, nrn) in self.neurons.iter().enumerate() {
+            if !nrn.pos.iter().all(|p| p.is_finite()) {
+                return Err(format!("neuron {i} has non-finite pos {:?}", nrn.pos));
+            }
+            if !nrn.model.params().iter().all(|p| p.is_finite()) {
+                return Err(format!("neuron {i} has non-finite model params"));
+            }
+        }
         for (i, s) in self.synapses.iter().enumerate() {
             if s.src >= n || s.tgt >= n {
                 return Err(format!(
@@ -732,6 +764,15 @@ impl Network {
                 return Err(format!(
                     "synapse {i} has bad tau_ms {} (want >= 0, finite)",
                     s.tau_ms
+                ));
+            }
+            if !s.w.is_finite() {
+                return Err(format!("synapse {i} has non-finite weight {}", s.w));
+            }
+            if !(s.delay_ms >= 0.0 && s.delay_ms.is_finite()) {
+                return Err(format!(
+                    "synapse {i} has bad delay_ms {} (want >= 0, finite)",
+                    s.delay_ms
                 ));
             }
         }
@@ -777,12 +818,15 @@ impl Network {
             }
         }
         for inp in &self.inputs {
-            for &(t, _) in &inp.targets {
+            for &(t, w) in &inp.targets {
                 if t >= n {
                     return Err(format!(
                         "input '{}' targets neuron {t} but only {n} exist",
                         inp.name
                     ));
+                }
+                if !w.is_finite() {
+                    return Err(format!("input '{}' has non-finite weight {w}", inp.name));
                 }
             }
         }
@@ -794,6 +838,34 @@ impl Network {
                         r.name
                     ));
                 }
+            }
+            // empty = uninitialized; anything else must match units 1:1
+            if !r.weights.is_empty() && r.weights.len() != r.units.len() {
+                return Err(format!(
+                    "readout '{}' has {} weights for {} units",
+                    r.name,
+                    r.weights.len(),
+                    r.units.len()
+                ));
+            }
+            if !(r.tau_ms.is_finite() && r.tau_ms > 0.0) {
+                return Err(format!(
+                    "readout '{}' tau_ms {} must be positive and finite",
+                    r.name, r.tau_ms
+                ));
+            }
+        }
+        for s in &self.samples {
+            if s.times.len() != s.values.len() {
+                return Err(format!(
+                    "samples '{}' has {} times but {} values",
+                    s.name,
+                    s.times.len(),
+                    s.values.len()
+                ));
+            }
+            if !s.times.iter().all(|t| t.is_finite()) || !s.values.iter().all(|v| v.is_finite()) {
+                return Err(format!("samples '{}' has non-finite data", s.name));
             }
         }
         Ok(())
@@ -990,5 +1062,70 @@ mod tests {
         // dangling synapse dropped, valid group member kept
         assert!(net.synapses.is_empty());
         assert_eq!(net.group("g").unwrap().members, vec![1]);
+    }
+
+    /// Q11: malformed numerics are refused at the format boundary —
+    /// each of these used to sail through validate() into the sim.
+    #[test]
+    fn validate_rejects_poison_numerics() {
+        let mut net = Network::new();
+        net.add_neuron([0.0; 3], NeuronKind::Excitatory);
+        net.add_neuron([10.0, 0.0, 0.0], NeuronKind::Excitatory);
+        net.connect(0, 1, 1.0);
+        assert!(net.validate().is_ok());
+
+        let mut bad = net.clone();
+        bad.synapses[0].delay_ms = f32::NAN;
+        assert!(bad.validate().unwrap_err().contains("delay_ms"));
+        let mut bad = net.clone();
+        bad.synapses[0].delay_ms = -1.0;
+        assert!(bad.validate().is_err());
+        let mut bad = net.clone();
+        bad.synapses[0].w = f32::INFINITY;
+        assert!(bad.validate().unwrap_err().contains("weight"));
+        let mut bad = net.clone();
+        bad.neurons[0].pos = [f32::NAN; 3];
+        assert!(bad.validate().unwrap_err().contains("pos"));
+        let mut bad = net.clone();
+        bad.meta.dt_ms = 0.0;
+        assert!(bad.validate().unwrap_err().contains("dt_ms"));
+        let mut bad = net.clone();
+        bad.meta.conduction_speed = -5.0;
+        assert!(bad.validate().unwrap_err().contains("conduction"));
+        let mut bad = net.clone();
+        bad.meta.readout_tau_ms = f32::NAN;
+        assert!(bad.validate().unwrap_err().contains("readout_tau"));
+
+        // readout weights must match units 1:1 (or be empty)
+        net.readouts.push(Readout {
+            name: "ro".into(),
+            units: vec![0, 1],
+            weights: vec![1.0, 2.0],
+            bias: 0.0,
+            bias_weight: 0.0,
+            tau_ms: 2.0,
+            pos: [0.0; 3],
+        });
+        assert!(net.validate().is_ok());
+        let mut bad = net.clone();
+        bad.readouts[0].weights.pop();
+        assert!(bad.validate().unwrap_err().contains("weights"));
+        let mut ok = net.clone();
+        ok.readouts[0].weights.clear(); // uninitialized = allowed
+        assert!(ok.validate().is_ok());
+
+        // sample series: times.len() == values.len(), all finite
+        net.samples.push(Samples {
+            name: "s".into(),
+            times: vec![0.0, 1.0],
+            values: vec![2.0, 3.0],
+        });
+        assert!(net.validate().is_ok());
+        let mut bad = net.clone();
+        bad.samples[0].values.push(4.0);
+        assert!(bad.validate().unwrap_err().contains("values"));
+        let mut bad = net.clone();
+        bad.samples[0].times[1] = f32::NAN;
+        assert!(bad.validate().is_err());
     }
 }
