@@ -81,7 +81,7 @@ impl Sim {
         }
     }
 
-    pub fn run_steps(&mut self, n: usize) {
+    pub fn run_steps(&mut self, n: usize) -> anyhow::Result<()> {
         match self {
             Sim::Cpu(s) => s.run_steps(n),
             #[cfg(feature = "cuda")]
@@ -89,7 +89,7 @@ impl Sim {
         }
     }
 
-    pub fn run_ms(&mut self, ms: f32) {
+    pub fn run_ms(&mut self, ms: f32) -> anyhow::Result<()> {
         match self {
             Sim::Cpu(s) => s.run_ms(ms),
             #[cfg(feature = "cuda")]
@@ -210,7 +210,11 @@ impl Sim {
     /// Constant external current on one neuron.
     pub fn set_external(&mut self, neuron: usize, amps: f32) {
         match self {
-            Sim::Cpu(s) => s.ext[neuron] = amps,
+            Sim::Cpu(s) => {
+                if let Some(e) = s.ext.get_mut(neuron) {
+                    *e = amps;
+                }
+            }
             #[cfg(feature = "cuda")]
             Sim::Cuda(s) => s.set_external(neuron, amps),
         }

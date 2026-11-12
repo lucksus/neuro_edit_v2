@@ -110,33 +110,42 @@ impl CudaSim {
         } else {
             0
         };
+        // cudarc rejects 0-len buffers; on an empty net allocate one dummy
+        // lane per buffer (nothing ever launches on it).
+        fn pad<T: Default + Clone>(mut v: Vec<T>) -> Vec<T> {
+            if v.is_empty() {
+                v.push(T::default());
+            }
+            v
+        }
+        let na = n.max(1);
 
         let sim = CudaSim {
-            v: stream.clone_htod(&vec![params.init_v; n])?,
-            u: stream.clone_htod(&params.init_u)?,
-            s: stream.alloc_zeros(n)?,
-            trace: stream.alloc_zeros(n)?,
-            ext: stream.alloc_zeros(n)?,
-            ring: stream.alloc_zeros(d * n)?,
-            a: stream.clone_htod(&params.a)?,
-            b: stream.clone_htod(&params.b)?,
-            c: stream.clone_htod(&params.c)?,
-            d: stream.clone_htod(&params.d)?,
-            src_ptr: stream.clone_htod(&csr.src_ptr)?,
-            tgt: stream.clone_htod(&csr.tgt)?,
-            w: stream.clone_htod(&csr.w)?,
-            delay: stream.clone_htod(&csr.delay_steps)?,
-            stim_ptr: stream.clone_htod(&stim_ptr_host)?,
-            stim_input: stream.clone_htod(&stim_input_host)?,
-            stim_w: stream.clone_htod(&stim_w_host)?,
+            v: stream.clone_htod(&vec![params.init_v; na])?,
+            u: stream.clone_htod(&pad(params.init_u.clone()))?,
+            s: stream.alloc_zeros(na)?,
+            trace: stream.alloc_zeros(na)?,
+            ext: stream.alloc_zeros(na)?,
+            ring: stream.alloc_zeros((d * n).max(1))?,
+            a: stream.clone_htod(&pad(params.a.clone()))?,
+            b: stream.clone_htod(&pad(params.b.clone()))?,
+            c: stream.clone_htod(&pad(params.c.clone()))?,
+            d: stream.clone_htod(&pad(params.d.clone()))?,
+            src_ptr: stream.clone_htod(&pad(csr.src_ptr.clone()))?,
+            tgt: stream.clone_htod(&pad(csr.tgt.clone()))?,
+            w: stream.clone_htod(&pad(csr.w.clone()))?,
+            delay: stream.clone_htod(&pad(csr.delay_steps.clone()))?,
+            stim_ptr: stream.clone_htod(&pad(stim_ptr_host.clone()))?,
+            stim_input: stream.clone_htod(&pad(stim_input_host.clone()))?,
+            stim_w: stream.clone_htod(&pad(stim_w_host.clone()))?,
             stim: stream.alloc_zeros(1)?,
             stim_t0: i64::MAX,
             n_inputs: net.inputs.len(),
-            spk: stream.alloc_zeros(n.max(1))?,
+            spk: stream.alloc_zeros(na)?,
             cnt: [stream.alloc_zeros(1)?, stream.alloc_zeros(1)?],
             total: stream.alloc_zeros(1)?,
             spk_bits: stream.alloc_zeros((record_rows * words).max(1))?,
-            pn_total: stream.alloc_zeros(n.max(1))?,
+            pn_total: stream.alloc_zeros(na)?,
             n,
             cfg,
             params,
@@ -291,18 +300,25 @@ impl CudaSim {
         Ok(())
     }
 
-    pub fn run_steps(&mut self, n_steps: usize) {
+    pub fn run_steps(&mut self, n_steps: usize) -> Result<()> {
+        if self.n == 0 {
+            // Empty net: no kernels to launch (a 0-block grid is a driver
+            // error anyway); just advance the clock like the CPU backend.
+            self.t += n_steps as u64;
+            return Ok(());
+        }
         // upload the stimulus window for this chunk, then fire-and-forget
-        self.stim_t0 = self.upload_stim(n_steps).expect("stim upload");
+        self.stim_t0 = self.upload_stim(n_steps)?;
         for _ in 0..n_steps {
-            self.step_async().expect("kernel launch");
+            self.step_async()?;
         }
         // leave the stream running; reads sync as needed
+        Ok(())
     }
 
-    pub fn run_ms(&mut self, ms: f32) {
+    pub fn run_ms(&mut self, ms: f32) -> Result<()> {
         let steps = (ms / self.cfg.dt_ms).round() as usize;
-        self.run_steps(steps);
+        self.run_steps(steps)
     }
 
     pub fn synchronize(&self) {
@@ -311,6 +327,10 @@ impl CudaSim {
 
     pub fn reset_state(&mut self) {
         self.synchronize();
+        if self.n == 0 {
+            self.t = 0;
+            return;
+        }
         self.stream
             .memcpy_htod(&vec![self.init_v; self.n], &mut self.v)
             .unwrap();
@@ -333,10 +353,16 @@ impl CudaSim {
     }
 
     pub fn trace(&self) -> Vec<f32> {
+        if self.n == 0 {
+            return Vec::new();
+        }
         self.stream.clone_dtoh(&self.trace).unwrap()
     }
 
     pub fn v(&self) -> Vec<f32> {
+        if self.n == 0 {
+            return Vec::new();
+        }
         self.stream.clone_dtoh(&self.v).unwrap()
     }
 
@@ -357,6 +383,7 @@ impl CudaSim {
         if !self.cfg.record_spikes
             || self.t == 0
             || self.record_rows == 0
+            || self.words == 0
             || back >= self.t as usize
             || back >= self.record_rows
         {
@@ -446,8 +473,10 @@ impl CudaSim {
 
     pub fn set_external(&mut self, neuron: usize, amps: f32) {
         let mut host = self.stream.clone_dtoh(&self.ext).unwrap();
-        host[neuron] = amps;
-        self.stream.memcpy_htod(&host, &mut self.ext).unwrap();
+        if let Some(h) = host.get_mut(neuron) {
+            *h = amps;
+            self.stream.memcpy_htod(&host, &mut self.ext).unwrap();
+        }
     }
 
     /// Set the whole external-current vector at once (cheap path).

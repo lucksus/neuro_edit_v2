@@ -195,15 +195,16 @@ impl CpuSim {
         self.t += 1;
     }
 
-    pub fn run_steps(&mut self, steps: usize) {
+    pub fn run_steps(&mut self, steps: usize) -> anyhow::Result<()> {
         for _ in 0..steps {
             self.step();
         }
+        Ok(())
     }
 
-    pub fn run_ms(&mut self, ms: f32) {
+    pub fn run_ms(&mut self, ms: f32) -> anyhow::Result<()> {
         let steps = (ms / self.cfg.dt_ms).round() as usize;
-        self.run_steps(steps);
+        self.run_steps(steps)
     }
 
     pub fn time_ms(&self) -> f64 {

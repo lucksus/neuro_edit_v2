@@ -209,10 +209,16 @@ fn worker(
                     abort.store(false, Ordering::Relaxed);
                     set_busy(&shared, true);
                     log(&shared, format!("> {code}"));
-                    match env.eval_str(&code) {
-                        Ok(d) if !d.is_unit() => log(&shared, format!("= {d}")),
-                        Ok(_) => {}
-                        Err(e) => log(&shared, format!("! {e}")),
+                    // catch_unwind so a panic inside a script fn (or a CUDA
+                    // call) can't kill the worker thread silently.
+                    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        env.eval_str(&code)
+                    }));
+                    match res {
+                        Ok(Ok(d)) if !d.is_unit() => log(&shared, format!("= {d}")),
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => log(&shared, format!("! {e}")),
+                        Err(_) => log(&shared, "! script panicked (worker survived)".into()),
                     }
                     set_busy(&shared, false);
                 }
@@ -298,7 +304,28 @@ fn worker(
             match env.sim_handle() {
                 Ok(h) => {
                     let t0 = Instant::now();
-                    h.borrow_mut().run_steps(chunk);
+                    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        h.borrow_mut().run_steps(chunk)
+                    }));
+                    match res {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            running = false;
+                            log(&shared, format!("run failed: {e}"));
+                            if let Ok(mut w) = shared.write() {
+                                w.running = false;
+                            }
+                            continue;
+                        }
+                        Err(_) => {
+                            running = false;
+                            log(&shared, "run panicked (worker survived)".into());
+                            if let Ok(mut w) = shared.write() {
+                                w.running = false;
+                            }
+                            continue;
+                        }
+                    }
                     let el = t0.elapsed().as_secs_f32().max(1e-6);
                     {
                         let mut p = pub_rc.borrow_mut();
@@ -403,7 +430,19 @@ fn run_published(
     let mut done = 0usize;
     while steps > 0 && !abort.load(Ordering::Relaxed) {
         let n = steps.min(200);
-        h.borrow_mut().run_steps(n);
+        let res =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.borrow_mut().run_steps(n)));
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                log(shared, format!("run failed: {e}"));
+                return;
+            }
+            Err(_) => {
+                log(shared, "run panicked (worker survived)".into());
+                return;
+            }
+        }
         steps -= n;
         done += n;
         let mut p = pub_rc.borrow_mut();

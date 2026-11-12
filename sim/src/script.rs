@@ -149,10 +149,11 @@ impl Env {
             .unwrap_or(0.0)
     }
 
-    pub fn run_ms(&mut self, ms: f32) {
+    pub fn run_ms(&mut self, ms: f32) -> Result<(), String> {
         if let Ok(h) = self.sim_handle() {
-            h.borrow_mut().run_ms(ms);
+            h.borrow_mut().run_ms(ms).map_err(|e| e.to_string())?;
         }
+        Ok(())
     }
 
     pub fn spikes_total(&self) -> u64 {
@@ -185,6 +186,21 @@ fn d_i64(d: &Dynamic) -> i64 {
 #[inline]
 fn dyn_f64(x: f64) -> Dynamic {
     Dynamic::from(x)
+}
+
+/// Script error shorthand.
+fn s_err(s: impl Into<String>) -> Box<rhai::EvalAltResult> {
+    s.into().into()
+}
+
+/// Bounds-check a script-supplied neuron index → u32 or a script error.
+fn nid(id: i64, n: usize) -> Result<u32, Box<rhai::EvalAltResult>> {
+    if id < 0 || id as usize >= n {
+        return Err(s_err(format!(
+            "neuron index {id} out of range ({n} neurons)"
+        )));
+    }
+    Ok(id as u32)
 }
 
 /// Build or fetch the sim inside the slot (mirrors `Env::sim_handle`).
@@ -223,21 +239,22 @@ fn run_chunked(
     mut steps: usize,
     progress: &Rc<RefCell<Option<ProgressFn>>>,
     chunk: &Rc<std::cell::Cell<usize>>,
-) {
+) -> Result<(), String> {
     let mut p = progress.borrow_mut();
     match p.as_mut() {
         Some(cb) => {
             let n_chunk = chunk.get().max(1);
             while steps > 0 {
                 let n = steps.min(n_chunk);
-                h.borrow_mut().run_steps(n);
+                h.borrow_mut().run_steps(n).map_err(|e| e.to_string())?;
                 steps -= n;
                 if !(*cb.borrow_mut())(&h.borrow()) {
                     break;
                 }
             }
+            Ok(())
         }
-        None => h.borrow_mut().run_steps(steps),
+        None => h.borrow_mut().run_steps(steps).map_err(|e| e.to_string()),
     }
 }
 
@@ -299,9 +316,15 @@ pub fn register_api(
         let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
             "connect",
-            move |n: &mut NetHandle, a: rhai::INT, b: rhai::INT, w: Dynamic| -> rhai::INT {
+            move |n: &mut NetHandle,
+                  a: rhai::INT,
+                  b: rhai::INT,
+                  w: Dynamic|
+                  -> Result<rhai::INT, Box<rhai::EvalAltResult>> {
+                let len = n.borrow().neurons.len();
+                let (a, b) = (nid(a, len)?, nid(b, len)?);
                 invalidate(&s, &v);
-                n.borrow_mut().connect(a as u32, b as u32, d_f64(&w) as f32) as rhai::INT
+                Ok(n.borrow_mut().connect(a, b, d_f64(&w) as f32) as rhai::INT)
             },
         );
     }
@@ -397,32 +420,45 @@ pub fn register_api(
                   a: Dynamic,
                   b: Dynamic,
                   c: Dynamic,
-                  d: Dynamic| {
+                  d: Dynamic|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                let id = nid(id, n.borrow().neurons.len())?;
                 invalidate(&s, &v);
-                n.borrow_mut().neuron_mut(id as u32).model = net_format::NeuronModel::Izhikevich {
+                n.borrow_mut().neuron_mut(id).model = net_format::NeuronModel::Izhikevich {
                     a: d_f64(&a) as f32,
                     b: d_f64(&b) as f32,
                     c: d_f64(&c) as f32,
                     d: d_f64(&d) as f32,
                 };
+                Ok(())
             },
         );
     }
     {
         let (s, v) = (sim.clone(), net_version.clone());
-        engine.register_fn("delete_neuron", move |n: &mut NetHandle, id: rhai::INT| {
-            invalidate(&s, &v);
-            n.borrow_mut().delete_neuron(id as u32);
-        });
+        engine.register_fn(
+            "delete_neuron",
+            move |n: &mut NetHandle, id: rhai::INT| -> Result<(), Box<rhai::EvalAltResult>> {
+                let id = nid(id, n.borrow().neurons.len())?;
+                invalidate(&s, &v);
+                n.borrow_mut().delete_neuron(id);
+                Ok(())
+            },
+        );
     }
     {
         let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
             "delete_neurons",
-            move |n: &mut NetHandle, ids: rhai::Array| {
+            move |n: &mut NetHandle, ids: rhai::Array| -> Result<(), Box<rhai::EvalAltResult>> {
+                let len = n.borrow().neurons.len();
+                let ids: Vec<u32> = ids
+                    .iter()
+                    .map(|d| nid(d_i64(d), len))
+                    .collect::<Result<_, _>>()?;
                 invalidate(&s, &v);
-                n.borrow_mut()
-                    .delete_neurons(ids.iter().map(|d| d_i64(d) as u32).collect());
+                n.borrow_mut().delete_neurons(ids);
+                Ok(())
             },
         );
     }
@@ -430,30 +466,45 @@ pub fn register_api(
         let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
             "set_pos",
-            move |n: &mut NetHandle, id: rhai::INT, x: Dynamic, y: Dynamic, z: Dynamic| {
+            move |n: &mut NetHandle,
+                  id: rhai::INT,
+                  x: Dynamic,
+                  y: Dynamic,
+                  z: Dynamic|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                let id = nid(id, n.borrow().neurons.len())?;
                 invalidate(&s, &v);
                 let mut g = n.borrow_mut();
-                g.neuron_mut(id as u32).pos =
-                    [d_f64(&x) as f32, d_f64(&y) as f32, d_f64(&z) as f32];
-                g.refresh_delays_of(id as u32);
+                g.neuron_mut(id).pos = [d_f64(&x) as f32, d_f64(&y) as f32, d_f64(&z) as f32];
+                g.refresh_delays_of(id);
+                Ok(())
             },
         );
     }
-    engine.register_fn("pos", |n: &mut NetHandle, id: rhai::INT| -> rhai::Array {
-        let p = n.borrow().neuron(id as u32).pos;
-        [p[0], p[1], p[2]]
-            .iter()
-            .map(|&x| dyn_f64(x as f64))
-            .collect()
-    });
+    engine.register_fn(
+        "pos",
+        |n: &mut NetHandle, id: rhai::INT| -> Result<rhai::Array, Box<rhai::EvalAltResult>> {
+            let id = nid(id, n.borrow().neurons.len())?;
+            let p = n.borrow().neuron(id).pos;
+            Ok([p[0], p[1], p[2]]
+                .iter()
+                .map(|&x| dyn_f64(x as f64))
+                .collect())
+        },
+    );
     engine.register_fn(
         "neuron_name",
-        |n: &mut NetHandle, id: rhai::INT| -> String { n.borrow().neuron(id as u32).name.clone() },
+        |n: &mut NetHandle, id: rhai::INT| -> Result<String, Box<rhai::EvalAltResult>> {
+            let id = nid(id, n.borrow().neurons.len())?;
+            Ok(n.borrow().neuron(id).name.clone())
+        },
     );
     engine.register_fn(
         "set_neuron_name",
-        |n: &mut NetHandle, id: rhai::INT, name: &str| {
-            n.borrow_mut().neuron_mut(id as u32).name = name.to_string();
+        |n: &mut NetHandle, id: rhai::INT, name: &str| -> Result<(), Box<rhai::EvalAltResult>> {
+            let id = nid(id, n.borrow().neurons.len())?;
+            n.borrow_mut().neuron_mut(id).name = name.to_string();
+            Ok(())
         },
     );
     engine.register_fn("neuron", |n: &mut NetHandle, name: &str| -> rhai::INT {
@@ -481,29 +532,38 @@ pub fn register_api(
     });
     engine.register_fn(
         "add_to_group",
-        |n: &mut NetHandle, g: &str, ids: rhai::Array| {
+        |n: &mut NetHandle, g: &str, ids: rhai::Array| -> Result<(), Box<rhai::EvalAltResult>> {
+            let len = n.borrow().neurons.len();
+            let ids: Vec<u32> = ids
+                .iter()
+                .map(|d| nid(d_i64(d), len))
+                .collect::<Result<_, _>>()?;
             let mut b = n.borrow_mut();
             let gi = b.add_group(g);
-            for d in ids {
-                b.groups[gi].members.push(d_i64(&d) as u32);
-            }
+            b.groups[gi].members.extend(ids);
+            Ok(())
         },
     );
     {
         let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
             "add_input",
-            move |n: &mut NetHandle, name: &str, targets: rhai::Array| {
-                invalidate(&s, &v);
+            move |n: &mut NetHandle,
+                  name: &str,
+                  targets: rhai::Array|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                let len = n.borrow().neurons.len();
                 let mut tw = Vec::new();
                 for t in targets {
                     if let Some(arr) = t.try_cast::<rhai::Array>() {
                         if arr.len() >= 2 {
-                            tw.push((d_i64(&arr[0]) as u32, d_f64(&arr[1]) as f32));
+                            tw.push((nid(d_i64(&arr[0]), len)?, d_f64(&arr[1]) as f32));
                         }
                     }
                 }
+                invalidate(&s, &v);
                 n.borrow_mut().add_input(name, tw, [0.0; 3]);
+                Ok(())
             },
         );
     }
@@ -511,10 +571,18 @@ pub fn register_api(
         let v = net_version.clone();
         engine.register_fn(
             "add_readout",
-            move |n: &mut NetHandle, name: &str, units: rhai::Array| {
+            move |n: &mut NetHandle,
+                  name: &str,
+                  units: rhai::Array|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                let len = n.borrow().neurons.len();
+                let us: Vec<u32> = units
+                    .iter()
+                    .map(|d| nid(d_i64(d), len))
+                    .collect::<Result<_, _>>()?;
                 bump(&v);
-                let us: Vec<u32> = units.iter().map(|d| d_i64(d) as u32).collect();
                 n.borrow_mut().add_readout(name, us);
+                Ok(())
             },
         );
     }
@@ -576,20 +644,23 @@ pub fn register_api(
         let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
             "load",
-            move |n: &mut NetHandle, path: &str| match net_format::io::load(path) {
-                Ok(loaded) => {
-                    *n.borrow_mut() = loaded;
-                    invalidate(&s, &v);
-                }
-                Err(e) => eprintln!("load {path}: {e}"),
+            move |n: &mut NetHandle, path: &str| -> Result<(), Box<rhai::EvalAltResult>> {
+                let loaded =
+                    net_format::io::load(path).map_err(|e| s_err(format!("load {path}: {e}")))?;
+                *n.borrow_mut() = loaded;
+                invalidate(&s, &v);
+                Ok(())
             },
         );
     }
-    engine.register_fn("net_load", move |path: &str| -> NetHandle {
-        Rc::new(RefCell::new(
-            net_format::io::load(path).unwrap_or_else(|_| Network::new()),
-        ))
-    });
+    engine.register_fn(
+        "net_load",
+        move |path: &str| -> Result<NetHandle, Box<rhai::EvalAltResult>> {
+            Ok(Rc::new(RefCell::new(
+                net_format::io::load(path).map_err(|e| s_err(format!("load {path}: {e}")))?,
+            )))
+        },
+    );
 
     // ---- sim methods ----
     {
@@ -600,8 +671,7 @@ pub fn register_api(
             move |_: &mut SimSlot, ms: Dynamic| -> Result<(), Box<rhai::EvalAltResult>> {
                 let h = ensure_sim(&s, &n, &c, backend)?;
                 let steps = (d_f64(&ms) as f32 / c.borrow().dt_ms).round().max(0.0) as usize;
-                run_chunked(&h, steps, &p, &pc);
-                Ok(())
+                run_chunked(&h, steps, &p, &pc).map_err(s_err)
             },
         );
     }
@@ -612,8 +682,7 @@ pub fn register_api(
             "run_steps",
             move |_: &mut SimSlot, steps: rhai::INT| -> Result<(), Box<rhai::EvalAltResult>> {
                 let h = ensure_sim(&s, &n, &c, backend)?;
-                run_chunked(&h, steps.max(0) as usize, &p, &pc);
-                Ok(())
+                run_chunked(&h, steps.max(0) as usize, &p, &pc).map_err(s_err)
             },
         );
     }
@@ -670,22 +739,26 @@ pub fn register_api(
     });
     engine.register_fn(
         "trace_of",
-        |s: &mut SimSlot, ids: rhai::Array| -> rhai::Array {
+        |s: &mut SimSlot, ids: rhai::Array| -> Result<rhai::Array, Box<rhai::EvalAltResult>> {
             let Some(h) = s.borrow().as_ref().cloned() else {
-                return Vec::new();
+                return Ok(Vec::new());
             };
             let tr = h.borrow().trace();
             ids.iter()
-                .map(|d| dyn_f64(tr[d_i64(d) as usize] as f64))
+                .map(|d| Ok(dyn_f64(tr[nid(d_i64(d), tr.len())? as usize] as f64)))
                 .collect()
         },
     );
-    engine.register_fn("v", |s: &mut SimSlot, id: rhai::INT| -> f64 {
-        s.borrow()
-            .as_ref()
-            .map(|h| h.borrow().v()[id as usize] as f64)
-            .unwrap_or(0.0)
-    });
+    engine.register_fn(
+        "v",
+        |s: &mut SimSlot, id: rhai::INT| -> Result<f64, Box<rhai::EvalAltResult>> {
+            let Some(h) = s.borrow().as_ref().cloned() else {
+                return Ok(0.0);
+            };
+            let b = h.borrow();
+            Ok(b.v()[nid(id, b.v().len())? as usize] as f64)
+        },
+    );
     engine.register_fn(
         "spike_counts",
         |s: &mut SimSlot, rows: rhai::INT| -> Result<rhai::Array, Box<rhai::EvalAltResult>> {
@@ -695,7 +768,7 @@ pub fn register_api(
             let c = h
                 .borrow()
                 .spike_counts(rows.max(0) as usize)
-                .map_err(|e| -> Box<rhai::EvalAltResult> { e.into() })?;
+                .map_err(s_err)?;
             Ok(c.into_iter().map(|f| dyn_f64(f as f64)).collect())
         },
     );
@@ -711,11 +784,10 @@ pub fn register_api(
             let c = h
                 .borrow()
                 .spike_counts(rows.max(0) as usize)
-                .map_err(|e| -> Box<rhai::EvalAltResult> { e.into() })?;
-            Ok(ids
-                .iter()
-                .map(|d| dyn_f64(c[d_i64(d) as usize] as f64))
-                .collect())
+                .map_err(s_err)?;
+            ids.iter()
+                .map(|d| Ok(dyn_f64(c[nid(d_i64(d), c.len())? as usize] as f64)))
+                .collect()
         },
     );
     engine.register_fn("vs", |s: &mut SimSlot| -> rhai::Array {
@@ -776,8 +848,9 @@ pub fn register_api(
                   amps: Dynamic|
                   -> Result<(), Box<rhai::EvalAltResult>> {
                 let h = ensure_sim(&s, &n, &c, backend)?;
+                let n_len = h.borrow().v().len();
                 h.borrow_mut()
-                    .set_external(id as usize, d_f64(&amps) as f32);
+                    .set_external(nid(id, n_len)? as usize, d_f64(&amps) as f32);
                 Ok(())
             },
         );

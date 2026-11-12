@@ -22,12 +22,12 @@ fn single_neuron_step_matches_hand_computed() {
     // step 1 (v=-65 < 30 so no reset):
     // v += 0.1*(0.04*4225 -325 +140 +13 +10) = 0.1*(169-162) = +0.7 -> -64.3
     // u += 0.1*0.02*(0.2*-64.3 - (-13)) = 0.002*(-12.86+13) = +0.00028 -> -12.99972
-    sim.run_steps(1);
+    sim.run_steps(1).unwrap();
     assert!((sim.v[0] - (-64.3)).abs() < 1e-4, "v={}", sim.v[0]);
     assert!((sim.u[0] - (-12.99972)).abs() < 1e-4, "u={}", sim.u[0]);
     // step 2: v=-64.3, u=-12.99972
     // v += 0.1*(0.04*4134.49 -321.5 +140 +12.99972 +10) = 0.1*(165.3796-168.50028)
-    sim.run_steps(1);
+    sim.run_steps(1).unwrap();
     let v2 = -64.3f64 + 0.1 * (0.04 * 64.3f64 * 64.3 - 5.0 * 64.3 + 140.0 + 12.99972 + 10.0);
     assert!(
         (sim.v[0] as f64 - v2).abs() < 1e-3,
@@ -45,7 +45,7 @@ fn spike_resets_next_step() {
     // run until first spike
     let mut spike_step = None;
     for i in 0..200 {
-        sim.run_steps(1);
+        sim.run_steps(1).unwrap();
         if sim.trace[0] > 0.9 {
             spike_step = Some(i);
             break;
@@ -54,7 +54,7 @@ fn spike_resets_next_step() {
     let _t = spike_step.expect("neuron should spike");
     // on the spike step v is still at its peak; the reset happens next step
     let trace_on_spike = sim.trace[0];
-    sim.run_steps(1);
+    sim.run_steps(1).unwrap();
     // one step after the spike: v was reset to c and integrated once
     assert!(sim.v[0] < -60.0, "v after spike {}", sim.v[0]);
     assert!(sim.trace[0] < trace_on_spike);
@@ -77,7 +77,7 @@ fn synapse_arrives_after_delay_and_decays() {
     let mut first_spike_t = None;
     for _ in 0..500 {
         let spikes_before = sim.spikes_total;
-        sim.run_steps(1);
+        sim.run_steps(1).unwrap();
         if sim.spikes_total > spikes_before {
             first_spike_t = Some(sim.t - 1);
             break;
@@ -86,15 +86,15 @@ fn synapse_arrives_after_delay_and_decays() {
     let _t_spike = first_spike_t.unwrap();
     sim.set_external(0, 0.0);
     // B's synaptic current must be 0 for delay-1 steps, then jump by w
-    sim.run_steps(1); // t_spike+1: still in flight (arrives at t_spike+2)
+    sim.run_steps(1).unwrap(); // t_spike+1: still in flight (arrives at t_spike+2)
     assert_eq!(sim.s[1], 0.0, "s too early");
-    sim.run_steps(1); // arrival step: s += w, neuron reads it, then decays
+    sim.run_steps(1).unwrap(); // arrival step: s += w, neuron reads it, then decays
     assert!(
         (sim.s[1] - 30.0 * (1.0 - 0.1 / 2.0)).abs() < 1e-3,
         "s={}",
         sim.s[1]
     );
-    sim.run_steps(1);
+    sim.run_steps(1).unwrap();
     let expected = 30.0f32 * (1.0f32 - 0.05).powi(2);
     assert!(
         (sim.s[1] - expected).abs() < 1e-2,
@@ -123,7 +123,7 @@ fn stimulus_reaches_only_its_targets() {
     sim.set_input_constant(0, 5.0);
     // single step: neuron1 untouched
     let s1 = sim.s[1];
-    sim.run_steps(1);
+    sim.run_steps(1).unwrap();
     assert_eq!(sim.s[1], s1);
     // v of neuron0 and neuron2 must diverge (2 gets double current)
     let dv = (sim.v[2] - sim.v[0]).abs();
@@ -138,7 +138,7 @@ fn played_series_is_step_locked() {
     let mut sim = CpuSim::new(&net, SimConfig::default());
     // 10 units of drive for exactly one step, then silence
     sim.play_input(0, vec![10.0, 0.0, 0.0]);
-    sim.run_steps(1);
+    sim.run_steps(1).unwrap();
     // same as the hand-computed I=10 step: v = -64.3
     assert!((sim.v[0] - (-64.3)).abs() < 1e-4, "v={}", sim.v[0]);
     // series exhausted -> later steps get 0, not the constant
@@ -147,7 +147,7 @@ fn played_series_is_step_locked() {
     sim.play_input(0, vec![25.0; 20]);
     let mut spiked = false;
     for _ in 0..20 {
-        sim.run_steps(1);
+        sim.run_steps(1).unwrap();
         if sim.trace[0] == 1.0 {
             spiked = true;
         }
@@ -165,9 +165,9 @@ fn noise_is_deterministic_per_seed() {
     let mut a = CpuSim::new(&net, cfg.clone());
     let mut b = CpuSim::new(&net, cfg.clone());
     let mut c = CpuSim::new(&net, SimConfig { seed: 2, ..cfg });
-    a.run_steps(100);
-    b.run_steps(100);
-    c.run_steps(100);
+    a.run_steps(100).unwrap();
+    b.run_steps(100).unwrap();
+    c.run_steps(100).unwrap();
     assert_eq!(a.v, b.v);
     assert_ne!(a.v, c.v);
 }
@@ -178,7 +178,7 @@ fn reset_clears_state() {
     net.connect(0, 1, 5.0);
     let mut sim = CpuSim::new(&net, SimConfig::default());
     sim.set_external(0, 30.0);
-    sim.run_steps(50);
+    sim.run_steps(50).unwrap();
     sim.reset_state();
     assert_eq!(sim.t, 0);
     assert!(sim.v.iter().all(|&v| v == -65.0));

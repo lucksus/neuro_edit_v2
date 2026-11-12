@@ -59,7 +59,7 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
         o.backend,
     )?;
     let steps = (o.after_ms / dt).round().max(0.0) as usize;
-    sim.run_steps(steps);
+    sim.run_steps(steps)?;
     let activity = sim.trace();
 
     // ---- wgpu headless ----

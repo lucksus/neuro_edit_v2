@@ -39,8 +39,8 @@ fn gpu_matches_cpu_spike_counts_quiet() {
         cpu.set_external(i, 12.0);
         gpu.set_external(i, 12.0);
     }
-    cpu.run_ms(50.0);
-    gpu.run_ms(50.0);
+    cpu.run_ms(50.0).unwrap();
+    gpu.run_ms(50.0).unwrap();
     let cpu_total = cpu.spikes_total();
     let gpu_total = gpu.spikes_total();
     eprintln!("cpu spikes={cpu_total} gpu spikes={gpu_total}");
@@ -64,8 +64,8 @@ fn gpu_cpu_close_with_noise() {
     };
     let mut cpu = Sim::new(&net, cfg.clone(), BackendKind::Cpu).unwrap();
     let mut gpu = Sim::new(&net, cfg, BackendKind::Cuda).unwrap();
-    cpu.run_ms(100.0);
-    gpu.run_ms(100.0);
+    cpu.run_ms(100.0).unwrap();
+    gpu.run_ms(100.0).unwrap();
     let a = cpu.spikes_total() as f64;
     let g = gpu.spikes_total() as f64;
     eprintln!("cpu={a} gpu={g}");
@@ -99,8 +99,8 @@ fn gpu_int_weights_bitwise_deterministic() {
     };
     let mut a = Sim::new(&net, cfg.clone(), BackendKind::Cuda).unwrap();
     let mut b = Sim::new(&net, cfg, BackendKind::Cuda).unwrap();
-    a.run_ms(80.0);
-    b.run_ms(80.0);
+    a.run_ms(80.0).unwrap();
+    b.run_ms(80.0).unwrap();
     assert_eq!(a.spikes_total(), b.spikes_total());
     // v(u8-quantized or not) and the recorded spike bitmap must match exactly
     assert_eq!(a.v(), b.v(), "v differs between identical int-ring runs");
@@ -134,8 +134,8 @@ fn gpu_int_weights_close_to_float() {
         BackendKind::Cuda,
     )
     .unwrap();
-    f.run_ms(80.0);
-    i.run_ms(80.0);
+    f.run_ms(80.0).unwrap();
+    i.run_ms(80.0).unwrap();
     let (tf, ti) = (f.spikes_total() as f64, i.spikes_total() as f64);
     eprintln!("float={tf} int={ti}");
     assert!(tf > 0.0 && ti > 0.0);

@@ -80,13 +80,13 @@ pub fn run_bench(
         gpu_mem_mb = s.dev_mem_bytes() / (1 << 20);
     }
     // warm up (NVRTC compile + first launches + settle)
-    sim.run_ms(warm_ms);
+    sim.run_ms(warm_ms).expect("warmup run");
     #[cfg(feature = "cuda")]
     if let Sim::Cuda(ref s) = sim {
         s.synchronize();
     }
     let t0 = Instant::now();
-    sim.run_ms(sim_ms);
+    sim.run_ms(sim_ms).expect("bench run");
     #[cfg(feature = "cuda")]
     if let Sim::Cuda(ref s) = sim {
         s.synchronize();

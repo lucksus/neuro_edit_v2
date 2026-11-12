@@ -26,11 +26,11 @@ fn one_neuron_net() -> Network {
 fn cpu_spike_bits_cleared_on_ring_wrap() {
     let mut sim = CpuSim::new(&one_neuron_net(), rec_cfg(64));
     sim.set_external(0, 40.0);
-    sim.run_steps(64 * 20);
+    sim.run_steps(64 * 20).unwrap();
     sim.set_external(0, 0.0);
-    sim.run_steps(200);
+    sim.run_steps(200).unwrap();
     let before = sim.spikes_total;
-    sim.run_steps(64);
+    sim.run_steps(64).unwrap();
     let true_spikes = (sim.spikes_total - before) as u32;
     let reported = sim.spike_counts(64).unwrap()[0];
     assert_eq!(true_spikes, reported, "stale bits inflated the count");
@@ -42,7 +42,7 @@ fn cpu_spike_bits_cleared_on_ring_wrap() {
 fn cpu_spike_counts_window_semantics() {
     let mut sim = CpuSim::new(&one_neuron_net(), rec_cfg(64));
     sim.set_external(0, 40.0);
-    sim.run_steps(300); // t = 300, ring = 64
+    sim.run_steps(300).unwrap(); // t = 300, ring = 64
 
     // 5000-step window covers all of t → direct count
     let direct = sim.pn_total[0];
@@ -65,11 +65,11 @@ fn cuda_spike_bits_cleared_on_ring_wrap() {
     let net = one_neuron_net();
     let mut s = Sim::new(&net, rec_cfg(64), BackendKind::Cuda).unwrap();
     s.set_external(0, 40.0);
-    s.run_steps(64 * 20);
+    s.run_steps(64 * 20).unwrap();
     s.set_external(0, 0.0);
-    s.run_steps(200);
+    s.run_steps(200).unwrap();
     let before = s.spikes_total();
-    s.run_steps(64);
+    s.run_steps(64).unwrap();
     let true_spikes = (s.spikes_total() - before) as u32;
     let reported = s.spike_counts(64).unwrap()[0];
     assert_eq!(true_spikes, reported, "stale bits inflated the count");
@@ -82,7 +82,7 @@ fn cuda_spike_counts_window_semantics() {
     let net = one_neuron_net();
     let mut s = Sim::new(&net, rec_cfg(64), BackendKind::Cuda).unwrap();
     s.set_external(0, 40.0);
-    s.run_steps(300);
+    s.run_steps(300).unwrap();
     let direct = s.spike_counts(5000).unwrap()[0];
     assert!(direct > 0);
     // equals lifetime total: spikes_total counts the single neuron

@@ -95,7 +95,7 @@ fn play_window(sim: &mut CpuSim, net: &Network, m: &[Vec<f32>]) -> Vec<f32> {
         let idx = net.input_index(&format!("src{s}")).unwrap();
         sim.play_input(idx, series);
     }
-    sim.run_steps(WIN_MS * SPB);
+    sim.run_steps(WIN_MS * SPB).unwrap();
     sim.spike_counts(WIN_MS * SPB)
         .unwrap()
         .iter()

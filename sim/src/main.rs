@@ -173,7 +173,10 @@ fn main() -> ExitCode {
     } else if args.net.is_some() && args.script.is_none() && args.eval.is_empty() {
         // bare --net: just run
         println!("running {}ms on {:?} backend...", args.ms, backend);
-        env.run_ms(args.ms);
+        if let Err(e) = env.run_ms(args.ms) {
+            eprintln!("run error: {e}");
+            return ExitCode::FAILURE;
+        }
         println!("t={:.1}ms spikes={}", env.time_ms(), env.spikes_total());
     }
     ExitCode::SUCCESS
