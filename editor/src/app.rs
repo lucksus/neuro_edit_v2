@@ -616,6 +616,22 @@ impl EditorApp {
         self.selection = ids.into_iter().collect();
     }
 
+    /// Plot/legend label for a watched neuron: its name when set, the
+    /// id always — "n7" style falls back to the bare id.
+    fn watch_label(&self, id: u32) -> String {
+        let name = self
+            .geo
+            .as_ref()
+            .and_then(|g| g.names.get(id as usize))
+            .map(String::as_str)
+            .unwrap_or("");
+        if name.is_empty() {
+            format!("n{id}")
+        } else {
+            format!("{name} (#{id})")
+        }
+    }
+
     /// Context-menu helper: delete one neuron.
     pub fn delete_entity(&mut self, id: u32) {
         self.edit_net(NetEdit::DeleteNeurons { ids: vec![id] });
@@ -2226,6 +2242,12 @@ impl EditorApp {
                     "kind: {}",
                     if g.kind[i] == 0 { "exc" } else { "inh" }
                 ));
+                // Discoverable watching: one click to the plots window.
+                if ui.button("Plot v(t)").clicked() {
+                    self.watch(vec![id]);
+                    self.show_plots = true;
+                    self.plot_tab = PlotTab::Voltage;
+                }
                 ui.label("group memberships:".to_string());
                 for (gname, members) in &g.groups {
                     if members.contains(&id) {
@@ -2574,6 +2596,18 @@ impl EditorApp {
                             p = p.auto_bounds(egui::Vec2b::new(false, false));
                         }
                         let pr = p.show(ui, |ui| {
+                            if self.hist.v.is_empty() {
+                                // Discoverable watching (Stage 13 E): the
+                                // empty plot itself explains how to fill it.
+                                let cx = win.map(|(lo, hi)| (lo + hi) / 2.0)
+                                    .unwrap_or(self.last_sim_t);
+                                ui.text(egui_plot::Text::new(
+                                    "hint",
+                                    egui_plot::PlotPoint::new(cx, -25.0),
+                                    "no watched neurons — click a neuron to watch it,\n\
+                                     or right-click → \"Watch v(t)\" · Inspector → \"Plot v(t)\"",
+                                ));
+                            }
                             // watch_sent order → stable per-neuron colors,
                             // shared with the phase tab.
                             for (ci, &id) in self.watch_sent.iter().enumerate() {
@@ -2587,7 +2621,7 @@ impl EditorApp {
                                     None => h.iter().map(|(t, v)| [*t, *v as f64]).collect(),
                                 };
                                 ui.line(
-                                    Line::new(format!("n{id}"), pts)
+                                    Line::new(self.watch_label(id), pts)
                                         .color(crate::plot::watch_color(ci)),
                                 );
                             }
@@ -2616,6 +2650,13 @@ impl EditorApp {
                             .x_axis_label("v (mV)")
                             .y_axis_label("u");
                         let _ = p.show(ui, |ui| {
+                            if self.hist.u.is_empty() {
+                                ui.text(egui_plot::Text::new(
+                                    "hint",
+                                    egui_plot::PlotPoint::new(-30.0, -10.0),
+                                    "no watched neurons — watch a neuron to see\nits v–u trajectory here",
+                                ));
+                            }
                             for (ci, &id) in self.watch_sent.iter().enumerate() {
                                 let (Some(vs), Some(us)) =
                                     (self.hist.v.get(&id), self.hist.u.get(&id))
@@ -2628,7 +2669,7 @@ impl EditorApp {
                                     continue;
                                 }
                                 ui.line(
-                                    Line::new(format!("n{id}"), PlotPoints::from(pts))
+                                    Line::new(self.watch_label(id), PlotPoints::from(pts))
                                         .color(col),
                                 );
                                 if let Some(p) = newest {
@@ -2676,6 +2717,15 @@ impl EditorApp {
                                 }
                             })
                             .show(ui, |ui| {
+                                if self.hist.raster.is_empty() {
+                                    let cx = win.map(|(lo, hi)| (lo + hi) / 2.0)
+                                        .unwrap_or(self.last_sim_t);
+                                    ui.text(egui_plot::Text::new(
+                                        "hint",
+                                        egui_plot::PlotPoint::new(cx, 0.0),
+                                        "run the simulation — each spike lands here",
+                                    ));
+                                }
                                 let mut pts = Vec::new();
                                 let watches = &self.watch_sent;
                                 for &(t, ref fired) in &self.hist.raster {
