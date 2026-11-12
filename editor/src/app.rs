@@ -137,6 +137,8 @@ pub struct EditorApp {
     /// `GeoSnap::version` at the last save — anything newer = unsaved edits.
     saved_version: u64,
     watch_sent: Vec<u32>,
+    /// Neuron ids an example asked to watch on Run (see examples.rs).
+    example_watch: Option<&'static [u32]>,
     pub status: String,
     /// Mode as of last frame — a change clears `status` (stale
     /// mode-scoped messages like "connect: missed" shouldn't stick).
@@ -574,6 +576,7 @@ impl EditorApp {
             last_net_gen: 0,
             saved_version: 0,
             watch_sent: Vec::new(),
+            example_watch: None,
             status: String::new(),
             last_mode: Mode::Navigate,
             clipboard: None,
@@ -689,6 +692,30 @@ impl EditorApp {
         self.recent.retain(|p| *p != path);
         self.recent.push_front(path);
         self.recent.truncate(8);
+    }
+
+    /// Load a bundled example into the script editor (Stage 13 H).
+    fn load_example(&mut self, ex: &'static crate::examples::Example) {
+        self.script_name = ex.file.trim_end_matches(".rhai").to_string();
+        self.script_text = ex.src.to_string();
+        self.example_watch = Some(ex.watch);
+        self.show_script = true;
+        self.status = format!("example {:?} loaded — press Run", ex.name);
+    }
+
+    /// Run the console script (button + Ctrl+Enter share this). A loaded
+    /// example may ask to auto-watch its neurons once it has run.
+    fn run_script(&mut self) {
+        let code = self.script_text.clone();
+        self.send(ClientMsg::Eval { code });
+        if let Some(ids) = self.example_watch.take() {
+            if !ids.is_empty() {
+                self.watch_sent = ids.to_vec();
+                self.send(ClientMsg::Watch(ids.to_vec()));
+                self.show_plots = true;
+                self.plot_tab = PlotTab::Voltage;
+            }
+        }
     }
 
     /// Selection → watched neurons for v plots (first 8 selected neurons).
@@ -1304,6 +1331,14 @@ impl EditorApp {
                         self.show_keys = true;
                         ui.close();
                     }
+                    ui.menu_button("Examples", |ui| {
+                        for ex in crate::examples::EXAMPLES {
+                            if ui.button(ex.name).clicked() {
+                                self.load_example(ex);
+                                ui.close();
+                            }
+                        }
+                    });
                     if ui.add(icons::button(&ic.about, "About")).clicked() {
                         self.dlg = Some(Dialog::About);
                         ui.close();
@@ -2495,8 +2530,7 @@ impl EditorApp {
                     ui.label("name");
                     ui.text_edit_singleline(&mut self.script_name);
                     if ui.button("Run").clicked() {
-                        let code = self.script_text.clone();
-                        self.send(ClientMsg::Eval { code });
+                        self.run_script();
                     }
                     if ui
                         .button("Run as job")
@@ -2519,6 +2553,14 @@ impl EditorApp {
                         });
                         self.status = format!("script {:?} saved to net", self.script_name);
                     }
+                    ui.menu_button("Examples ▾", |ui| {
+                        for ex in crate::examples::EXAMPLES {
+                            if ui.button(ex.name).clicked() {
+                                self.load_example(ex);
+                                ui.close();
+                            }
+                        }
+                    });
                 });
                 ui.horizontal(|ui| {
                     ui.label("file");
@@ -2580,8 +2622,7 @@ impl EditorApp {
                                 && (i.modifiers.ctrl || i.modifiers.command)
                         });
                     if run && !self.script_text.trim().is_empty() {
-                        let code = self.script_text.clone();
-                        self.send(ClientMsg::Eval { code });
+                        self.run_script();
                     }
                 });
             });

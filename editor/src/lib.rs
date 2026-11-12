@@ -3,6 +3,7 @@
 
 pub mod app;
 pub mod camera;
+pub mod examples;
 pub mod gpu;
 pub mod icons;
 pub mod manual;
