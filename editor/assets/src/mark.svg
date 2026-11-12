@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="20 20 216 196">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#16203a"/><stop offset="1" stop-color="#070a12"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7fdcff" stop-opacity=".35"/><stop offset=".5" stop-color="#7fdcff" stop-opacity=".06"/><stop offset="1" stop-color="#7fdcff" stop-opacity=".12"/>
+    </linearGradient>
+    <linearGradient id="trace" gradientUnits="userSpaceOnUse" x1="0" y1="52" x2="0" y2="128">
+      <stop offset="0" stop-color="#ffd27a"/><stop offset=".35" stop-color="#ffb547"/><stop offset="1" stop-color="#3fd8f5"/>
+    </linearGradient>
+    <radialGradient id="soma" cx=".38" cy=".34" r=".7">
+      <stop offset="0" stop-color="#d8f8ff"/><stop offset=".35" stop-color="#5fe0f8"/><stop offset="1" stop-color="#1aa6d0"/>
+    </radialGradient>
+    <radialGradient id="flash" r=".5">
+      <stop offset="0" stop-color="#fff1cc"/><stop offset=".3" stop-color="#ffb547" stop-opacity=".75"/><stop offset="1" stop-color="#ffb547" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="5"/></filter>
+  </defs>
+  <!-- glow pass -->
+  <g filter="url(#glow)" opacity=".55">
+    <path d="M44 112 L58 128 M40 146 H64 M46 180 L60 166 M106 150 H134 L150 52 L166 190 L178 150 H220" fill="none" stroke="url(#trace)" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="84" cy="150" r="28" fill="#3fd8f5"/>
+  </g>
+  <circle cx="150" cy="52" r="34" fill="url(#flash)"/>
+  <!-- dendrites -->
+  <g fill="none" stroke="#3fd8f5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M66 136 L50 116 L40 112" stroke-width="9"/>
+    <path d="M50 116 L46 98" stroke-width="6"/>
+    <path d="M60 150 H36" stroke-width="9"/>
+    <path d="M66 164 L50 184 L38 186" stroke-width="9"/>
+    <path d="M50 184 L50 202" stroke-width="6"/>
+  </g>
+  <!-- axon with action potential -->
+  <path d="M106 150 H134 L150 52 L166 190 L178 150 H220" fill="none" stroke="url(#trace)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="84" cy="150" r="25" fill="url(#soma)"/>
+  <circle cx="150" cy="54" r="5" fill="#fff6dd"/>
+</svg>

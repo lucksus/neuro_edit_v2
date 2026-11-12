@@ -1,0 +1,55 @@
+group	name	label
+mode	navigate	Navigate (orbit)
+mode	select	Select
+mode	insert	Insert neuron
+mode	connect	Connect (synapse)
+mode	move	Move
+mode	zoom	Zoom
+sim	run	Run
+sim	stop	Stop
+sim	pause	Pause
+sim	step	Step 10 ms
+sim	step_long	Step 100 ms
+sim	reset	Reset
+sim	speed	Speed (realtime factor)
+sim	timestep	dt (time step)
+sim	noise	Noise
+sim	backend_gpu	Backend: CUDA / GPU
+sim	backend_cpu	Backend: CPU
+view	frame	Frame network (F)
+view	plane_xz	Plane x-z (floor)
+view	plane_xy	Plane x-y (front)
+view	plane_yz	Plane y-z (side)
+view	synapses	Show synapses
+view	grid	Show grid
+view	view_auto	Grid view: auto
+view	view_cubes	Grid view: cubes
+view	view_planes	Grid view: planes
+panel	console	Script console
+panel	script	Script editor
+panel	plots	Plots panel
+panel	inspector	Inspector
+plot	voltage	v(t) membrane voltage
+plot	raster	Spike raster
+plot	readout	Readout
+plot	samples	Samples
+plot	jobs	Jobs
+insert	neuron	Neuron
+insert	grid_2d	2D grid
+insert	grid_3d	3D grid
+insert	input	Input (current injection)
+group	group	Group
+group	connect_groups	Create connections
+group	weights	Synapse weights
+group	tau	Synapse tau
+group	exc_inh	Excitatory / inhibitory
+file	new	New
+file	open	Open / Load
+file	save	Save
+file	save_as	Save as
+file	recent	Recent files
+file	quit	Quit
+edit	copy	Copy
+edit	paste	Paste
+edit	delete	Delete
+help	about	About

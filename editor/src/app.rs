@@ -9,6 +9,7 @@ use egui_plot::{Line, PlotPoints};
 
 use crate::camera::Camera;
 use crate::gpu::{Entity, Gpu};
+use crate::icons;
 use crate::scene::{Particles, Plane};
 use crate::simctl::SimCtl;
 use crate::snap::GeoSnap;
@@ -698,49 +699,40 @@ impl EditorApp {
     // ---------------- panels ----------------
 
     fn toolbar(&mut self, ctx: &egui::Context) {
-        let (ic_play, ic_pause, ic_add, ic_conn, ic_load, ic_save) = match &self.icons {
-            Some(i) => (
-                i.play.clone(),
-                i.pause.clone(),
-                i.add_neuron.clone(),
-                i.connect.clone(),
-                i.load.clone(),
-                i.save.clone(),
-            ),
+        let ic = match &self.icons {
+            Some(i) => i.clone(),
             None => return,
         };
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("New").clicked() {
+                    if ui.add(icons::button(&ic.new, "New")).clicked() {
                         self.guarded(ctx, PendingAction::New);
                         ui.close();
                     }
-                    if ui
-                        .add(egui::Button::image_and_text(&ic_load, "Load…"))
-                        .clicked()
-                    {
+                    if ui.add(icons::button(&ic.open, "Load…")).clicked() {
                         self.dlg = Some(Dialog::Load {
                             path: self.net_path.clone().unwrap_or_default(),
                         });
                         ui.close();
                     }
-                    ui.menu_button("Recent files", |ui| {
-                        if self.recent.is_empty() {
-                            ui.label("(empty)");
-                        }
-                        let rec: Vec<String> = self.recent.iter().cloned().collect();
-                        for p in rec {
-                            if ui.button(&p).clicked() {
-                                self.guarded(ctx, PendingAction::Load(p));
-                                ui.close();
+                    ui.menu_image_text_button(
+                        icons::tinted(&ic.recent, ui.visuals().text_color()),
+                        "Recent files",
+                        |ui| {
+                            if self.recent.is_empty() {
+                                ui.label("(empty)");
                             }
-                        }
-                    });
-                    if ui
-                        .add(egui::Button::image_and_text(&ic_save, "Save"))
-                        .clicked()
-                    {
+                            let rec: Vec<String> = self.recent.iter().cloned().collect();
+                            for p in rec {
+                                if ui.button(&p).clicked() {
+                                    self.guarded(ctx, PendingAction::Load(p));
+                                    ui.close();
+                                }
+                            }
+                        },
+                    );
+                    if ui.add(icons::button(&ic.save, "Save")).clicked() {
                         match &self.net_path {
                             Some(p) => {
                                 self.send(ClientMsg::Eval {
@@ -766,17 +758,14 @@ impl EditorApp {
                         }
                         ui.close();
                     }
-                    if ui
-                        .add(egui::Button::image_and_text(&ic_save, "Save as…"))
-                        .clicked()
-                    {
+                    if ui.add(icons::button(&ic.save_as, "Save as…")).clicked() {
                         self.dlg = Some(Dialog::SaveAs {
                             path: self.net_path.clone().unwrap_or("net.ne2".into()),
                         });
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Quit").clicked() {
+                    if ui.add(icons::button(&ic.quit, "Quit")).clicked() {
                         self.guarded(ctx, PendingAction::Quit);
                     }
                 });
@@ -909,7 +898,7 @@ impl EditorApp {
                     }
                 });
                 ui.menu_button("Help", |ui| {
-                    if ui.button("About").clicked() {
+                    if ui.add(icons::button(&ic.about, "About")).clicked() {
                         self.dlg = Some(Dialog::About);
                         ui.close();
                     }
@@ -920,14 +909,11 @@ impl EditorApp {
                 // can't resume anyway, so Pause was a lie.
                 let live = self.running || self.busy;
                 let (run_icon, run_label) = if live {
-                    (ic_pause, " Stop")
+                    (&ic.stop, "Stop")
                 } else {
-                    (ic_play, " Run")
+                    (&ic.run, "Run")
                 };
-                if ui
-                    .add(egui::Button::image_and_text(&run_icon, run_label))
-                    .clicked()
-                {
+                if ui.add(icons::button(run_icon, run_label)).clicked() {
                     if live {
                         self.ctl.abort_now();
                         self.send(ClientMsg::AutoRun(false));
@@ -935,17 +921,28 @@ impl EditorApp {
                         self.send(ClientMsg::AutoRun(true));
                     }
                 }
-                if ui.button("Step 10ms").clicked() {
+                if ui
+                    .add(icons::button(&ic.step, "10ms"))
+                    .on_hover_text("Step 10 ms")
+                    .clicked()
+                {
                     self.send(ClientMsg::RunMs(10.0));
                 }
-                if ui.button("Step 100ms").clicked() {
+                if ui
+                    .add(icons::button(&ic.step_long, "100ms"))
+                    .on_hover_text("Step 100 ms")
+                    .clicked()
+                {
                     self.send(ClientMsg::RunMs(100.0));
                 }
-                if ui.button("Reset").clicked() {
+                if ui.add(icons::button(&ic.reset, "Reset")).clicked() {
                     self.send(ClientMsg::Reset);
                     self.raster.clear();
                     self.v_hist.clear();
                 }
+                let fg = ui.visuals().text_color();
+                ui.add(icons::tinted(&ic.speed, fg))
+                    .on_hover_text("Speed (realtime factor)");
                 if ui
                     .add(egui::Slider::new(&mut self.speed, 0.05..=20.0).logarithmic(true))
                     .changed()
@@ -961,37 +958,46 @@ impl EditorApp {
                     format!("x{:.1} realtime", self.speed)
                 });
                 ui.separator();
-                ui.label("backend");
+                let backend_icon = match self.backend {
+                    proto::Backend::Cuda => &ic.backend_gpu,
+                    proto::Backend::Cpu => &ic.backend_cpu,
+                };
+                ui.add(icons::tinted(backend_icon, fg))
+                    .on_hover_text("Backend");
                 egui::ComboBox::from_id_salt("backend")
                     .selected_text(match self.backend {
                         proto::Backend::Cuda => "cuda",
                         proto::Backend::Cpu => "cpu",
                     })
                     .show_ui(ui, |ui| {
-                        if ui.button("cuda").clicked() {
+                        if ui.add(icons::button(&ic.backend_gpu, "cuda")).clicked() {
                             self.send(ClientMsg::SetBackend(proto::Backend::Cuda));
                         }
-                        if ui.button("cpu").clicked() {
+                        if ui.add(icons::button(&ic.backend_cpu, "cpu")).clicked() {
                             self.send(ClientMsg::SetBackend(proto::Backend::Cpu));
                         }
                     });
-                ui.label("dt");
+                ui.add(icons::tinted(&ic.timestep, fg))
+                    .on_hover_text("Time step dt");
                 if ui
                     .add(
                         egui::DragValue::new(&mut self.dt_ms)
                             .range(0.01..=1.0)
-                            .speed(0.01),
+                            .speed(0.01)
+                            .suffix(" ms"),
                     )
                     .changed()
                 {
                     self.send(ClientMsg::SetDtMs(self.dt_ms));
                 }
-                ui.label("noise Hz");
+                ui.add(icons::tinted(&ic.noise, fg))
+                    .on_hover_text("Background noise rate");
                 if ui
                     .add(
                         egui::DragValue::new(&mut self.noise_hz)
                             .range(0.0..=5000.0)
-                            .speed(1.0),
+                            .speed(1.0)
+                            .suffix(" Hz"),
                     )
                     .changed()
                 {
@@ -1002,36 +1008,29 @@ impl EditorApp {
                 }
             });
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.mode, Mode::Navigate, "Navigate");
-                if ui
-                    .add(
-                        egui::Button::image_and_text(&ic_add, "Insert")
-                            .selected(self.mode == Mode::Insert),
-                    )
-                    .clicked()
-                {
-                    self.mode = Mode::Insert;
-                }
-                if ui
-                    .add(
-                        egui::Button::image_and_text(&ic_conn, "Connect")
-                            .selected(self.mode == Mode::Connect),
-                    )
-                    .clicked()
-                {
-                    self.mode = Mode::Connect;
-                }
-                ui.selectable_value(&mut self.mode, Mode::Move, "Move");
+                let m = &mut self.mode;
+                icons::selectable_value(ui, m, Mode::Navigate, &ic.navigate, "Navigate");
+                icons::selectable_value(ui, m, Mode::Insert, &ic.insert, "Insert");
+                icons::selectable_value(ui, m, Mode::Connect, &ic.connect, "Connect");
+                icons::selectable_value(ui, m, Mode::Move, &ic.mv, "Move");
                 ui.separator();
                 ui.label("plane");
-                ui.selectable_value(&mut self.plane, Plane::XZ, "x-z");
-                ui.selectable_value(&mut self.plane, Plane::XY, "x-y");
-                ui.selectable_value(&mut self.plane, Plane::YZ, "y-z");
+                let p = &mut self.plane;
+                icons::selectable_value(ui, p, Plane::XZ, &ic.plane_xz, "x-z");
+                icons::selectable_value(ui, p, Plane::XY, &ic.plane_xy, "x-y");
+                icons::selectable_value(ui, p, Plane::YZ, &ic.plane_yz, "y-z");
                 ui.separator();
-                ui.checkbox(&mut self.show_synapses, "synapses");
-                ui.checkbox(&mut self.show_grid, "grid");
+                icons::toggle(ui, &mut self.show_synapses, &ic.synapses, "synapses");
+                icons::toggle(ui, &mut self.show_grid, &ic.grid, "grid");
                 // Grid-group render mode: the plane LOD keeps big grids
                 // interactive; cubes stay available for editing up close.
+                let view_icon = match self.grid_view {
+                    crate::plane::GridView::Auto => &ic.view_auto,
+                    crate::plane::GridView::Cubes => &ic.view_cubes,
+                    crate::plane::GridView::Planes => &ic.view_planes,
+                };
+                ui.add(icons::tinted(view_icon, ui.visuals().text_color()))
+                    .on_hover_text("Grid view");
                 egui::ComboBox::from_id_salt("grid_view")
                     .selected_text(match self.grid_view {
                         crate::plane::GridView::Auto => "auto",
@@ -1039,34 +1038,24 @@ impl EditorApp {
                         crate::plane::GridView::Planes => "planes",
                     })
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.grid_view,
-                            crate::plane::GridView::Auto,
-                            "auto",
-                        );
-                        ui.selectable_value(
-                            &mut self.grid_view,
-                            crate::plane::GridView::Cubes,
-                            "cubes",
-                        );
-                        ui.selectable_value(
-                            &mut self.grid_view,
-                            crate::plane::GridView::Planes,
-                            "planes",
-                        );
+                        use crate::plane::GridView;
+                        let g = &mut self.grid_view;
+                        icons::selectable_value(ui, g, GridView::Auto, &ic.view_auto, "auto");
+                        icons::selectable_value(ui, g, GridView::Cubes, &ic.view_cubes, "cubes");
+                        icons::selectable_value(ui, g, GridView::Planes, &ic.view_planes, "planes");
                     });
                 if ui
-                    .button("Frame")
+                    .add(icons::icon_button(&ic.frame))
                     .on_hover_text("Frame network (F)")
                     .clicked()
                 {
                     self.frame_all();
                 }
                 ui.separator();
-                ui.checkbox(&mut self.show_console, "console");
-                ui.checkbox(&mut self.show_plots, "plots");
-                ui.checkbox(&mut self.show_inspector, "inspector");
-                ui.checkbox(&mut self.show_script, "script");
+                icons::toggle(ui, &mut self.show_console, &ic.console, "console");
+                icons::toggle(ui, &mut self.show_plots, &ic.plots, "plots");
+                icons::toggle(ui, &mut self.show_inspector, &ic.inspector, "inspector");
+                icons::toggle(ui, &mut self.show_script, &ic.script, "script");
                 ui.separator();
                 ui.label(&self.status);
             });
@@ -1539,11 +1528,14 @@ impl EditorApp {
                 ui.horizontal(|ui| {
                     ui.heading("Plots");
                     ui.separator();
-                    ui.selectable_value(&mut self.plot_tab, PlotTab::Voltage, "v(t)");
-                    ui.selectable_value(&mut self.plot_tab, PlotTab::Raster, "raster");
-                    ui.selectable_value(&mut self.plot_tab, PlotTab::Readouts, "readouts");
-                    ui.selectable_value(&mut self.plot_tab, PlotTab::Samples, "samples");
-                    ui.selectable_value(&mut self.plot_tab, PlotTab::Jobs, "jobs");
+                    if let Some(ic) = &self.icons {
+                        let t = &mut self.plot_tab;
+                        icons::selectable_value(ui, t, PlotTab::Voltage, &ic.voltage, "v(t)");
+                        icons::selectable_value(ui, t, PlotTab::Raster, &ic.raster, "raster");
+                        icons::selectable_value(ui, t, PlotTab::Readouts, &ic.readout, "readouts");
+                        icons::selectable_value(ui, t, PlotTab::Samples, &ic.samples, "samples");
+                        icons::selectable_value(ui, t, PlotTab::Jobs, &ic.jobs, "jobs");
+                    }
                     if self.plot_tab == PlotTab::Jobs && !self.jobs.is_empty() {
                         ui.separator();
                         ui.label(format!("{} job(s)", self.jobs.len()));
@@ -2166,7 +2158,7 @@ impl EditorApp {
                             // 740×246 art, drawn at half size so it stays
                             // sharp on 2x screens
                             ui.add(
-                                egui::Image::new(&i.about)
+                                egui::Image::new(&i.banner)
                                     .fit_to_exact_size(egui::vec2(370.0, 123.0)),
                             );
                         }
@@ -2193,8 +2185,7 @@ impl eframe::App for EditorApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        self.icons
-            .get_or_insert_with(|| crate::icons::Icons::load(ctx));
+        crate::icons::Icons::ensure(&mut self.icons, ctx);
         // GPU lives in egui-wgpu callback resources; we need it here for
         // scene updates + picking. Get it via render_state.
         let rs = frame.wgpu_render_state().expect("wgpu render state");
