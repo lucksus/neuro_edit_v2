@@ -973,6 +973,45 @@ pub fn register_api(
     {
         let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
+            "set_kind",
+            move |n: &mut NetHandle,
+                  id: rhai::INT,
+                  kind: &str|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                let id = nid(id, n.borrow().neurons.len())?;
+                let kind = match kind {
+                    "exc" | "excitatory" => net_format::NeuronKind::Excitatory,
+                    "inh" | "inhibitory" => net_format::NeuronKind::Inhibitory,
+                    "regular" => net_format::NeuronKind::Regular,
+                    _ => {
+                        return Err(s_err(format!(
+                            "kind must be \"exc\", \"inh\" or \"regular\", got \"{kind}\""
+                        )))
+                    }
+                };
+                // Dale's law: flipping the kind re-signs the outgoing
+                // weights at the next sim build — invalidate first.
+                invalidate(&s, &v);
+                n.borrow_mut().set_kind(id, kind);
+                Ok(())
+            },
+        );
+        engine.register_fn(
+            "kind",
+            |n: &mut NetHandle, id: rhai::INT| -> Result<String, Box<rhai::EvalAltResult>> {
+                let id = nid(id, n.borrow().neurons.len())?;
+                Ok(match n.borrow().neuron(id).kind {
+                    net_format::NeuronKind::Excitatory => "exc",
+                    net_format::NeuronKind::Inhibitory => "inh",
+                    net_format::NeuronKind::Regular => "regular",
+                }
+                .to_string())
+            },
+        );
+    }
+    {
+        let (s, v) = (sim.clone(), net_version.clone());
+        engine.register_fn(
             "delete_neuron",
             move |n: &mut NetHandle, id: rhai::INT| -> Result<(), Box<rhai::EvalAltResult>> {
                 let id = nid(id, n.borrow().neurons.len())?;

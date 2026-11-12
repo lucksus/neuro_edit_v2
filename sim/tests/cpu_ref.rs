@@ -316,3 +316,94 @@ fn reset_clears_state() {
     assert!(sim.ring.iter().all(|&x| x == 0.0));
     assert!(sim.s.iter().all(|&x| x == 0.0));
 }
+
+/// M1: a synapse from an inhibitory neuron inhibits — the CSR carries
+/// -|w| from the source's kind, so the target fires LESS with the
+/// synapse than without it (before the fix the kind was colour only).
+#[test]
+fn inhibitory_source_suppresses_target() {
+    fn pair(inh: bool, synapse: bool) -> (Network, u32, u32) {
+        let mut net = Network::new();
+        let src = net.add_neuron(
+            [0.0; 3],
+            if inh {
+                NeuronKind::Inhibitory
+            } else {
+                NeuronKind::Excitatory
+            },
+        );
+        let tgt = net.add_neuron([60.0, 0.0, 0.0], NeuronKind::Excitatory);
+        if synapse {
+            net.connect(src, tgt, 6.0);
+        }
+        (net, src, tgt)
+    }
+    let run = |net: &Network| -> u32 {
+        let mut sim = CpuSim::new(
+            net,
+            SimConfig {
+                record_spikes: true,
+                ..Default::default()
+            },
+        );
+        // source fires hard, target driven into a steady rhythm on its own
+        sim.set_external(0, 30.0);
+        sim.set_external(1, 12.0);
+        sim.run_ms(400.0).unwrap();
+        sim.spike_counts(usize::MAX).unwrap()[1]
+    };
+
+    let (free_net, _, _) = pair(true, false);
+    let (inh_net, _, _) = pair(true, true);
+    let (exc_net, _, _) = pair(false, true);
+    let free = run(&free_net);
+    let inh = run(&inh_net);
+    let exc = run(&exc_net);
+    assert!(free > 0, "driven target must fire");
+    assert!(
+        inh < free,
+        "inhibitory synapse must reduce firing: {inh} !< {free}"
+    );
+    assert!(
+        exc > inh,
+        "same-weight excitatory synapse must not inhibit: {exc} !> {inh}"
+    );
+    // and the CSR itself carries the signed weight
+    let (net, _, _) = pair(true, true);
+    let csr = net.synapse_csr(0.1);
+    assert!(csr.w.iter().all(|&w| w < 0.0), "inh src must emit -|w|");
+    let (net, _, _) = pair(false, true);
+    assert!(net.synapse_csr(0.1).w.iter().all(|&w| w > 0.0));
+}
+
+/// M1: set_kind flips the sign at the next build and swaps in
+/// fast-spiking defaults while the model is stock — a user-tuned model
+/// is left alone.
+#[test]
+fn set_kind_reweights_and_defaults() {
+    let mut net = Network::new();
+    let a = net.add_neuron([0.0; 3], NeuronKind::Excitatory);
+    let b = net.add_neuron([10.0, 0.0, 0.0], NeuronKind::Excitatory);
+    net.connect(a, b, 6.0);
+    assert!(net.synapse_csr(0.1).w[0] > 0.0);
+
+    net.set_kind(a, NeuronKind::Inhibitory);
+    assert!(net.synapse_csr(0.1).w[0] < 0.0, "kind flip must re-sign");
+    assert_eq!(
+        net.neuron(a).model.params(),
+        [0.1, 0.2, -65.0, 2.0],
+        "stock RS model swaps to FS defaults"
+    );
+
+    // user-set params survive the flip back and forth
+    net.neuron_mut(a).model = net_format::NeuronModel::Izhikevich {
+        a: 0.03,
+        b: 0.25,
+        c: -60.0,
+        d: 4.0,
+    };
+    net.set_kind(a, NeuronKind::Excitatory);
+    assert_eq!(net.neuron(a).model.params()[0], 0.03, "explicit model kept");
+    net.set_kind(a, NeuronKind::Inhibitory);
+    assert_eq!(net.neuron(a).model.params()[0], 0.03);
+}

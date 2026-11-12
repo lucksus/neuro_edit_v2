@@ -270,7 +270,9 @@ pub fn set_exc_inh(net: &mut Network, group: &str, inh_fraction: f64, rng: &mut 
         } else {
             NeuronKind::Excitatory
         };
-        net.neuron_mut(m).kind = kind;
+        // set_kind, not .kind: swaps in fast-spiking defaults while the
+        // model is untouched (Dale's law does the weights at CSR build).
+        net.set_kind(m, kind);
     }
 }
 
@@ -282,10 +284,13 @@ pub fn set_exc_inh_exact(net: &mut Network, group: &str, n_inhibitory: usize, rn
     };
     rng.shuffle(&mut members);
     for (i, &m) in members.iter().enumerate() {
-        net.neuron_mut(m).kind = if i < n_inhibitory {
-            NeuronKind::Inhibitory
-        } else {
-            NeuronKind::Excitatory
-        };
+        net.set_kind(
+            m,
+            if i < n_inhibitory {
+                NeuronKind::Inhibitory
+            } else {
+                NeuronKind::Excitatory
+            },
+        );
     }
 }

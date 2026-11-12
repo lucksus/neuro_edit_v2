@@ -12,7 +12,9 @@ pub fn bench_net(n: usize, k: usize, seed: u64, w_scale: f32, w_inh: f32, dt: f3
     let mut net = Network::new();
     net.meta.conduction_speed = 1000.0; // we'll set delays directly instead
     for i in 0..n {
-        let id = net.add_neuron(
+        // add_neuron applies the kind default — inhibitory comes out
+        // fast-spiking (a=0.1,b=0.2,c=-65,d=2) as the bench wants.
+        net.add_neuron(
             [
                 rng.uniform(-500.0, 500.0) as f32,
                 rng.uniform(-500.0, 500.0) as f32,
@@ -24,21 +26,13 @@ pub fn bench_net(n: usize, k: usize, seed: u64, w_scale: f32, w_inh: f32, dt: f3
                 NeuronKind::Inhibitory
             },
         );
-        if i >= n * 4 / 5 {
-            // fast-spiking inhibitory, as in the bench
-            net.neuron_mut(id).model = net_format::NeuronModel::Izhikevich {
-                a: 0.1,
-                b: 0.2,
-                c: -65.0,
-                d: 2.0,
-            };
-        }
     }
     let _ = dt;
     for src in 0..n as u32 {
         let exc = (src as usize) < n * 4 / 5;
-        // synaptic weight is a current amplitude (original scale ~6/-5)
-        let w = if exc { 6.0 * w_scale } else { -w_inh };
+        // weight is a magnitude now — Dale's law signs it from the
+        // source kind when the CSR is built (used to be negated by hand)
+        let w = if exc { 6.0 * w_scale } else { w_inh };
         for _ in 0..k {
             let tgt = rng.below(n) as u32;
             let delay_ms = if exc {

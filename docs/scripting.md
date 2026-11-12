@@ -83,6 +83,10 @@ drops the metadata and the group draws as cubes again.
 
 ```rhai
 net.set_izh(id, a, b, c, d);            // Izhikevich parameters
+net.kind(id)                            // -> "exc" | "inh" | "regular"
+net.set_kind(id, "exc"|"inh");          // Dale's law: re-signs its synapses;
+                                        // swaps in fast-spiking defaults while
+                                        // the model is stock
 net.set_pos(id, x, y, z);               // move + recompute axonal delays
 net.pos(id)                             // -> [x,y,z]
 net.neuron_name(id)                     // -> name

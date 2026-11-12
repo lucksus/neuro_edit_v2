@@ -12,11 +12,29 @@ pub enum NeuronModel {
 impl Default for NeuronModel {
     /// Regular-spiking defaults, as in the original Neuron constructor.
     fn default() -> Self {
+        Self::regular_spiking()
+    }
+}
+
+impl NeuronModel {
+    /// Regular-spiking defaults (cortical RS cell).
+    pub fn regular_spiking() -> Self {
         NeuronModel::Izhikevich {
             a: 0.02,
             b: 0.2,
             c: -65.0,
             d: 8.0,
+        }
+    }
+    /// Fast-spiking defaults — the standard inhibitory interneuron
+    /// parameters; applied by `Network::set_kind` when a neuron's model
+    /// still holds untouched defaults (see that function).
+    pub fn fast_spiking() -> Self {
+        NeuronModel::Izhikevich {
+            a: 0.1,
+            b: 0.2,
+            c: -65.0,
+            d: 2.0,
         }
     }
 }
@@ -317,7 +335,36 @@ impl Network {
             model: NeuronModel::default(),
             kind,
         });
+        self.apply_kind_default(id);
         id
+    }
+
+    /// Model defaults follow the kind while the parameters are untouched:
+    /// setting `Inhibitory` on a neuron whose model is still the stock
+    /// regular-spiking default swaps in fast-spiking defaults, and going
+    /// back to `Excitatory` on a stock fast-spiking model restores
+    /// regular-spiking. A model the user changed is never overwritten —
+    /// "explicitly set" means "differs from either kind's stock params".
+    fn apply_kind_default(&mut self, id: u32) {
+        let n = &mut self.neurons[id as usize];
+        n.model = match n.kind {
+            NeuronKind::Inhibitory if n.model == NeuronModel::regular_spiking() => {
+                NeuronModel::fast_spiking()
+            }
+            NeuronKind::Excitatory | NeuronKind::Regular
+                if n.model == NeuronModel::fast_spiking() =>
+            {
+                NeuronModel::regular_spiking()
+            }
+            _ => n.model.clone(),
+        };
+    }
+
+    /// Set a neuron's kind (Dale's-law label), applying kind-appropriate
+    /// model defaults while the model is a stock default.
+    pub fn set_kind(&mut self, id: u32, kind: NeuronKind) {
+        self.neurons[id as usize].kind = kind;
+        self.apply_kind_default(id);
     }
 
     pub fn neuron(&self, id: u32) -> &Neuron {
@@ -390,7 +437,11 @@ impl Network {
         for &i in &order {
             let s = &self.synapses[i];
             csr.tgt.push(s.tgt);
-            csr.w.push(s.w);
+            // Dale's law: the source's kind sets the sign — the stored
+            // weight is a magnitude. Both backends then inhibit without
+            // any further code.
+            let inh = self.neurons[s.src as usize].kind == NeuronKind::Inhibitory;
+            csr.w.push(if inh { -s.w.abs() } else { s.w.abs() });
             csr.tau_ms.push(s.tau_ms);
             let steps = (s.delay_ms / dt_ms).round().max(1.0);
             csr.delay_steps.push(steps.min(u16::MAX as f32) as u16);
