@@ -14,12 +14,17 @@ use net_format::Network;
 use proto::{ClientMsg, ServerEvent, ServerMsg};
 use sim::serve::{Emit, ServeOpts};
 
+pub mod accounts;
 pub mod jobs;
+pub mod multi;
+mod pages;
+pub mod runs;
 use jobs::{Bcast, JobCtx, JobRegistry};
 
 /// One connected client's outbound channel (encoded WS frames).
 type ClientTx = mpsc::Sender<Vec<u8>>;
-type Clients = Arc<Mutex<HashMap<u64, ClientTx>>>;
+/// Live client sinks, keyed by connection id (per-run in multi mode).
+pub type Clients = Arc<Mutex<HashMap<u64, ClientTx>>>;
 
 pub struct Server {
     cmd_tx: mpsc::Sender<(u64, ClientMsg)>,
@@ -414,6 +419,20 @@ fn handle_client(
             tungstenite::WebSocket::from_raw_socket(s, tungstenite::protocol::Role::Server, None)
         }
     };
+    ws_client_loop(ws, id, cmd_tx, clients, jobs)
+}
+
+/// The post-upgrade client loop, shared by the single-run acceptor
+/// (`handle_client`) and multi-user mode's per-user runs: outbound
+/// mpsc queue → writer thread; inbound bincode → the run's cmd channel
+/// (job messages stay with the registry).
+pub fn ws_client_loop(
+    ws: tungstenite::WebSocket<std::net::TcpStream>,
+    id: u64,
+    cmd_tx: mpsc::Sender<(u64, ClientMsg)>,
+    clients: Clients,
+    jobs: Arc<JobRegistry>,
+) -> anyhow::Result<()> {
     // One socket → reader + writer halves via two WebSockets on dup'd fds.
     let mut w_read = ws;
     let write_stream = w_read.get_ref().try_clone()?;

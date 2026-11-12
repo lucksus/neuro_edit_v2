@@ -4,23 +4,36 @@
 //!
 //!   server [--bind 127.0.0.1:9337] [--data-dir DIR] [--net file.ne2]
 //!          [--cpu|--cuda] [--seed N] [--script x.rhai]
+//!   server --accounts STATE-DIR --data-dir ROOT --web editor/dist-web
+//!          [--public-url https://…] [--trust-proxy ip[,ip]]
+//!   server admin add|list|activate|disable --accounts STATE-DIR …
+//!
+//! Without `--accounts`: one shared run, loopback only, no auth — the
+//! mode every test and local user has always had. With it: per-user
+//! runs + the HTTP front door (landing, signup, back office, /app).
 
+use std::io::Read;
+use std::net::ToSocketAddrs;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use sim::BackendKind;
 
 #[derive(Parser)]
-#[command(name = "server", about = "neuro_edit sim server (WebSocket)")]
+#[command(
+    name = "server",
+    about = "neuro_edit sim server (WebSocket + multi-user HTTP)"
+)]
 struct Cli {
-    /// Address to bind. localhost only by default — pass e.g.
-    /// `0.0.0.0:9337` to expose the sim to the LAN (no auth!).
+    /// Address to bind. Loopback only unless --accounts is given —
+    /// multi-user production binds a LAN address behind nginx.
     #[arg(long, default_value = "127.0.0.1:9337")]
     bind: String,
     /// Confine every file path scripts/clients touch to this directory
-    /// (.. and absolute paths are refused). REQUIRED for remote serving.
+    /// (.. and absolute paths are refused). REQUIRED for remote serving;
+    /// with --accounts, user files live under DIR/users/<id>/.
     #[arg(long)]
     data_dir: Option<std::path::PathBuf>,
     /// Network file to start with (path resolved in --data-dir when set).
@@ -38,30 +51,113 @@ struct Cli {
     /// Fixed-point synaptic ring (CUDA): bitwise reproducible runs.
     #[arg(long)]
     int_weights: bool,
-    /// Also serve the browser editor (index.html + wasm bundle) from
-    /// this directory on the same port (`server --web editor/dist-web`).
+    /// Serve the browser editor (index.html + wasm bundle) from this
+    /// directory (`server --web editor/dist-web`); required with
+    /// --accounts (it becomes /app).
     #[arg(long)]
     web: Option<std::path::PathBuf>,
-    /// Cap on `UploadDataset` signal bytes (MiB). Guards the shared
-    /// data_dir against huge pushes.
+    /// Cap on `UploadDataset`/chunked-upload bytes per file (MiB).
     #[arg(long, default_value_t = 64)]
     max_upload_mb: usize,
+    /// Multi-user mode: accounts.db + user sessions live in STATE-DIR.
+    /// Requires --data-dir (per-user roots) and --web (/app).
+    #[arg(long)]
+    accounts: Option<std::path::PathBuf>,
+    /// The outward origin (https://neuroedit.ad4m.dev): sets the session
+    /// cookie's Secure flag and the Origin POSTs must carry.
+    #[arg(long)]
+    public_url: Option<String>,
+    /// Comma-separated proxy IPs whose X-Forwarded-For/Proto headers
+    /// are trusted; spoofed headers from anyone else are ignored.
+    #[arg(long, value_delimiter = ',')]
+    trust_proxy: Vec<std::net::IpAddr>,
+    /// Stop a user's run after this many client-less, job-less minutes.
+    #[arg(long, default_value_t = 15)]
+    idle_minutes: u64,
+    /// Cap on simultaneously live per-user runs.
+    #[arg(long, default_value_t = 4)]
+    max_runs: usize,
+    /// Default per-user storage quota (MiB).
+    #[arg(long, default_value_t = 2048)]
+    default_quota_mb: u64,
+    #[command(subcommand)]
+    command: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Back-office operations on the accounts store.
+    Admin {
+        /// STATE-DIR holding accounts.db.
+        #[arg(long)]
+        accounts: std::path::PathBuf,
+        #[command(subcommand)]
+        action: AdminAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AdminAction {
+    /// Create (or re-activate) an admin account. The password is read
+    /// from stdin — never argv, so it stays out of history/ps.
+    Add {
+        #[arg(long)]
+        email: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// List all users.
+    List,
+    /// Activate a pending/disabled account.
+    Activate { email: String },
+    /// Disable an account (sessions die, its run stops).
+    Disable { email: String },
+}
+
+fn bind_is_loopback(bind: &str) -> bool {
+    match bind.to_socket_addrs() {
+        Ok(mut a) => a.all(|s| s.ip().is_loopback()),
+        Err(_) => {
+            bind.starts_with("127.") || bind.starts_with("[::1]") || bind.contains("localhost")
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if let Some(Cmd::Admin { accounts, action }) = &cli.command {
+        return admin(accounts, action);
+    }
     let backend = if cli.cpu {
         BackendKind::Cpu
     } else {
         BackendKind::Cuda
     };
 
-    // A remote-reachable server must not hand the filesystem to clients.
-    if cli.bind.starts_with("0.0.0.0") && cli.data_dir.is_none() {
-        anyhow::bail!("--bind 0.0.0.0 without --data-dir would expose arbitrary paths — refusing");
+    // A remote-reachable server must not hand the filesystem to clients:
+    // loopback only without --accounts (any non-loopback bind refused).
+    if cli.accounts.is_none() && !bind_is_loopback(&cli.bind) {
+        anyhow::bail!(
+            "--bind {} without --accounts would expose the shared run — \
+             refusing (non-loopback binds need the accounts mode)",
+            cli.bind
+        );
+    }
+    if cli.accounts.is_some() {
+        if cli.data_dir.is_none() {
+            anyhow::bail!("--accounts requires --data-dir (per-user roots live under it)");
+        }
+        match &cli.web {
+            Some(d) => server::web_dir_or_err(d)?,
+            None => anyhow::bail!("--accounts requires --web (the /app editor bundle)"),
+        }
     }
 
-    // Resolve the start net through the same sandbox rules.
+    if let Some(state_dir) = &cli.accounts {
+        return serve_multi(&cli, state_dir, backend);
+    }
+
+    // -------- shared-run mode (unchanged since Stage 4) --------
     let net = match (&cli.net, &cli.data_dir) {
         (None, _) => net_format::Network::new(),
         (Some(p), None) => net_format::io::load(p).with_context(|| format!("load {p}"))?,
@@ -125,4 +221,92 @@ fn main() -> anyhow::Result<()> {
         None => eprintln!("editor: editor --connect {}", cli.bind),
     }
     srv.accept_web(listener, cli.web)
+}
+
+/// Multi-user serve: accounts DB + HTTP front door + per-user runs.
+fn serve_multi(cli: &Cli, state_dir: &std::path::Path, backend: BackendKind) -> anyhow::Result<()> {
+    let accounts = Arc::new(server::accounts::Accounts::open(state_dir)?);
+    let multi = Arc::new(server::multi::Multi::new(
+        accounts.clone(),
+        server::multi::MultiOpts {
+            data_root: cli.data_dir.clone().unwrap(),
+            web_dir: cli.web.clone().unwrap(),
+            public_url: cli.public_url.clone(),
+            trust_proxy: cli.trust_proxy.clone(),
+            backend,
+            seed: cli.seed,
+            cfg: sim::SimConfig {
+                int_weights: cli.int_weights,
+                ..Default::default()
+            },
+            max_upload_bytes: cli.max_upload_mb.saturating_mul(1024 * 1024),
+            max_runs: cli.max_runs,
+            idle: std::time::Duration::from_secs(cli.idle_minutes * 60),
+            default_quota_bytes: cli.default_quota_mb * (1 << 20),
+        },
+    ));
+    let listener =
+        std::net::TcpListener::bind(&cli.bind).with_context(|| format!("bind {}", cli.bind))?;
+    let url = cli
+        .public_url
+        .clone()
+        .unwrap_or_else(|| format!("http://{}", cli.bind));
+    eprintln!(
+        "listening on {} — {url} (accounts {}, data {}, {} users max, idle {}m)",
+        cli.bind,
+        state_dir.display(),
+        cli.data_dir.as_ref().unwrap().display(),
+        cli.max_runs,
+        cli.idle_minutes,
+    );
+    eprintln!(
+        "first admin: server admin add --accounts {} --email X --name Y",
+        state_dir.display()
+    );
+    multi.serve(listener)
+}
+
+/// `server admin …` — same store the running server uses (SQLite is
+/// fine with a CLI alongside the server; WAL keeps readers unblocked).
+fn admin(state_dir: &std::path::Path, action: &AdminAction) -> anyhow::Result<()> {
+    let accounts = server::accounts::Accounts::open(state_dir)?;
+    match action {
+        AdminAction::Add { email, name } => {
+            eprint!("password for {email} (12+ chars): ");
+            let mut pw = String::new();
+            std::io::stdin().read_to_string(&mut pw)?;
+            let pw = pw.trim_end_matches(['\n', '\r']);
+            let u = accounts.create_admin(email, name, pw)?;
+            eprintln!("admin {} ({}) active", u.email, u.id);
+        }
+        AdminAction::List => {
+            for u in accounts.list() {
+                println!(
+                    "{}\t{}\t{}\t{}MB\t{}{}",
+                    u.id,
+                    u.email,
+                    u.status,
+                    u.quota_bytes / (1 << 20),
+                    u.name,
+                    if u.is_admin { " (admin)" } else { "" }
+                );
+            }
+        }
+        AdminAction::Activate { email } => {
+            let u = accounts
+                .by_email(email)
+                .with_context(|| format!("no user {email}"))?;
+            accounts.set_status(u.id, "active")?;
+            eprintln!("{email} active");
+        }
+        AdminAction::Disable { email } => {
+            let u = accounts
+                .by_email(email)
+                .with_context(|| format!("no user {email}"))?;
+            accounts.set_status(u.id, "disabled")?;
+            accounts.delete_user_sessions(u.id);
+            eprintln!("{email} disabled (sessions cleared; a running server drops the run)");
+        }
+    }
+    Ok(())
 }
