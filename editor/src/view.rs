@@ -217,18 +217,22 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
                 || (resp.drag_started_by(egui::PointerButton::Primary) && app.mode == Mode::Move)
             {
                 if let Some(mv) = mouse_vp {
-                    app.pick_click = Some(mv);
+                    app.pick_click = Some((mv, app.wall_ms));
                 }
             }
-            if let Some(mv) = app.pick_click {
-                let px = (mv.x * w_px as f32).min(w_px as f32 - 1.0) as u32;
-                let py = (mv.y * h_px as f32).min(h_px as f32 - 1.0) as u32;
-                let mut sent = false;
-                with_gpu(rs, |gpu| {
-                    sent = gpu.request_pick(px, py, w_px, h_px, false);
-                });
-                if sent {
+            if let Some((mv, queued_ms)) = app.pick_click {
+                if app.wall_ms - queued_ms > 800.0 {
                     app.pick_click = None;
+                } else {
+                    let px = (mv.x * w_px as f32).min(w_px as f32 - 1.0) as u32;
+                    let py = (mv.y * h_px as f32).min(h_px as f32 - 1.0) as u32;
+                    let mut sent = false;
+                    with_gpu(rs, |gpu| {
+                        sent = gpu.request_pick(px, py, w_px, h_px, false);
+                    });
+                    if sent {
+                        app.pick_click = None;
+                    }
                 }
             } else if resp.hovered() && !resp.dragged() {
                 if let Some(mv) = mouse_vp {

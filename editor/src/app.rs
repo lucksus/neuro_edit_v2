@@ -47,9 +47,12 @@ pub struct EditorApp {
     pub last_pick: Option<u32>,
     /// Instance under the cursor (hover pick, one frame behind).
     pub hover: Option<u32>,
-    /// Click waiting for a free pick slot (uv in the viewport). Clicks queue
-    /// here so an in-flight hover pick can't drop them.
-    pub pick_click: Option<glam::Vec2>,
+    /// Click waiting for a free pick slot (uv in the viewport) + queue
+    /// time (`wall_ms`). Clicks queue so an in-flight hover pick can't
+    /// drop them; a click still queued after ~800ms is stale — the user
+    /// has moved on — so view.rs drops it instead of applying a hit/miss
+    /// to newer state (e.g. an example auto-watch applied meanwhile).
+    pub pick_click: Option<(glam::Vec2, f64)>,
     /// Per-instance cube half sizes (copied from `Scene` on geo change) —
     /// the selection brackets size to the projected object box.
     pub inst_half: Vec<f32>,
@@ -139,6 +142,16 @@ pub struct EditorApp {
     watch_sent: Vec<u32>,
     /// Neuron ids an example asked to watch on Run (see examples.rs).
     example_watch: Option<&'static [u32]>,
+    /// `geo_version` when the example's Run was sent — the watch applies
+    /// only to geometry newer than that (the pre-run net may already
+    /// contain the ids; watching them early just gets wiped by the
+    /// eval's net.clear → reset).
+    example_base_ver: Option<u64>,
+    /// `wall_ms` deadline for the post-Run Geo — a script that never
+    /// builds a covering net must not fire the watch on a later,
+    /// unrelated net change.
+    example_deadline_ms: f64,
+    example_quiet: u8,
     pub status: String,
     /// Mode as of last frame — a change clears `status` (stale
     /// mode-scoped messages like "connect: missed" shouldn't stick).
@@ -577,6 +590,9 @@ impl EditorApp {
             saved_version: 0,
             watch_sent: Vec::new(),
             example_watch: None,
+            example_base_ver: None,
+            example_deadline_ms: f64::MAX,
+            example_quiet: 0,
             status: String::new(),
             last_mode: Mode::Navigate,
             clipboard: None,
@@ -699,22 +715,25 @@ impl EditorApp {
         self.script_name = ex.file.trim_end_matches(".rhai").to_string();
         self.script_text = ex.src.to_string();
         self.example_watch = Some(ex.watch);
+        self.example_base_ver = None;
+        self.example_deadline_ms = f64::MAX;
+        self.example_quiet = 0;
         self.show_script = true;
         self.status = format!("example {:?} loaded — press Run", ex.name);
     }
 
     /// Run the console script (button + Ctrl+Enter share this). A loaded
-    /// example may ask to auto-watch its neurons once it has run.
+    /// example's `watch` list stays pending until the post-Eval Geo
+    /// covers the ids — sync_shared applies it via the selection.
     fn run_script(&mut self) {
         let code = self.script_text.clone();
         self.send(ClientMsg::Eval { code });
-        if let Some(ids) = self.example_watch.take() {
-            if !ids.is_empty() {
-                self.watch_sent = ids.to_vec();
-                self.send(ClientMsg::Watch(ids.to_vec()));
-                self.show_plots = true;
-                self.plot_tab = PlotTab::Voltage;
-            }
+        // Auto-watch arms on Run: only a Geo newer than this version is
+        // the eval's result — the pre-run net may already cover the ids.
+        if self.example_watch.is_some() {
+            self.example_base_ver = Some(self.geo_version);
+            self.example_deadline_ms = self.wall_ms + 45_000.0;
+            self.example_quiet = 0;
         }
     }
 
@@ -935,7 +954,8 @@ impl EditorApp {
         self.noise_hz = cfg.noise_rate_hz;
         self.noise_kick = cfg.noise_kick_mv;
         self.backend = backend;
-        if net_gen != self.last_net_gen {
+        let gen_bumped = net_gen != self.last_net_gen;
+        if gen_bumped {
             self.last_net_gen = net_gen;
             self.reset_net_state();
         }
@@ -960,6 +980,50 @@ impl EditorApp {
                 }
                 self.frame_pending = false;
                 self.geo = Some(g);
+            }
+        }
+        // A loaded example asked to auto-watch its neurons — apply it
+        // once the new Geo covers the ids. The gen bump from a script's
+        // net.clear may land a frame AFTER the covering Geo and clear the
+        // selection again — keep re-applying until update_watch has sent
+        // the watch (watch_sent matches), then stop.
+        if let Some(ids) = self.example_watch {
+            if ids.is_empty() || self.wall_ms > self.example_deadline_ms {
+                self.example_watch = None;
+            } else {
+                // Only a Geo newer than the Run click counts — the pre-run
+                // net can already cover the ids, and watching it just gets
+                // wiped by the eval's net.clear → reset_net_state.
+                let covered = example_geo_covers(self.example_base_ver, self.geo.as_deref(), ids);
+                if covered {
+                    // Rebuild the HashSet only when it differs — a fresh set
+                    // gets a new random iteration order and update_watch would
+                    // resend the same Watch list every frame.
+                    if self.selection.len() != ids.len()
+                        || ids.iter().any(|n| !self.selection.contains(n))
+                    {
+                        self.selection = ids.iter().copied().collect();
+                    }
+                    self.show_plots = true;
+                    self.plot_tab = PlotTab::Voltage;
+                }
+                // Retire only after the watch has stayed applied across a
+                // quiet stretch — a net-gen bump inside the eval (net.clear)
+                // may land one frame before its Geo and clear the selection
+                // again; this re-applies on the next frame.
+                if covered
+                    && self.watch_sent.len() == ids.len()
+                    && ids.iter().all(|n| self.watch_sent.contains(n))
+                    && !gen_bumped
+                {
+                    self.example_quiet += 1;
+                    if self.example_quiet > 30 {
+                        self.example_watch = None;
+                        self.example_quiet = 0;
+                    }
+                } else {
+                    self.example_quiet = 0;
+                }
             }
         }
         if snap.seq != self.last_snap_seq {
@@ -2524,6 +2588,7 @@ impl EditorApp {
         let mut open = self.show_script;
         egui::Window::new("Script editor")
             .open(&mut open)
+            .default_pos([12.0, 56.0])
             .default_size([480.0, 360.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -3529,5 +3594,43 @@ fn dir_of(p: &str) -> String {
         Some(("", _)) => "/".into(),
         Some((d, _)) => d.to_string(),
         None => ".".into(),
+    }
+}
+
+/// Example auto-watch gate (Stage 13 H): the Geo that may apply the
+/// example's `watch` list must be newer than the version captured when
+/// Run was sent (`base`) and contain every requested neuron id. The
+/// pre-run net can already cover the ids — watching it just gets wiped
+/// by the eval's `net.clear` → reset_net_state.
+fn example_geo_covers(base: Option<u64>, geo: Option<&GeoSnap>, ids: &[u32]) -> bool {
+    match (base, geo) {
+        (Some(base), Some(g)) => {
+            g.version != base && ids.iter().all(|&n| (n as usize) < g.pos.len())
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn example_watch_needs_post_run_geo() {
+        let mut g = GeoSnap::default();
+        g.version = 7;
+        g.pos = vec![[0.0; 3]; 5];
+        let ids = [0u32, 1, 2, 3, 4];
+        // Not armed yet (loaded but never run) — pre-run geo must not apply.
+        assert!(!example_geo_covers(None, Some(&g), &ids));
+        // Same version as at Run — the eval hasn't landed yet.
+        assert!(!example_geo_covers(Some(7), Some(&g), &ids));
+        g.version = 8;
+        assert!(example_geo_covers(Some(7), Some(&g), &ids));
+        // Post-run geo that doesn't cover the ids — e.g. cleared but
+        // not yet rebuilt — must not apply either.
+        g.pos.truncate(3);
+        assert!(!example_geo_covers(Some(7), Some(&g), &ids));
+        assert!(!example_geo_covers(Some(7), None, &ids));
     }
 }
