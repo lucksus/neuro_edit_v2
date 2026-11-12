@@ -210,6 +210,9 @@ impl Env {
         scope.push("net", self.net.clone());
         scope.push("sim", self.sim.clone());
         scope.push("rng", self.rng.clone());
+        // Bare `help` (no parens) evaluates as a variable — bind it to
+        // the overview so it prints instead of erroring.
+        scope.push("help", help_text(""));
         scope
     }
 
@@ -293,6 +296,96 @@ fn group_or_err(n: &NetHandle, g: &str) -> Result<(), Box<rhai::EvalAltResult>> 
 /// Script error shorthand.
 fn s_err(s: impl Into<String>) -> Box<rhai::EvalAltResult> {
     s.into().into()
+}
+
+/// `help`/`help()`/`help("topic")` — topic slices of the script API,
+/// the flat overview on `""`. Kept as a free fn so tests can call it
+/// without an engine.
+fn help_text(topic: &str) -> String {
+    const TOPICS: &[(&str, &str)] = &[
+        (
+            "net",
+            "net: add_neuron(x,y,z)  connect(a,b,w)  clear()  neuron_count()  synapse_count()\n  \
+             neuron(name)  group_names()  neurons_of(g)  save(path)  load(path)",
+        ),
+        (
+            "grid",
+            "grid: create_2d_grid(g,w,h,d)  create_3d_grid(g,w,h,d,sp)\n  \
+             create_connections(g,scaling,lambda,w)  set_exc_inh(g,frac)",
+        ),
+        (
+            "syn",
+            "syn: set_synapse_weights(g,mean,sd)  set_syn_tau(g1,g2,tau)\n  \
+             set_syn_tau_dist(g1,g2,mean,sd)  set_syn_tau_one(src,tgt,tau)  syn_tau(src,tgt)",
+        ),
+        (
+            "input",
+            "input: add_input(name,[[n,w],..])  input_count()\n  \
+             sim.set_input(name,x)  sim.play_input(name,arr)  sim.set_external(id,amps)",
+        ),
+        (
+            "sim",
+            "sim: run(ms)  run_steps(n)  time()  reset()  rate()  spikes()\n  \
+             trace()  trace_of(ids)  v(id)  set_noise(hz,kick)\n  \
+             rebuild()  set_dt(dt)  set_int_weights(on)",
+        ),
+        (
+            "readout",
+            "readout: add_readout(name,units)  set_readout_weights(name,w)  readout_weights(name)\n  \
+             delta_new(n)  r.learn(trace,target,rate)  r.output(trace)\n  \
+             fit_ridge(x_flat,T,F,y,lambda)  ridge_output(w,x)  accuracy(s,y)  auc(s,y)",
+        ),
+        (
+            "io",
+            "io: net.save(path)  net.load(path)  samples_write(n,t,v)\n  \
+             samples_save(n,p)  samples_load(n,p)  script_add(n,code)  script_remove(n)",
+        ),
+        (
+            "streams",
+            "streams: rng_stream(seed,n_src,p) .window(steps,label,pairs,strength)",
+        ),
+        ("misc", "misc: rand(a,b)  gauss(m,sd)  seed(s)  print(x)"),
+        (
+            "examples",
+            "examples: first_spikes.rhai  grid_wave.rhai  lsm_readout.rhai —\n  \
+             runnable from the console's examples picker",
+        ),
+    ];
+    let t = topic.trim().to_lowercase();
+    let aliases: &[&str] = match t.as_str() {
+        "synapse" | "synapses" => &["syn"],
+        "inputs" | "stim" | "stimulus" => &["input"],
+        "readouts" | "train" | "training" => &["readout"],
+        "file" | "files" | "save" | "load" | "samples" | "scripts" => &["io"],
+        "stream" | "noise" | "rng" => &["streams"],
+        "example" | "demo" | "demos" => &["examples"],
+        "network" | "neuron" | "neurons" => &["net"],
+        "grids" | "2d" | "3d" => &["grid"],
+        "simulate" | "run" | "v" | "u" => &["sim"],
+        _ => &[t.as_str()],
+    };
+    for want in aliases {
+        for (name, sec) in TOPICS {
+            if name == want {
+                return (*sec).to_string();
+            }
+        }
+    }
+    if t.is_empty() || t == "all" {
+        let mut s = format!(
+            "API — help(\"topic\"): {}\n",
+            TOPICS.iter().map(|t| t.0).collect::<Vec<_>>().join(" ")
+        );
+        for (_, sec) in TOPICS {
+            s.push_str(sec);
+            s.push('\n');
+        }
+        return s;
+    }
+    format!(
+        "unknown topic '{topic}' — try help() for the overview or a topic: {}",
+        TOPICS.iter().map(|t| t.0).collect::<Vec<_>>().join(" ")
+    )
 }
 
 /// Bounds-check a script-supplied neuron index → u32 or a script error.
@@ -495,11 +588,10 @@ pub fn register_api(
         .register_type_with_name::<DeltaReadout>("DeltaReadout")
         .register_type_with_name::<crate::dataset::Dataset>("Dataset");
 
-    // ---- help ----
-    engine.register_fn("help", || -> String {
-        "API:\n  net.add_neuron(x,y,z)  net.connect(a,b,w)  net.clear()\n  net.create_2d_grid(g,w,h,d)  net.create_3d_grid(g,w,h,d,sp)\n  net.create_connections(g,scaling,lambda,w)  net.set_synapse_weights(g,mean,sd)\n  net.set_syn_tau(g1,g2,tau)  net.set_syn_tau_dist(g1,g2,mean,sd)\n  net.set_syn_tau_one(src,tgt,tau)  net.syn_tau(src,tgt)\n  net.set_exc_inh(g,frac)  net.neurons_of(g)  net.add_input(name,[[n,w],..])\n  net.neuron_count()  net.synapse_count()  net.save(path)  net.load(path)\n  sim.run(ms)  sim.run_steps(n)  sim.time()  sim.reset()  sim.rate()  sim.spikes()\n  sim.trace()  sim.trace_of(ids)  sim.v(id)  sim.set_input(name,x)\n  sim.play_input(name,arr)  sim.set_external(id,amps)  sim.set_noise(hz,kick)\n  sim.rebuild()  sim.set_dt(dt)  sim.set_int_weights(on)\n  net.add_readout(name,units)  net.set_readout_weights(name,w)  net.readout_weights(name)\n  net.samples_write(n,t,v)  net.samples_save(n,p)  net.samples_load(n,p)\n  net.script_add(n,code)  net.script_remove(n)\n  readouts: delta_new(n) r.learn(trace,target,rate) r.output(trace)\n  fit_ridge(x_flat,T,F,y,lambda)  ridge_output(w,x)  accuracy(s,y)  auc(s,y)\n  streams: rng_stream(seed,n_src,p) .window(steps,label,pairs,strength)\n  misc: rand(a,b)  gauss(m,sd)  seed(s)  print(x)"
-            .to_string()
-    });
+    // ---- help: `help`, `help()` and `help("topic")` all work ----
+    engine.register_fn("help", || help_text(""));
+    engine.register_fn("help", |topic: &str| help_text(topic));
+    engine.register_fn("help", |topic: rhai::INT| help_text(&topic.to_string()));
 
     // ---- net methods ----
     {
