@@ -226,3 +226,45 @@ script editor (scripts saved into .ne2), new/load/save/recent/quit,
 headless screenshots, live worker sim, Rhai syntax highlighting in the
 script editor + console (`editor/src/syntax.rs`). Still open: XML I/O,
 per-synapse τ, node-level axon/dendrite objects (`[-]` by design).
+
+## Run 2 — GUI sweep continued + docs (this session)
+
+Fixes on top of the earlier Xvfb findings:
+- Right-drag orbit no longer draws a selection box (drag events are gated
+  to the primary button: `drag_started_by/_stopped_by/dragged_by`).
+- Cube faces fixed: the `CUBE` vertex table had the +y/-y faces wound
+  inward (culled from outside — the "L shapes" / "no top face" report),
+  +z missing entirely, +x duplicated; `CUBE_N` had -x/+z normals swapped.
+- Pick targets fattened in the pick pass (`misc.w` flag → vs_neuron scales
+  cubes up) so dense scenes are clickable.
+- Connect mode: a missed click no longer drops the pending source
+  (status "missed — click a target neuron"); Esc still cancels.
+- Box select supports Shift-additive (matches click-select).
+- Rhai float params accept int literals everywhere (Dynamic + d_f64);
+  dialogs emit `{:?}` so `120.0` doesn't degrade to `120`.
+- `net.connect` (script) now invalidates the built sim like every other
+  mutating call.
+- Original NeuroEdit toolbar artwork reused (add_neuron/connect/play/
+  pause/load/save icons + About splash).
+
+Systematic Xvfb sweep verified (real input events): all menus, every
+dialog (2D/3D grid, input, samples, readout, connections, weights,
+exc/inh, add-to-group, save-as, load, about), all context menus incl.
+connect-from-here and frame-network, copy/cut/paste (liquid 519→509→519),
+script editor (highlighting, Run, Save/Open round trip, Save-to-net),
+console eval/history/Clear, backend combo cuda↔cpu, dt/noise fields,
+speed slider 20×, plane selectors, synapses/grid/script checkboxes, WASD
+pan, dbl-click focus, Shift-add select, Recent files.
+
+Docs added: `docs/features.md` (full feature inventory + architecture),
+`docs/scripting.md` (complete Rhai API reference), `docs/tutorial.md`
+(LSM walkthrough), README screenshot (`docs/screenshots/editor_lsm.png`,
+tracked via targeted .gitignore exception; `liquid_97k.png` now tracked
+too).
+
+Still open: per-synapse τ (needs per-synapse trace state in both kernels —
+real physics change, deliberately not bolted on), XML I/O `[-]`,
+node-level axon/dendrite objects `[-]` by design, MLP/MNIST/PHOTOSS `[-]`.
+
+Checks: cargo fmt clean; cargo test --workspace 13/13 binaries pass with
+and without `sim/cuda`.
