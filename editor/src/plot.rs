@@ -171,7 +171,7 @@ impl Default for PlotWindow {
         Self {
             len_ms: 200.0,
             follow: true,
-            auto_y: false,
+            auto_y: true,
         }
     }
 }

@@ -80,6 +80,9 @@ pub struct EditorApp {
     pub inst_half: Vec<f32>,
     pub show_grid: bool,
     pub show_synapses: bool,
+    /// U8: Alt held during insert places an inhibitory neuron —
+    /// otherwise new neurons are always excitatory.
+    pub insert_inh: bool,
     /// U7: gold input→target links, toggled independently of synapses.
     pub show_input_links: bool,
     /// Spike dots travelling display synapses (View toggle).
@@ -148,8 +151,9 @@ pub struct EditorApp {
     job_detail: Option<crate::snap::JobDetailSnap>,
     /// Job selected in the jobs tab (id; 0 = none yet).
     job_sel: u64,
-    /// `ListJobs` poll timestamp (egui time, seconds) while the tab is open.
-    last_jobs_poll: f64,
+    /// U8: the Jobs tab fetched the list since it was opened —
+    /// pushes update it live, no 2 s poll.
+    jobs_fetched: bool,
     /// Recently opened/saved .ne2 paths (persisted across runs).
     pub recent: VecDeque<String>,
 
@@ -326,6 +330,9 @@ pub struct FilesUi {
     pub sel: Option<String>,
     pub mkdir: String,
     pub rename_to: String,
+    /// U8: the "rename…" button opens the rename row (it used to be
+    /// a no-op that only relied on rename_to being seeded).
+    pub rename_open: bool,
     pub confirm_delete: Option<String>,
     /// Uploads in flight: (rel-path, bytes, offset). One at a time —
     /// `UploadStart` waits on `UploadReady` before chunks go out.
@@ -626,9 +633,10 @@ impl EditorApp {
             job_progress: std::collections::BTreeMap::new(),
             job_detail: None,
             job_sel: 0,
-            last_jobs_poll: -10.0,
+            jobs_fetched: false,
             show_grid: true,
             show_synapses: true,
+            insert_inh: false,
             show_input_links: true,
             show_dots: true,
             wall_ms: 0.0,
@@ -800,17 +808,19 @@ impl EditorApp {
         }
     }
 
-    /// Selection → watched neurons for v plots (first 8 selected neurons).
+    /// Selection → watched neurons for v plots (8 lowest selected ids —
+    /// a HashSet's iteration order is effectively random, U8).
     fn update_watch(&mut self) {
-        let ids: Vec<u32> = self
+        let mut ids: Vec<u32> = self
             .selection
             .iter()
             .filter_map(|&i| match self.entity(i) {
                 Some(Entity::Neuron(n)) => Some(n),
                 _ => None,
             })
-            .take(8)
             .collect();
+        ids.sort_unstable();
+        ids.truncate(8);
         if ids != self.watch_sent {
             self.watch_sent = ids.clone();
             self.send(ClientMsg::Watch(ids));
@@ -827,9 +837,14 @@ impl EditorApp {
 
     /// Place a neuron on the work plane (insert mode).
     pub fn insert_neuron(&mut self, p: glam::Vec3) {
+        let kind = if self.insert_inh {
+            proto::NeuronKind::Inhibitory
+        } else {
+            proto::NeuronKind::Excitatory
+        };
         self.edit_net(NetEdit::AddNeuron {
             pos: [p.x, p.y, p.z],
-            kind: proto::NeuronKind::Excitatory,
+            kind,
         });
         self.status = format!("placed neuron at ({:.0},{:.0},{:.0})", p.x, p.y, p.z);
     }
@@ -840,10 +855,15 @@ impl EditorApp {
             self.status = format!("can't connect neuron {a} to itself");
             return;
         }
+        let inh = self
+            .geo
+            .as_ref()
+            .and_then(|g| g.kind.get(a as usize))
+            .is_some_and(|&k| k != 0);
         self.edit_net(NetEdit::Connect {
             from: a,
             to: b,
-            w: 6.0,
+            w: if inh { 8.0 } else { 6.0 },
         });
         self.status = format!("connected {a} -> {b}");
     }
@@ -1303,6 +1323,13 @@ impl EditorApp {
                         self.guarded(ctx, PendingAction::New);
                         ui.close();
                     }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if self.saved_token.is_some() && ui.button("Log out").clicked() {
+                        self.saved_token = None;
+                        self.send(ClientMsg::Bye);
+                        self.status = "logged out — saved session forgotten".into();
+                        ui.close();
+                    }
                     if ui.add(icons::button(&ic.open, "Load…")).clicked() {
                         self.dlg = Some(Dialog::Load {
                             path: self.net_path.clone().unwrap_or_default(),
@@ -1537,10 +1564,6 @@ impl EditorApp {
                         ui.close();
                     }
                 });
-                // Always-visible help affordance.
-                if ui.button("?").on_hover_text("Manual").clicked() {
-                    self.show_manual = true;
-                }
                 ui.separator();
                 // sim controls — "Stop" (not "Pause"): abort_now flips the
                 // flag on_progress/run chunks/builders watch. A busy script
@@ -1806,9 +1829,15 @@ impl EditorApp {
                     crate::view::drag_plane_name(md.plane)
                 ));
             } else {
-                // Narrow viewports wrap to a second line rather than
-                // clipping the hint tail.
-                ui.add(egui::Label::new(crate::view::mode_hint(self.mode)).wrap());
+                // U8: under ~1100 px the long hint eats a second row —
+                // use the terse variant there.
+                let narrow = usable_rect(ctx).width() < 1100.0;
+                let hint = if narrow {
+                    crate::view::mode_hint_short(self.mode)
+                } else {
+                    crate::view::mode_hint(self.mode)
+                };
+                ui.add(egui::Label::new(hint).wrap());
             }
         });
     }
@@ -2249,7 +2278,7 @@ impl EditorApp {
                         }
                     }
                     if sel.is_some() && ui.button("rename…").clicked() {
-                        // rename_to already seeded on select
+                        self.files.rename_open = true;
                     }
                     if sel.is_some() && ui.button("delete…").clicked() {
                         self.files.confirm_delete = sel.clone();
@@ -2276,12 +2305,16 @@ impl EditorApp {
                         web_file_picker();
                     }
                 });
-                if self.files.sel.is_some() && !self.files.rename_to.is_empty() {
+                if self.files.rename_open {
                     ui.horizontal(|ui| {
                         ui.label("rename to");
                         ui.text_edit_singleline(&mut self.files.rename_to);
                         if ui.button("ok").clicked() {
                             self.file_rename();
+                            self.files.rename_open = false;
+                        }
+                        if ui.button("cancel").clicked() {
+                            self.files.rename_open = false;
                         }
                     });
                 }
@@ -3065,7 +3098,17 @@ impl EditorApp {
                         }
                     }
                     if matches!(self.plot_tab, PlotTab::Voltage | PlotTab::Phase) {
-                        ui.label(format!("watching {}", self.watch_sent.len()));
+                        let sel_n = self
+                            .selection
+                            .iter()
+                            .filter(|&i| matches!(self.entity(*i), Some(Entity::Neuron(_))))
+                            .count();
+                        // U8: say which neurons the cap dropped.
+                        ui.weak(format!(
+                            "{} of {} watched",
+                            self.watch_sent.len(),
+                            sel_n
+                        ));
                     }
                     if self.plot_tab == PlotTab::Raster {
                         ui.label("height");
@@ -3082,6 +3125,12 @@ impl EditorApp {
                         // the user's pan/zoom rules once follow is off.
                         let win = self.plot_win.bounds(self.last_sim_t);
                         let auto_y = self.plot_win.auto_y;
+                        if self.watch_sent.is_empty() {
+                            // U8: readable weak text above the plot, not
+                            // tiny in-plot text across the centre line.
+                            ui.weak("no watched neurons — click a neuron to \
+                                     watch it, or right-click -> \"Watch v(t)\"");
+                        }
                         let mut p = egui_plot::Plot::new("vplot").height(140.0);
                         if win.is_none() || auto_y {
                             // x (or y too when following) from the data.
@@ -3092,15 +3141,6 @@ impl EditorApp {
                         let pr = p.show(ui, |ui| {
                             if self.hist.v.is_empty() {
                                 // Discoverable watching (Stage 13 E): the
-                                // empty plot itself explains how to fill it.
-                                let cx = win.map(|(lo, hi)| (lo + hi) / 2.0)
-                                    .unwrap_or(self.last_sim_t);
-                                ui.text(egui_plot::Text::new(
-                                    "hint",
-                                    egui_plot::PlotPoint::new(cx, -25.0),
-                                    "no watched neurons — click a neuron to watch it,\n\
-                                     or right-click -> \"Watch v(t)\" · Inspector -> \"Plot v(t)\"",
-                                ));
                             }
                             // watch_sent order → stable per-neuron colors,
                             // shared with the phase tab.
@@ -3340,10 +3380,11 @@ impl EditorApp {
     /// selected job, cancel/re-open controls, and the opened detail
     /// (status + result.json + script).
     fn jobs_ui(&mut self, ui: &mut egui::Ui) {
-        // keep the list fresh while the tab is open
-        let now = ui.ctx().input(|i| i.time);
-        if now - self.last_jobs_poll > 2.0 {
-            self.last_jobs_poll = now;
+        // U8: one fetch when the tab opens — JobStarted/JobDone/
+        // JobProgress pushes keep the list live after that, so the
+        // 2 s poll went away. Cancel clicks refetch on JobDone.
+        if !self.jobs_fetched {
+            self.jobs_fetched = true;
             self.send(ClientMsg::ListJobs);
         }
         if self.jobs.is_empty() {
@@ -3489,10 +3530,17 @@ impl EditorApp {
                             ui.text_edit_singleline(group);
                         });
                         ui.horizontal(|ui| {
-                            ui.add(egui::DragValue::new(w).prefix("w "));
-                            ui.add(egui::DragValue::new(h).prefix("h "));
-                            ui.add(egui::DragValue::new(dist).prefix("dist "));
+                            ui.add(egui::DragValue::new(w).prefix("w ").range(1..=512));
+                            ui.add(egui::DragValue::new(h).prefix("h ").range(1..=512));
+                            ui.add(
+                                egui::DragValue::new(dist)
+                                    .prefix("dist ")
+                                    .range(0.1..=1000.0),
+                            );
                         });
+                        // U8: show the size before Create — a stray
+                        // 1000×1000 used to go straight to the wire.
+                        ui.label(format!("= {} neurons", (*w).max(0) * (*h).max(0)));
                         if ui.button("Create").clicked() {
                             let (g, w2, h2, d2) = (group.clone(), *w, *h, *dist);
                             self.edit_net(NetEdit::CreateGrid2d {
@@ -3522,10 +3570,9 @@ impl EditorApp {
                             ui.text_edit_singleline(group);
                         });
                         ui.horizontal(|ui| {
-                            ui.add(egui::DragValue::new(w).prefix("w "));
-                            ui.add(egui::DragValue::new(h).prefix("h "));
-                            ui.add(egui::DragValue::new(d2).prefix("d "));
-                            ui.add(egui::DragValue::new(spacing).prefix("spacing "));
+                            ui.add(egui::DragValue::new(w).prefix("w ").range(1..=256));
+                            ui.add(egui::DragValue::new(h).prefix("h ").range(1..=256));
+                            ui.add(egui::DragValue::new(d2).prefix("d ").range(1..=256));
                         });
                         if ui.button("Create").clicked() {
                             let (g, w2, h2, dd, sp) = (group.clone(), *w, *h, *d2, *spacing);
@@ -3827,10 +3874,12 @@ impl eframe::App for EditorApp {
             token: self.saved_token.clone(),
         };
         eframe::set_value(storage, "state", &p);
+        secure_storage_file();
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         crate::icons::Icons::ensure(&mut self.icons, ctx);
+        self.insert_inh = ctx.input(|i| i.modifiers.alt);
         // GPU lives in egui-wgpu callback resources; we need it here for
         // scene updates + picking. Get it via render_state.
         let rs = frame.wgpu_render_state().expect("wgpu render state");
@@ -4012,6 +4061,21 @@ fn plots_default_rect(u: egui::Rect) -> egui::Rect {
 fn show_disconnect_banner(connected: bool, login_open: bool) -> bool {
     !connected && !login_open
 }
+
+/// U8: the session token persists in eframe's app.ron — keep it
+/// owner-only (0600) instead of the umask default.
+#[cfg(unix)]
+fn secure_storage_file() {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(dir) = eframe::storage_dir("neuro_edit v2") {
+        let f = dir.join("app.ron");
+        if f.exists() {
+            let _ = std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+}
+#[cfg(not(unix))]
+fn secure_storage_file() {}
 
 /// Parent dir of a path for a `ListFiles` request ("." at the top).
 fn dir_of(p: &str) -> String {
@@ -4201,6 +4265,19 @@ mod tests {
         g.pos.truncate(3);
         assert!(!example_geo_covers(Some(7), Some(&g), &ids));
         assert!(!example_geo_covers(Some(7), None, &ids));
+    }
+
+    #[test]
+    fn watch_takes_lowest_ids_not_hash_order() {
+        // U8: selection is a HashSet — iterating it gave an arbitrary
+        // 8 of the selected neurons. Now the 8 lowest ids win.
+        let mut app = EditorApp::new(crate::simctl::SimCtl::offline(), None);
+        let mut geo = crate::snap::GeoSnap::default();
+        geo.pos = vec![[0.0; 3]; 20];
+        app.geo = Some(std::sync::Arc::new(geo));
+        app.selection = [15, 3, 9, 1, 12, 7, 19, 2, 11, 5].into_iter().collect();
+        app.update_watch();
+        assert_eq!(app.watch_sent, vec![1, 2, 3, 5, 7, 9, 11, 12]);
     }
 
     #[test]

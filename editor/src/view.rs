@@ -201,9 +201,20 @@ pub fn kept_delta(dp: DragPlane, delta: Vec3) -> Vec3 {
 pub fn mode_hint(mode: Mode) -> &'static str {
     match mode {
         Mode::Navigate => "navigate: click select · drag = box select · right-drag orbit · wheel zoom · WASD/QE pan · dbl-click focus · I insert · C connect · M move · Del delete",
-        Mode::Insert => "insert: click to place a neuron on the work plane · Esc to exit",
+        Mode::Insert => "insert: click to place a neuron on the work plane · Alt = inhibitory · Esc to exit",
         Mode::Connect => "connect: click a neuron or input source, then a target neuron · Esc to abort",
         Mode::Move => "move: drag a selected object on the work plane · Esc to exit",
+    }
+}
+
+/// U8: the long hint wraps to a second row on narrow windows —
+/// a terse variant keeps the strip one row under ~1100 px.
+pub fn mode_hint_short(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Navigate => "click select · right-drag orbit · wheel zoom · WASD pan",
+        Mode::Insert => "click to place a neuron · Alt = inhibitory · Esc exit",
+        Mode::Connect => "click source, then target · Esc abort",
+        Mode::Move => "drag a selected object · Esc exit",
     }
 }
 
