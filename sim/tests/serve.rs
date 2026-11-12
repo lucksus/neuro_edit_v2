@@ -463,14 +463,19 @@ fn data_dir_confines_paths() {
     });
     rig.until(|m| matches!(m, ServerMsg::Console(s) if s.contains("loaded ok.ne2")));
 
-    // absolute paths refused
+    // absolute paths refused — the typed Error (Q7 acks), not a
+    // console line.
     rig.send(ClientMsg::LoadNet {
         path: "/etc/passwd".into(),
     });
-    let evs = rig.until(|m| matches!(m, ServerMsg::Console(s) if s.contains("load")));
+    let evs = rig.until(|m| {
+        matches!(&m, ServerMsg::Error(s) if s.contains("load"))
+            || matches!(m, ServerMsg::Console(s) if s.contains("load"))
+    });
     assert!(evs.iter().any(|e| matches!(
         &e.msg,
-        ServerMsg::Console(s) if s.contains("load /etc/passwd") && !s.contains("loaded")
+        ServerMsg::Error(s) | ServerMsg::Console(s)
+            if s.contains("load /etc/passwd") && !s.contains("loaded")
     )));
 
     rig.stop();
