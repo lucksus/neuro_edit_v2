@@ -295,12 +295,16 @@ pub fn register_api(
     engine.register_fn("input_count", |n: &mut NetHandle| -> rhai::INT {
         n.borrow().inputs.len() as rhai::INT
     });
-    engine.register_fn(
-        "connect",
-        |n: &mut NetHandle, a: rhai::INT, b: rhai::INT, w: Dynamic| -> rhai::INT {
-            n.borrow_mut().connect(a as u32, b as u32, d_f64(&w) as f32) as rhai::INT
-        },
-    );
+    {
+        let (s, v) = (sim.clone(), net_version.clone());
+        engine.register_fn(
+            "connect",
+            move |n: &mut NetHandle, a: rhai::INT, b: rhai::INT, w: Dynamic| -> rhai::INT {
+                invalidate(&s, &v);
+                n.borrow_mut().connect(a as u32, b as u32, d_f64(&w) as f32) as rhai::INT
+            },
+        );
+    }
     {
         let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
