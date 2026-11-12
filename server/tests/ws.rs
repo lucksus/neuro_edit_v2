@@ -135,6 +135,41 @@ fn ws_second_client_sees_edits() {
     w.srv.shutdown();
 }
 
+#[test]
+fn ws_add_input_target_appends() {
+    let mut net = Network::new();
+    net.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
+    net.add_neuron([5.0; 3], net_format::NeuronKind::Excitatory);
+    net.add_input("drive", vec![(0, 3.0)], [0.0; 3]);
+    let w = start(net, None, 1);
+    let mut c = w.client();
+    let base = base_version(&hydrate(&mut c));
+
+    // connect mode sends input→neuron links as AddInputTarget — it must
+    // APPEND to the existing targets, not replace them.
+    c.send(&ClientMsg::Edit {
+        base,
+        edit: NetEdit::AddInputTarget {
+            name: "drive".into(),
+            target: 1,
+            w: 6.0,
+        },
+    })
+    .unwrap();
+    let msgs = until(&mut c, |m| matches!(m, ServerMsg::GeoDelta(_)));
+    let d = msgs
+        .iter()
+        .find_map(|m| match m {
+            ServerMsg::GeoDelta(d) => Some(&**d),
+            _ => None,
+        })
+        .expect("GeoDelta");
+    let inputs = d.inputs.as_ref().expect("inputs in delta");
+    let inp = inputs.iter().find(|i| i.name == "drive").unwrap();
+    assert_eq!(inp.targets, vec![0, 1]);
+    w.srv.shutdown();
+}
+
 /// A job script: builds a small noisy net, runs a few epochs streaming
 /// `job_progress`, then burns script time so a client can disconnect
 /// mid-job, then writes a marker into `job_dir()`.

@@ -454,6 +454,23 @@ impl EditorApp {
         self.status = format!("connected {a} -> {b}");
     }
 
+    /// Connect mode: input marker `k` (instance index n+k) → neuron `t`.
+    /// Appends to the input's target list — existing targets survive.
+    pub fn connect_input(&mut self, k: u32, t: u32) {
+        let name = self
+            .geo
+            .as_ref()
+            .and_then(|g| g.inputs.get(k as usize))
+            .map(|i| i.name.clone());
+        let Some(name) = name else { return };
+        self.edit_net(NetEdit::AddInputTarget {
+            name: name.clone(),
+            target: t,
+            w: 6.0,
+        });
+        self.status = format!("input {name} -> {t}");
+    }
+
     /// Apply a finished move drag (delta on the work plane).
     pub fn apply_move(&mut self, md: &MoveDrag, delta: glam::Vec3) {
         let moves: Vec<(u32, [f32; 3])> = md

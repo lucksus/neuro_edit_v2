@@ -1323,6 +1323,25 @@ fn apply_edit(net: &mut Network, dt: f32, e: &NetEdit) -> Result<Applied, String
                     .collect(),
             );
         }
+        NetEdit::AddInputTarget { name, target, w } => {
+            check_ids(net, &[*target])?;
+            let k = net
+                .inputs
+                .iter()
+                .position(|i| &i.name == name)
+                .ok_or_else(|| format!("no input named {name}"))?;
+            net.inputs[k].targets.push((*target, *w));
+            d.inputs = Some(
+                net.inputs
+                    .iter()
+                    .map(|i| Input {
+                        name: i.name.clone(),
+                        pos: i.pos,
+                        targets: i.targets.iter().map(|t| t.0).collect(),
+                    })
+                    .collect(),
+            );
+        }
         NetEdit::AddSamples { name } => {
             net.samples_mut(name);
             d.samples = Some(

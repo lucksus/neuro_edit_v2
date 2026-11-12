@@ -276,6 +276,13 @@ pub enum NetEdit {
         name: String,
         ids: Vec<u32>,
     },
+    /// Append one target to a named input's target list (does NOT replace
+    /// the existing targets — connect mode draws input→neuron links).
+    AddInputTarget {
+        name: String,
+        target: u32,
+        w: f32,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -724,6 +731,11 @@ mod tests {
             NetEdit::AddToGroup {
                 name: "g".into(),
                 ids: vec![7, 8],
+            },
+            NetEdit::AddInputTarget {
+                name: "i".into(),
+                target: 4,
+                w: 6.0,
             },
         ] {
             round_trip(&e);

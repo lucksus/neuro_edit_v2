@@ -191,6 +191,23 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
             }
             if let Some(g) = &app.geo {
                 scene::group_boxes(g, &mut pvs);
+                // input → target links: all of them on small nets, only the
+                // selected input's on big ones (they'd double the line load).
+                let show_all_inputs = g.syn.len() < 10_000 || g.inputs.len() <= 4;
+                for (k, inp) in g.inputs.iter().enumerate() {
+                    let inst = (g.pos.len() + k) as u32;
+                    if !show_all_inputs && !app.selection.contains(&inst) {
+                        continue;
+                    }
+                    if let Some(src) = inst_pos(g, inst) {
+                        for &t in &inp.targets {
+                            if let Some(&p) = g.pos.get(t as usize) {
+                                pvs.push(scene::pv(src.into(), INPUT_LINK_COL));
+                                pvs.push(scene::pv(p, INPUT_LINK_COL));
+                            }
+                        }
+                    }
+                }
                 if app.mode == Mode::Connect {
                     if let (Some(from), Some(mv)) = (app.connect_from, mouse_vp) {
                         if let Some(fp) = inst_pos(g, from) {
@@ -369,6 +386,11 @@ fn context_menu(app: &mut EditorApp, resp: &egui::Response) {
                     app.open_input_dialog(k);
                     ui.close();
                 }
+                if ui.button("Connect from here").clicked() {
+                    app.mode = Mode::Connect;
+                    app.connect_from = app.hover;
+                    ui.close();
+                }
             }
             Some(Entity::Readout(k)) => {
                 if let Some(g) = &app.geo {
@@ -404,29 +426,33 @@ fn context_menu(app: &mut EditorApp, resp: &egui::Response) {
 fn on_pick(app: &mut EditorApp, res: Option<u32>, ctx: &egui::Context) {
     match app.mode {
         Mode::Connect => {
-            // Only a hit on a neuron changes state: a missed click keeps the
-            // pending source (dense scenes make small cubes easy to miss),
-            // so Esc is the only way to abort a pending connection.
+            // Only a hit on a neuron/input changes state: a missed click
+            // keeps the pending source (dense scenes make small cubes easy
+            // to miss), so Esc is the only way to abort a pending connection.
             if let Some(inst) = res {
-                match app.geo.as_ref().and_then(|g| entity_of(g, inst)) {
+                let ent = app.geo.as_ref().and_then(|g| entity_of(g, inst));
+                match ent {
                     Some(Entity::Neuron(n)) => {
-                        let a = app
+                        match app
                             .connect_from
                             .take()
                             .and_then(|fi| app.geo.as_ref().and_then(|g| entity_of(g, fi)))
-                            .and_then(|e| match e {
-                                Entity::Neuron(a) => Some(a),
-                                _ => None,
-                            });
-                        if let Some(a) = a {
-                            app.connect_neurons(a, n);
-                        } else {
-                            app.connect_from = Some(inst);
-                            app.status = "connect: pick target".into();
+                        {
+                            Some(Entity::Neuron(a)) => app.connect_neurons(a, n),
+                            Some(Entity::Input(k)) => app.connect_input(k, n),
+                            _ => {
+                                app.connect_from = Some(inst);
+                                app.status = "connect: pick target".into();
+                            }
                         }
                     }
+                    Some(Entity::Input(_)) => {
+                        // Inputs are sources, never targets.
+                        app.connect_from = Some(inst);
+                        app.status = "connect: pick a target neuron".into();
+                    }
                     _ => {
-                        app.status = "connect: that's not a neuron".into();
+                        app.status = "connect: that's not a neuron or input".into();
                     }
                 }
             } else if app.connect_from.is_some() {
@@ -465,6 +491,9 @@ fn on_pick(app: &mut EditorApp, res: Option<u32>, ctx: &egui::Context) {
         }
     }
 }
+
+/// Input→target link tint (matches the input marker's warm yellow).
+const INPUT_LINK_COL: [f32; 4] = [0.9, 0.72, 0.22, 0.75];
 
 fn mode_input(
     app: &mut EditorApp,
@@ -746,7 +775,7 @@ fn overlay_2d(app: &EditorApp, ui: &mut egui::Ui, rect: egui::Rect, aspect: f32)
     let hint = match app.mode {
         Mode::Navigate => "navigate: click select · drag = box select · right-drag orbit · wheel zoom · WASD/QE pan · dbl-click focus · I insert · C connect · M move · Del delete",
         Mode::Insert => "insert: click to place a neuron on the work plane · Esc to exit",
-        Mode::Connect => "connect: click source then target neuron · Esc to abort",
+        Mode::Connect => "connect: click a neuron or input source, then a target neuron · Esc to abort",
         Mode::Move => "move: drag a selected object on the work plane · Esc to exit",
     };
     painter.text(
