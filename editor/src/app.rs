@@ -83,6 +83,9 @@ pub struct EditorApp {
     pub(crate) show_inputs: bool,
     /// `?` shortcut overlay.
     pub(crate) show_keys: bool,
+    /// Manual window (docs/manual pages baked in).
+    pub(crate) show_manual: bool,
+    manual_page: usize,
     /// Files window (per-user space when remote, app-data dir locally).
     pub(crate) show_files: bool,
     files: FilesUi,
@@ -509,6 +512,8 @@ impl EditorApp {
             show_script: wins.script,
             show_inputs: wins.inputs,
             show_keys: false,
+            show_manual: false,
+            manual_page: 0,
             show_files: wins.files,
             files: {
                 #[allow(unused_mut)]
@@ -1276,15 +1281,23 @@ impl EditorApp {
                     }
                 });
                 ui.menu_button("Help", |ui| {
+                    if ui.button("Manual  (?)").clicked() {
+                        self.show_manual = true;
+                        ui.close();
+                    }
+                    if ui.button("Shortcuts").clicked() {
+                        self.show_keys = true;
+                        ui.close();
+                    }
                     if ui.add(icons::button(&ic.about, "About")).clicked() {
                         self.dlg = Some(Dialog::About);
                         ui.close();
                     }
-                    if ui.button("Shortcuts  (?)").clicked() {
-                        self.show_keys = true;
-                        ui.close();
-                    }
                 });
+                // Always-visible help affordance.
+                if ui.button("?").on_hover_text("Manual").clicked() {
+                    self.show_manual = true;
+                }
                 ui.separator();
                 // sim controls — "Stop" (not "Pause"): abort_now flips the
                 // flag on_progress/run chunks/builders watch. A busy script
@@ -2208,10 +2221,38 @@ impl EditorApp {
                         "Ctrl+1..6",
                         "inspector · plots · console · script · inputs · files",
                     );
-                    row(ui, "?", "this overlay");
+                    row(ui, "?", "manual");
                 });
             });
         self.show_keys = open;
+    }
+
+    /// Manual window — `docs/manual/*.md` baked into the binary.
+    fn manual_window(&mut self, ctx: &egui::Context) {
+        if !self.show_manual {
+            return;
+        }
+        let mut open = self.show_manual;
+        egui::Window::new("Manual")
+            .open(&mut open)
+            .default_size([560.0, 420.0])
+            .default_pos([80.0, 70.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(110.0);
+                        for (i, p) in crate::manual::PAGES.iter().enumerate() {
+                            ui.selectable_value(&mut self.manual_page, i, p.title);
+                        }
+                    });
+                    ui.separator();
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        let page = self.manual_page.min(crate::manual::PAGES.len() - 1);
+                        crate::manual::render(ui, crate::manual::PAGES[page].md);
+                    });
+                });
+            });
+        self.show_manual = open;
     }
 
     fn inspect_one(&mut self, ui: &mut egui::Ui, inst_id: u32) {
@@ -3417,6 +3458,7 @@ impl eframe::App for EditorApp {
         #[cfg(not(target_arch = "wasm32"))]
         self.login_window(ctx);
         self.keys_window(ctx);
+        self.manual_window(ctx);
         self.dialog(ctx);
 
         crate::view::viewport(self, ctx, rs);

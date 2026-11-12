@@ -347,7 +347,7 @@ fn keys(app: &mut EditorApp, ui: &mut egui::Ui) {
             app.frame_all();
         }
         if i.key_pressed(egui::Key::Questionmark) {
-            app.show_keys = true;
+            app.show_manual = true;
         }
         if i.modifiers.ctrl {
             for (key, flag) in [
