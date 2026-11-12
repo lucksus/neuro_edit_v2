@@ -26,9 +26,11 @@ pub struct EditorApp {
     last_snap_seq: u64,
     pub activity: Vec<f32>,
     pub particles: Particles,
-    /// (time_ms, fired-ids) per publish — x axis is real sim milliseconds.
-    raster: VecDeque<(f64, Vec<u32>)>,
-    v_hist: HashMap<u32, VecDeque<(f64, f32)>>,
+    /// v(t) histories + raster, cleared when fed sim time goes backwards.
+    hist: crate::plot::PlotHist,
+    /// Sliding-window/follow state shared by the v(t), raster and
+    /// phase tabs.
+    plot_win: crate::plot::PlotWindow,
 
     pub selection: HashSet<u32>, // instance ids
     pub mode: Mode,
@@ -472,8 +474,8 @@ impl EditorApp {
             last_snap_seq: 0,
             activity: Vec::new(),
             particles: Particles::new(),
-            raster: VecDeque::with_capacity(600),
-            v_hist: HashMap::new(),
+            hist: crate::plot::PlotHist::default(),
+            plot_win: crate::plot::PlotWindow::default(),
             selection: HashSet::new(),
             mode: Mode::Navigate,
             plane: Plane::XZ,
@@ -663,7 +665,7 @@ impl EditorApp {
         if ids != self.watch_sent {
             self.watch_sent = ids.clone();
             self.send(ClientMsg::Watch(ids));
-            self.v_hist.retain(|k, _| self.watch_sent.contains(k));
+            self.hist.v.retain(|k, _| self.watch_sent.contains(k));
         }
     }
 
@@ -769,8 +771,7 @@ impl EditorApp {
             self.watch_sent.clear();
             self.send(ClientMsg::Watch(Vec::new()));
         }
-        self.v_hist.clear();
-        self.raster.clear();
+        self.hist.clear();
         self.particles = Particles::new();
         self.activity.clear();
         self.grid_traces.clear();
@@ -892,7 +893,9 @@ impl EditorApp {
             if let Some(g) = &self.geo {
                 self.particles.feed(g, &snap.counts, snap.time_ms);
             }
-            // raster bin: ids with count>0
+            // raster bin: ids with count>0 — folded into the histories
+            // by PlotHist::feed, which also spots the sim clock going
+            // backwards (Reset, sim.reset(), another client) and clears.
             let fired: Vec<u32> = snap
                 .counts
                 .iter()
@@ -900,22 +903,13 @@ impl EditorApp {
                 .filter(|(_, c)| **c > 0)
                 .map(|(i, _)| i as u32)
                 .collect();
-            self.raster.push_back((snap.time_ms, fired));
-            if self.raster.len() > 600 {
-                self.raster.pop_front();
-            }
-            for (id, vals) in &snap.watched_v {
-                let h = self.v_hist.entry(*id).or_default();
-                let n = vals.len();
-                for (i, &v) in vals.iter().enumerate() {
-                    // per-step samples end at snap.time_ms — walk back by dt
-                    let t = snap.time_ms - (n - 1 - i) as f64 * self.dt_ms as f64;
-                    h.push_back((t, v));
-                }
-                while h.len() > 4096 {
-                    h.pop_front();
-                }
-            }
+            let watched: Vec<(u32, &[f32])> = snap
+                .watched_v
+                .iter()
+                .map(|(id, vs)| (*id, vs.as_slice()))
+                .collect();
+            self.hist
+                .feed(snap.time_ms, fired, &watched, self.dt_ms as f64);
         }
         self.running = running;
         self.sim_built = sim_built;
@@ -1276,8 +1270,7 @@ impl EditorApp {
                 }
                 if ui.add(icons::button(&ic.reset, "Reset")).clicked() {
                     self.send(ClientMsg::Reset);
-                    self.raster.clear();
-                    self.v_hist.clear();
+                    self.hist.clear();
                 }
                 let fg = ui.visuals().text_color();
                 ui.add(icons::tinted(&ic.speed, fg))
@@ -2521,7 +2514,7 @@ impl EditorApp {
                 match self.plot_tab {
                     PlotTab::Voltage => {
                         egui_plot::Plot::new("vplot").height(100.0).show(ui, |ui| {
-                            for (&id, h) in &self.v_hist {
+                            for (&id, h) in &self.hist.v {
                                 let pts: PlotPoints =
                                     h.iter().map(|(t, v)| [*t, *v as f64]).collect();
                                 ui.line(Line::new(format!("n{id}"), pts));
@@ -2563,7 +2556,7 @@ impl EditorApp {
                             .show(ui, |ui| {
                                 let mut pts = Vec::new();
                                 let watches = &self.watch_sent;
-                                for &(t, ref fired) in &self.raster {
+                                for &(t, ref fired) in &self.hist.raster {
                                     if watches.is_empty() {
                                         let stride = (fired.len() / 200).max(1);
                                         for (k, &id) in fired.iter().enumerate() {

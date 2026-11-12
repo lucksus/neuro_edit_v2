@@ -6,6 +6,7 @@ pub mod camera;
 pub mod gpu;
 pub mod icons;
 pub mod plane;
+pub mod plot;
 pub mod scene;
 #[cfg(feature = "native")]
 pub mod shot;
