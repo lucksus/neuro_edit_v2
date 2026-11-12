@@ -233,6 +233,40 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
+/// Answer for a plain HTTP request on a WS-only port: tell the human
+/// who opened it in a browser what this port actually speaks.
+const NO_WEB_HINT: &str = "this port speaks the neuro_edit editor WebSocket protocol, not HTTP.\n\
+     - browser editor: build it with editor/web/build.sh and start \
+     `server --web editor/dist-web`\n\
+     - desktop editor: `editor --connect <host>:<port>`\n";
+
+/// `426 Upgrade Required` + the hint — for browsers/curl that hit a
+/// wire port that was not started with `--web`.
+fn serve_no_web_hint(mut stream: std::net::TcpStream) -> anyhow::Result<()> {
+    use std::io::Write;
+    let head = format!(
+        "HTTP/1.1 426 Upgrade Required\r\nContent-Type: text/plain; charset=utf-8\r\n\
+         Content-Length: {}\r\nConnection: close\r\nUpgrade: websocket\r\n\r\n",
+        NO_WEB_HINT.len()
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(NO_WEB_HINT.as_bytes())?;
+    Ok(())
+}
+
+/// Refuse a `--web` dir that cannot serve the editor (`main` checks at
+/// startup; kept in the lib so tests can drive it).
+pub fn web_dir_or_err(dir: &std::path::Path) -> anyhow::Result<()> {
+    if !dir.join("index.html").is_file() {
+        anyhow::bail!(
+            "--web dir {} has no index.html — build the browser editor first: \
+             editor/web/build.sh (then pass the dist dir)",
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
 /// Serve one static GET from `web_dir`, then close — no keep-alive.
 fn serve_http(
     mut stream: std::net::TcpStream,
@@ -351,30 +385,33 @@ fn handle_client(
     jobs: Arc<JobRegistry>,
 ) -> anyhow::Result<()> {
     stream.set_nodelay(true).ok();
-    let ws = match &web_dir {
-        // --web: the same port serves the page over plain HTTP and the
-        // wire over Upgrade requests — split them on the request head.
-        Some(dir) => match sniff_request(&stream)? {
-            FrontReq::Http(path) => return serve_http(stream, &path, dir),
-            FrontReq::Ws(key) => {
-                use std::io::Write;
-                let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
-                let mut s = stream;
-                s.write_all(
-                    format!(
-                        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
-                         Connection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
-                    )
-                    .as_bytes(),
-                )?;
-                tungstenite::WebSocket::from_raw_socket(
-                    s,
-                    tungstenite::protocol::Role::Server,
-                    None,
-                )
+    // Every client starts with an HTTP head: `Upgrade: websocket` is
+    // the wire protocol; anything else is a human with a browser — give
+    // it a real answer (static file under --web, else a 426 hint).
+    let ws = match sniff_request(&stream)? {
+        FrontReq::Http(path) => match &web_dir {
+            Some(dir) => return serve_http(stream, &path, dir),
+            None => {
+                eprintln!(
+                    "client {id}: plain HTTP on the wire port — \
+                           replying 426 with the --web/--connect hint"
+                );
+                return serve_no_web_hint(stream);
             }
         },
-        None => tungstenite::accept(stream)?,
+        FrontReq::Ws(key) => {
+            use std::io::Write;
+            let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
+            let mut s = stream;
+            s.write_all(
+                format!(
+                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+                     Connection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+                )
+                .as_bytes(),
+            )?;
+            tungstenite::WebSocket::from_raw_socket(s, tungstenite::protocol::Role::Server, None)
+        }
     };
     // One socket → reader + writer halves via two WebSockets on dup'd fds.
     let mut w_read = ws;

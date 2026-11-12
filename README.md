@@ -108,15 +108,22 @@ editor --connect 127.0.0.1:3090                       # remote GUI
 `net.load`, file reads/writes, Rhai `import`): absolute paths, `..`, and
 symlinks resolving outside are refused. Scripts run server-side.
 
+### Run in the browser
+
 The browser editor is the same egui/wgpu UI compiled to wasm32 and served by
 `server --web` — one port carries the page, the wasm bundle and the WebSocket
 the page connects back to. WebGPU required (the 3D view uses storage buffers).
 
 ```sh
-editor/web/build.sh                              # cargo + wasm-bindgen → editor/dist-web
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.118   # must match Cargo.lock
+editor/web/build.sh                               # → editor/dist-web
 server --bind 127.0.0.1:3090 --data-dir /path/to/data --web editor/dist-web
 # open http://127.0.0.1:3090/
 ```
+
+Without `--web` the port only speaks the wire protocol: a browser GET gets a
+`426` reply explaining these steps.
 
 ## Architecture notes
 

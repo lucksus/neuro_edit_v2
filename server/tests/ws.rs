@@ -785,3 +785,52 @@ fn ws_web_serves_http_and_ws_on_one_port() {
     srv.shutdown();
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// A plain GET on a WS-only port gets a 426 + a human hint, not a
+/// WebSocket protocol error.
+#[test]
+fn ws_plain_http_gets_hint_without_web() {
+    let dir = std::env::temp_dir().join(format!("ws_noweb_{}", std::process::id()));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let srv = server::Server::start(
+        Network::new(),
+        ServeOpts {
+            backend: BackendKind::Cpu,
+            seed: 7,
+            cfg: SimConfig::default(),
+            data_dir: Some(dir.clone()),
+            max_upload_bytes: usize::MAX,
+            abort: Arc::new(AtomicBool::new(false)),
+        },
+    );
+    srv.spawn_acceptor(listener);
+
+    let resp = http_get(&addr, "/");
+    assert!(resp.starts_with("HTTP/1.1 426"), "{resp:?}");
+    assert!(resp.contains("editor/web/build.sh"), "{resp:?}");
+    assert!(resp.contains("editor --connect"), "{resp:?}");
+
+    // the wire protocol still works on the same port afterwards
+    let mut c = server::ClientConn::connect(&addr).unwrap();
+    c.send(&ClientMsg::Hello {
+        proto: proto::PROTO_VERSION,
+    })
+    .unwrap();
+    until(&mut c, |m| matches!(m, ServerMsg::Hello { .. }));
+
+    srv.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--web <dir>` with no index.html (bundle not built) fails the
+/// startup check with a message naming editor/web/build.sh.
+#[test]
+fn web_dir_without_index_fails_startup_check() {
+    let dir = std::env::temp_dir().join(format!("ws_webempty_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let err = server::web_dir_or_err(&dir).unwrap_err().to_string();
+    assert!(err.contains("index.html"), "{err}");
+    assert!(err.contains("editor/web/build.sh"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

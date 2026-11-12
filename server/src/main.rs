@@ -102,9 +102,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Some(d) = &cli.web {
-        if !d.join("index.html").is_file() {
-            anyhow::bail!("--web dir {} has no index.html", d.display());
-        }
+        server::web_dir_or_err(d)?;
     }
 
     let listener =
@@ -121,5 +119,9 @@ fn main() -> anyhow::Result<()> {
             .map(|d| format!(" (web {})", d.display()))
             .unwrap_or_default()
     );
+    match &cli.web {
+        Some(_) => eprintln!("browser editor: open http://{}/", cli.bind),
+        None => eprintln!("editor: editor --connect {}", cli.bind),
+    }
     srv.accept_web(listener, cli.web)
 }
