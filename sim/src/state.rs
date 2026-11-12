@@ -93,6 +93,57 @@ pub fn ring_depth(csr: &SynCsr, _dt_ms: f32) -> usize {
     (max_steps + 1).max(2)
 }
 
+/// Per-synapse-state ("x") tables for custom-tau synapses: synapses with
+/// `tau_ms > 0` get their own exponential current, all others keep the
+/// merged `s[i]` path. Built once here so the CPU and CUDA backends can
+/// not drift on the layout (3.2).
+#[derive(Clone, Debug, Default)]
+pub struct XSyn {
+    /// synapse j → x-slot, `u32::MAX` = merged path.
+    pub map: Vec<u32>,
+    /// per-slot decay factor `exp(-dt/tau)`.
+    pub decay: Vec<f32>,
+    /// per-slot weight (CPU integrates directly; CUDA reads `csr.w`).
+    pub w: Vec<f32>,
+    /// target-major rows over slots: neuron i's incoming x-slots are
+    /// `xt_idx[xt_ptr[i]..xt_ptr[i+1]]`.
+    pub xt_ptr: Vec<u32>,
+    pub xt_idx: Vec<u32>,
+}
+
+impl XSyn {
+    pub fn build(csr: &SynCsr, dt_ms: f32) -> XSyn {
+        let n = csr.src_ptr.len().saturating_sub(1);
+        let mut map = vec![u32::MAX; csr.w.len()];
+        let mut rows: Vec<Vec<u32>> = vec![Vec::new(); n];
+        let (mut decay, mut w) = (Vec::new(), Vec::new());
+        for (j, &tau) in csr.tau_ms.iter().enumerate() {
+            if tau > 0.0 {
+                let slot = decay.len() as u32;
+                map[j] = slot;
+                decay.push((-dt_ms / tau.max(1e-6)).exp());
+                w.push(csr.w[j]);
+                rows[csr.tgt[j] as usize].push(slot);
+            }
+        }
+        let mut xt_ptr = vec![0u32; n + 1];
+        let mut xt_idx = Vec::with_capacity(decay.len());
+        for row in &rows {
+            xt_idx.extend_from_slice(row);
+        }
+        for i in 0..n {
+            xt_ptr[i + 1] = xt_ptr[i] + rows[i].len() as u32;
+        }
+        XSyn {
+            map,
+            decay,
+            w,
+            xt_ptr,
+            xt_idx,
+        }
+    }
+}
+
 /// Counter-based per-(neuron,step) hash for reproducible background noise —
 /// the same mixing as the CUDA kernel uses, so both backends draw the same
 /// kicks for a given seed. SplitMix64: the (i,t,seed) tuple is combined
@@ -117,4 +168,37 @@ pub fn noise_hash(i: u32, t: u64, seed: u64) -> u32 {
 #[inline(always)]
 pub fn noise_fires(i: u32, t: u64, seed: u64, p: f32) -> bool {
     (noise_hash(i, t, seed) as f32) * 2.3283064e-10 < p
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xsyn_layout_only_custom_synapses_get_slots() {
+        // 0→1 merged, 0→2 custom tau, 1→2 custom tau: two x-slots,
+        // target-major rows must list each neuron's incoming slots.
+        let mut net = net_format::Network::new();
+        for i in 0..3 {
+            net.add_neuron([i as f32, 0.0, 0.0], net_format::NeuronKind::Excitatory);
+        }
+        net.connect(0, 1, 1.0);
+        net.connect(0, 2, 2.0);
+        net.connect(1, 2, 3.0);
+        net.synapses[1].tau_ms = 20.0;
+        net.synapses[2].tau_ms = 10.0;
+        let csr = net.synapse_csr(0.1).unwrap();
+        let x = XSyn::build(&csr, 0.1);
+        // CSR sorts by src: [0→1, 0→2, 1→2] keeps insertion order here.
+        assert_eq!(x.map, vec![u32::MAX, 0, 1]);
+        assert_eq!(x.w, vec![2.0, 3.0]);
+        assert_eq!(x.decay.len(), 2);
+        assert!((x.decay[0] - (-0.1f32 / 20.0).exp()).abs() < 1e-7);
+        // neuron 2 receives both custom slots; neuron 1 gets none.
+        assert_eq!(
+            &x.xt_idx[x.xt_ptr[2] as usize..x.xt_ptr[3] as usize],
+            &[0, 1]
+        );
+        assert_eq!(x.xt_ptr[1], x.xt_ptr[2]);
+    }
 }

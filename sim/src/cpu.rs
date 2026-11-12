@@ -105,26 +105,8 @@ impl CpuSim {
         };
         // Per-synapse traces: custom synapses (tau_ms > 0) get their own
         // exponential current; all others keep the merged s[i] path.
-        let mut xsyn_map = vec![u32::MAX; csr.w.len()];
-        let mut xt_rows: Vec<Vec<u32>> = vec![Vec::new(); n];
-        let (mut xsyn, mut xdecay, mut xw) = (Vec::new(), Vec::new(), Vec::new());
-        for (j, &tau) in csr.tau_ms.iter().enumerate() {
-            if tau > 0.0 {
-                xsyn_map[j] = xsyn.len() as u32;
-                xsyn.push(0.0);
-                xdecay.push((-cfg.dt_ms / tau.max(1e-6)).exp());
-                xw.push(csr.w[j]);
-                xt_rows[csr.tgt[j] as usize].push(xsyn_map[j]);
-            }
-        }
-        let mut xt_ptr = vec![0u32; n + 1];
-        let mut xt_idx = Vec::with_capacity(xsyn.len());
-        for row in &xt_rows {
-            xt_idx.extend_from_slice(row);
-        }
-        for i in 0..n {
-            xt_ptr[i + 1] = xt_ptr[i] + xt_rows[i].len() as u32;
-        }
+        let x = crate::state::XSyn::build(&csr, cfg.dt_ms);
+        let xsyn = vec![0.0; x.decay.len()];
         CpuSim {
             n,
             csr,
@@ -137,13 +119,13 @@ impl CpuSim {
             trace: vec![0.0; n],
             ring: vec![0.0; d * n],
             d,
-            xsyn_map,
+            xsyn_map: x.map,
             xsyn,
-            xdecay,
-            xw,
+            xdecay: x.decay,
+            xw: x.w,
             xring: vec![Vec::new(); d],
-            xt_ptr,
-            xt_idx,
+            xt_ptr: x.xt_ptr,
+            xt_idx: x.xt_idx,
             ext: vec![0.0; n],
             spike_bits: vec![0; spike_record_steps * words],
             spike_counts: vec![0; spike_record_steps],

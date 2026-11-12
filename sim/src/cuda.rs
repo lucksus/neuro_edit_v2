@@ -166,25 +166,8 @@ impl CudaSim {
 
         // Per-synapse traces: custom synapses (tau_ms > 0) get their own
         // exponential current; all others keep the merged s path.
-        let mut xsyn_map = vec![u32::MAX; csr.w.len()];
-        let mut xt_rows: Vec<Vec<u32>> = vec![Vec::new(); n];
-        let (mut xdecay, mut n_xsyn) = (Vec::new(), 0usize);
-        for (j, &tau) in csr.tau_ms.iter().enumerate() {
-            if tau > 0.0 {
-                xsyn_map[j] = n_xsyn as u32;
-                xdecay.push((-cfg.dt_ms / tau.max(1e-6)).exp());
-                xt_rows[csr.tgt[j] as usize].push(xsyn_map[j]);
-                n_xsyn += 1;
-            }
-        }
-        let mut xt_ptr = vec![0u32; n + 1];
-        let mut xt_idx = Vec::with_capacity(n_xsyn);
-        for row in &xt_rows {
-            xt_idx.extend_from_slice(row);
-        }
-        for i in 0..n {
-            xt_ptr[i + 1] = xt_ptr[i] + xt_rows[i].len() as u32;
-        }
+        let x = crate::state::XSyn::build(&csr, cfg.dt_ms);
+        let n_xsyn = x.decay.len();
 
         let sim = CudaSim {
             v: stream.clone_htod(&vec![params.init_v; na])?,
@@ -201,11 +184,11 @@ impl CudaSim {
             tgt: stream.clone_htod(&pad(csr.tgt.clone()))?,
             w: stream.clone_htod(&pad(csr.w.clone()))?,
             delay: stream.clone_htod(&pad(csr.delay_steps.clone()))?,
-            xsyn_map: stream.clone_htod(&pad(xsyn_map))?,
+            xsyn_map: stream.clone_htod(&pad(x.map.clone()))?,
             xsyn: stream.alloc_zeros(n_xsyn.max(1))?,
-            xdecay: stream.clone_htod(&pad(xdecay))?,
-            xt_ptr: stream.clone_htod(&pad(xt_ptr))?,
-            xt_idx: stream.clone_htod(&pad(xt_idx))?,
+            xdecay: stream.clone_htod(&pad(x.decay.clone()))?,
+            xt_ptr: stream.clone_htod(&pad(x.xt_ptr.clone()))?,
+            xt_idx: stream.clone_htod(&pad(x.xt_idx.clone()))?,
             xring: stream.alloc_zeros((d * n_xsyn).max(1))?,
             n_xsyn,
             stim_ptr: stream.clone_htod(&pad(stim_ptr_host.clone()))?,
@@ -548,9 +531,10 @@ impl CudaSim {
         self.vrec_valid = 0;
     }
 
-    /// Drain per-step v samples recorded since the last drain, one Vec per
-    /// watched neuron (oldest first). At most `VREC_D` samples survive.
-    pub fn drain_v(&mut self) -> Result<Vec<Vec<f32>>> {
+    /// Shared body for `drain_v`/`drain_u` — the two rings have the same
+    /// rows and cadence and share `vrec_valid` bookkeeping; `clear` marks
+    /// which drain owns the counter reset.
+    fn drain_rec(&mut self, dev: &CudaSlice<f32>, clear: bool) -> Result<Vec<Vec<f32>>> {
         let w = self.v_watch.len();
         if w == 0 || self.vrec_valid == 0 || self.vrec_dirty {
             return Ok(vec![Vec::new(); w]);
@@ -560,16 +544,18 @@ impl CudaSim {
         let r0 = (self.t as usize).wrapping_sub(k) % VREC_D;
         let mut host = vec![0.0f32; k * w];
         if r0 + k <= VREC_D {
-            let view = self.vrec_dev.slice(r0 * w..(r0 + k) * w);
+            let view = dev.slice(r0 * w..(r0 + k) * w);
             self.stream.memcpy_dtoh(&view, &mut host)?;
         } else {
             let first = VREC_D - r0;
-            let view = self.vrec_dev.slice(r0 * w..VREC_D * w);
+            let view = dev.slice(r0 * w..VREC_D * w);
             self.stream.memcpy_dtoh(&view, &mut host[..first * w])?;
-            let view = self.vrec_dev.slice(0..(k - first) * w);
+            let view = dev.slice(0..(k - first) * w);
             self.stream.memcpy_dtoh(&view, &mut host[first * w..])?;
         }
-        self.vrec_valid = 0;
+        if clear {
+            self.vrec_valid = 0;
+        }
         let mut out = vec![Vec::with_capacity(k); w];
         for r in 0..k {
             for (c, o) in out.iter_mut().enumerate() {
@@ -579,37 +565,21 @@ impl CudaSim {
         Ok(out)
     }
 
+    /// Drain per-step v samples recorded since the last drain, one Vec per
+    /// watched neuron (oldest first). At most `VREC_D` samples survive.
+    pub fn drain_v(&mut self) -> Result<Vec<Vec<f32>>> {
+        let dev = self.vrec_dev.clone();
+        self.drain_rec(&dev, true)
+    }
+
     /// Drain per-step u samples — same rows/cadence as `drain_v` — for
     /// the editor's v–u phase plot. NOTE: shares `vrec_valid`'s
     /// bookkeeping (both rings record in the same loop), so this must
     /// be called BEFORE `drain_v` at each publish or it reports empty
     /// after the counter resets. Callers: `Sim::drain_vu`.
     pub fn drain_u(&mut self) -> Result<Vec<Vec<f32>>> {
-        let w = self.v_watch.len();
-        if w == 0 || self.vrec_valid == 0 || self.vrec_dirty {
-            return Ok(vec![Vec::new(); w]);
-        }
-        self.stream.synchronize()?;
-        let k = (self.vrec_valid as usize).min(VREC_D);
-        let r0 = (self.t as usize).wrapping_sub(k) % VREC_D;
-        let mut host = vec![0.0f32; k * w];
-        if r0 + k <= VREC_D {
-            let view = self.urec_dev.slice(r0 * w..(r0 + k) * w);
-            self.stream.memcpy_dtoh(&view, &mut host)?;
-        } else {
-            let first = VREC_D - r0;
-            let view = self.urec_dev.slice(r0 * w..VREC_D * w);
-            self.stream.memcpy_dtoh(&view, &mut host[..first * w])?;
-            let view = self.urec_dev.slice(0..(k - first) * w);
-            self.stream.memcpy_dtoh(&view, &mut host[first * w..])?;
-        }
-        let mut out = vec![Vec::with_capacity(k); w];
-        for r in 0..k {
-            for (c, o) in out.iter_mut().enumerate() {
-                o.push(host[r * w + c]);
-            }
-        }
-        Ok(out)
+        let dev = self.urec_dev.clone();
+        self.drain_rec(&dev, false)
     }
 
     pub fn run_steps(&mut self, n_steps: usize) -> Result<()> {
