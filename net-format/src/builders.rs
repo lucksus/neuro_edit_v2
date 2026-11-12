@@ -214,6 +214,26 @@ pub fn set_synapse_tau(net: &mut Network, src_g: &str, tgt_g: &str, tau: f64) {
     }
 }
 
+/// Uniform per-synapse tau (ms) on every synapse whose *source* is an
+/// inhibitory member of `group` — the slow-inhibition variant.
+pub fn set_synapse_tau_on_inhibitory(net: &mut Network, group: &str, tau: f64) {
+    let inh: std::collections::HashSet<u32> = match net.group(group) {
+        Some(g) => g
+            .members
+            .iter()
+            .copied()
+            .filter(|&m| net.neurons[m as usize].kind == NeuronKind::Inhibitory)
+            .collect(),
+        None => return,
+    };
+    let tau = tau.max(0.0) as f32;
+    for s in &mut net.synapses {
+        if inh.contains(&s.src) {
+            s.tau_ms = tau;
+        }
+    }
+}
+
 /// Gaussian per-synapse tau (ms) on src_g→tgt_g edges, seeded by `rng`.
 /// Negative draws clamp to 0 — the merged global-tau path.
 pub fn set_synapse_tau_dist(

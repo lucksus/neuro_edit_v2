@@ -47,6 +47,9 @@ let CONN_SCALING = 0.35;
 let CONN_LAMBDA = 90.0;
 let W_REC = 3.0;
 let W_IN = 12.0;
+let TAU_REC = 0.0;         // per-synapse trace tau on liquid->liquid
+                           // synapses (0 = merged 2ms global path)
+let TAU_INH = 0.0;         // per-synapse tau on inhibitory sources
 let PER_SRC = 24;          // liquid neurons each channel drives
 
 // ranges inside the series (ms): train / val / test
@@ -77,6 +80,8 @@ let build_liquid = |seed_val| {
     net.create_3d_grid("liquid", LIQ_SIDE, LIQ_SIDE, LIQ_SIDE, LIQ_SPACING);
     net.set_exc_inh("liquid", 0.2);
     net.create_connections("liquid", CONN_SCALING, CONN_LAMBDA, W_REC);
+    if TAU_REC > 0.0 { net.set_syn_tau("liquid", "liquid", TAU_REC); }
+    if TAU_INH > 0.0 { net.set_syn_tau_inh("liquid", TAU_INH); }
     let liq = net.neurons_of("liquid");
     let n_liq = liq.len();
     net.add_readout("ro", liq);
@@ -224,7 +229,8 @@ let eval_fit = |X, n_feat, y, Xt, yt, Xv, yv| {
 
 // ---------- run ----------
 print("=== detector: corr events on " + NCH + " ch, " + f3.call(EV_EVERY) +
-      "ms apart, readout +" + DELAY_MS + "ms/" + WIN_MS + "ms ===");
+      "ms apart, readout +" + DELAY_MS + "ms/" + WIN_MS + "ms, tau_rec=" +
+      TAU_REC + " tau_inh=" + TAU_INH + " ===");
 
 let rows = [];
 let null_draws = [];

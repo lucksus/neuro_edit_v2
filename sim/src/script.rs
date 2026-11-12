@@ -736,6 +736,21 @@ pub fn register_api(
             },
         );
     }
+    {
+        let (s, v) = (sim.clone(), net_version.clone());
+        engine.register_fn(
+            "set_syn_tau_inh",
+            move |n: &mut NetHandle,
+                  g: &str,
+                  tau: Dynamic|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                group_or_err(n, g)?;
+                invalidate(&s, &v);
+                builders::set_synapse_tau_on_inhibitory(&mut n.borrow_mut(), g, d_f64(&tau));
+                Ok(())
+            },
+        );
+    }
     engine.register_fn(
         "syn_tau",
         |n: &mut NetHandle, src: rhai::INT, tgt: rhai::INT| {
