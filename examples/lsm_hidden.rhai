@@ -6,21 +6,28 @@
 //
 //   sim --script examples/lsm_hidden.rhai [--cuda|--cpu]
 //
-// Loops over SEEDS, rebuilding the liquid per seed, and prints
-// accuracy/AUC for the trained readouts plus three controls:
-//   signal off  — same pipeline, strength 0 (no planted correlation)
-//   shuffled    — readouts retrained on permuted labels, averaged over
-//                 NPERM permutation pairs (each permutation and its label
-//                 complement). A single permutation is NOT a valid null:
-//                 the readout interpolates 200 windows in ~500 features, so
-//                 the fitted noise direction has a large random projection
-//                 onto the true class axis and one draw can sit anywhere in
-//                 [0,1] (measured single-draw sd ≈ 0.2 — that's what made
-//                 seeds 7/42 report AUC ~0.3 before). The mean over
-//                 permutations is the real null: exactly 0.5 by symmetry.
-//   raw         — per-source bit counts instead of liquid features
-// Summary table reports mean ± sd across seeds; the controls must sit at
-// 0.5 within noise.
+// Loops over SEEDS, rebuilding the liquid per seed, and evaluates four
+// feature pipelines on the SAME bit windows:
+//   liquid   — per-neuron spike rates of the 512-neuron liquid (~500 dims)
+//   signal off — liquid, but strength 0 (no planted correlation)
+//   raw      — per-source bit counts (8 dims, linear => must stay chance)
+//   cooc     — 28 pairwise coincidence features; the trivial non-liquid
+//              baseline that directly counts equal bits per source pair
+//
+// Null model: a real permutation test — the main labels are shuffled NPERM
+// times, the ridge refit each time, and the fraction of shuffled AUCs
+// reaching the observed AUC is the p-value (>=500 draws => resolution
+// ~0.002). Null mean/sd are reported too; a single permutation is NOT a
+// valid null (one draw's fitted noise direction can land anywhere in
+// [0,1], sd ~ 0.2).
+//
+// Splits: TRAIN_N train / VAL_N validation / TEST_N test windows from
+// three independent generator streams. Validation is never trained or
+// tuned on — it cross-checks the test number.
+//
+// Summary reports mean ± sd across seeds. Controls must sit at 0.5 within
+// noise; the coincidence baseline is reported honestly even where it
+// beats the liquid.
 
 // ---------- parameters ----------
 let SEEDS = [1, 7, 42, 2, 3, 4, 5, 6, 8, 9, 10, 11];
@@ -33,7 +40,7 @@ let STRENGTH = 0.8;          // planted-signal strength (pairwise shared coin)
 let LR = 0.5;                // delta-rule learn rate (proper rule, rate feats)
 let EPOCHS = 10;             // delta-rule passes over the training set
 let RIDGE_L = 1.0;
-let NPERM = 20;              // permutation pairs per shuffled control (40 draws)
+let NPERM = 500;             // label permutations per seed (permutation test)
 
 let LIQ_SIDE = 8;
 let LIQ_SPACING = 60.0;
@@ -45,6 +52,7 @@ let SHARED_PER_PAIR = 24;    // pool neurons shared inside a pair
 let PRIV_PER_SRC = 12;       // private neurons per source
 
 let TRAIN_N = 200;
+let VAL_N = 120;
 let TEST_N = 120;
 
 // ---------- helpers (anonymous fns capture the scope above) ----------
@@ -109,6 +117,25 @@ let counts_of = |m| {
     c
 };
 
+// Pairwise coincidence features: for each of the C(8,2)=28 source pairs,
+// the fraction of window steps with equal bits. Directly detects the
+// planted structure with NO liquid — the honest baseline to beat.
+let cooc_of = |m| {
+    let f = [];
+    for i in 0..N_SRC {
+        for j in (i + 1)..N_SRC {
+            let c = 0.0;
+            for t in 0..WIN_MS {
+                if m[t][i] == m[t][j] {
+                    c += 1.0;
+                }
+            }
+            f.push(c / WIN_MS);
+        }
+    }
+    f
+};
+
 // Fisher–Yates permutation of the label vector.
 let shuffled = |labels| {
     let l = labels;
@@ -123,37 +150,58 @@ let shuffled = |labels| {
     l
 };
 
-let complement = |labels| labels.map(|v| 1.0 - v);
+// Feature extractor selector for gen_set: 0 liquid, 1 raw counts, 2 cooc.
+let MODE_LIQ = 0;
+let MODE_RAW = 1;
+let MODE_COOC = 2;
+let feat_of = |mode, m| {
+    if mode == MODE_RAW {
+        counts_of.call(m)
+    } else if mode == MODE_COOC {
+        cooc_of.call(m)
+    } else {
+        play_window.call(m)
+    }
+};
 
-// Generate one feature set: [X flat, Y, Xte (array of rows), labs].
-let gen_set = |seed_val, strength, raw| {
+// Generate one feature set: [X flat, Y, Xte, labs, Xval, labsval].
+// Train/val/test windows come from three independent generator streams.
+let gen_set = |seed_val, strength, mode| {
     let gen_tr = rng_stream(seed_val + 11, N_SRC, P);
+    let gen_va = rng_stream(seed_val + 55, N_SRC, P);
     let gen_te = rng_stream(seed_val + 77, N_SRC, P);
     let X = [];
     let Y = [];
     let Xte = [];
     let labs = [];
+    let Xval = [];
+    let labsval = [];
     for it in 0..TRAIN_N {
         let label = it % 2;
         let m = gen_tr.window(WIN_MS, label, PAIRS, strength);
-        let f = if raw { counts_of.call(m) } else { play_window.call(m) };
-        for v in f {
+        for v in feat_of.call(mode, m) {
             X.push(v);
         }
         Y.push(label.to_float());
     }
+    for it in 0..VAL_N {
+        let label = it % 2;
+        let m = gen_va.window(WIN_MS, label, PAIRS, strength);
+        Xval.push(feat_of.call(mode, m));
+        labsval.push(label);
+    }
     for it in 0..TEST_N {
         let label = it % 2;
         let m = gen_te.window(WIN_MS, label, PAIRS, strength);
-        Xte.push(if raw { counts_of.call(m) } else { play_window.call(m) });
+        Xte.push(feat_of.call(mode, m));
         labs.push(label);
     }
-    [X, Y, Xte, labs]
+    [X, Y, Xte, labs, Xval, labsval]
 };
 
-// Fit both readouts on (X, ytr) and score Xte against labs.
-// Returns [delta_acc, delta_auc, ridge_acc, ridge_auc].
-let eval_fit = |X, n_feat, ytr, Xte, labs| {
+// Fit both readouts on (X, ytr) and score val+test against their labels.
+// Returns [delta_acc, delta_auc, ridge_acc, ridge_auc, ridge_auc_val].
+let eval_fit = |X, n_feat, ytr, Xte, labs, Xval, labsval| {
     let ro = delta_new(n_feat);
     ro.init_random(-0.02, 0.02);
     ro.set_proper(1);          // corrected delta rule; quirk mode can't grow
@@ -170,7 +218,22 @@ let eval_fit = |X, n_feat, ytr, Xte, labs| {
         sd.push(ro.output(f));
         sr.push(ridge_output(wr, f));
     }
-    [accuracy(sd, labs), auc(sd, labs), accuracy(sr, labs), auc(sr, labs)]
+    let sv = [];
+    for f in Xval {
+        sv.push(ridge_output(wr, f));
+    }
+    [accuracy(sd, labs), auc(sd, labs), accuracy(sr, labs), auc(sr, labs),
+     auc(sv, labsval)]
+};
+
+// Ridge AUC of one permutation draw (null model for the permutation test).
+let perm_auc = |X, n_feat, ytr_perm, Xte, labs| {
+    let w = fit_ridge(X, TRAIN_N, n_feat, ytr_perm, RIDGE_L);
+    let s = [];
+    for f in Xte {
+        s.push(ridge_output(w, f));
+    }
+    auc(s, labs)
 };
 
 let mean_of = |rows, k| {
@@ -189,23 +252,21 @@ let sd_of = |rows, k, m| {
 };
 let f3 = |v| (v * 1000.0).to_int() / 1000.0;
 
-let report = |name, r| {
-    print(name + "  delta: acc=" + f3.call(r[0]) + " auc=" + f3.call(r[1]) +
-          "  ridge: acc=" + f3.call(r[2]) + " auc=" + f3.call(r[3]));
-};
-
 // ---------- run ----------
-print("=== LSM hidden-correlation experiment ===");
+print("=== LSM hidden-correlation experiment (honest eval) ===");
 print("sources=" + N_SRC + " pairs=" + PAIRS.len() + " p=" + P +
       " win=" + WIN_MS + "ms strength=" + STRENGTH +
-      " train=" + TRAIN_N + " test=" + TEST_N +
-      " seeds=" + SEEDS.len() + " perm_pairs=" + NPERM);
+      " train=" + TRAIN_N + " val=" + VAL_N + " test=" + TEST_N +
+      " seeds=" + SEEDS.len() + " perms/seed=" + NPERM);
 
 let rows_main = [];
+let rows_val = [];         // main ridge AUC on the validation split
 let rows_off = [];
-let rows_shuf = [];
 let rows_raw = [];
-let null_draws = [];     // pooled single-draw ridge AUCs (null spread)
+let rows_cooc = [];
+let rows_p = [];           // per-seed permutation p-values
+let null_draws = [];       // pooled null ridge AUCs
+let null_above = 0;        // pooled count of null draws >= the observed auc
 let n_liq_last = 0;
 
 for si in 0..SEEDS.len() {
@@ -217,25 +278,32 @@ for si in 0..SEEDS.len() {
               " neurons, " + net.synapse_count() + " synapses");
     }
 
-    let S1 = gen_set.call(seed_val, STRENGTH, false);
-    let S0 = gen_set.call(seed_val, 0.0, false);
-    let SR = gen_set.call(seed_val, STRENGTH, true);
+    let S1 = gen_set.call(seed_val, STRENGTH, MODE_LIQ);
+    let S0 = gen_set.call(seed_val, 0.0, MODE_LIQ);
+    let SR = gen_set.call(seed_val, STRENGTH, MODE_RAW);
+    let SC = gen_set.call(seed_val, STRENGTH, MODE_COOC);
 
-    let r_main = eval_fit.call(S1[0], n_liq, S1[1], S1[2], S1[3]);
-    let r_off = eval_fit.call(S0[0], n_liq, S0[1], S0[2], S0[3]);
-    let r_raw = eval_fit.call(SR[0], N_SRC, SR[1], SR[2], SR[3]);
+    let r_main = eval_fit.call(S1[0], n_liq, S1[1], S1[2], S1[3], S1[4], S1[5]);
+    let r_off = eval_fit.call(S0[0], n_liq, S0[1], S0[2], S0[3], S0[4], S0[5]);
+    let r_raw = eval_fit.call(SR[0], N_SRC, SR[1], SR[2], SR[3], SR[4], SR[5]);
+    let r_cooc = eval_fit.call(SC[0], 28, SC[1], SC[2], SC[3], SC[4], SC[5]);
 
-    // shuffled-label control: NPERM permutations + complements
+    // Permutation test: NPERM label shuffles on the main feature set.
     let draws = [];
+    let above = 0;
     for b in 0..NPERM {
-        let ytr = shuffled.call(S1[1]);
-        draws.push(eval_fit.call(S1[0], n_liq, ytr, S1[2], S1[3]));
-        draws.push(eval_fit.call(S1[0], n_liq, complement.call(ytr), S1[2], S1[3]));
+        let a = perm_auc.call(S1[0], n_liq, shuffled.call(S1[1]), S1[2], S1[3]);
+        draws.push(a);
+        if a >= r_main[3] {
+            above += 1;
+            null_above += 1;
+        }
     }
-    let r_shuf = [mean_of.call(draws, 0), mean_of.call(draws, 1),
-                  mean_of.call(draws, 2), mean_of.call(draws, 3)];
+    let p_seed = (1.0 + above) / (NPERM + 1.0);
+    let nm = mean_of.call(draws.map(|v| [0, 0, 0, v]), 3);
+    let ns = sd_of.call(draws.map(|v| [0, 0, 0, v]), 3, nm);
     for d in draws {
-        null_draws.push(d[3]);
+        null_draws.push(d);
     }
 
     if si == 0 {
@@ -246,16 +314,19 @@ for si in 0..SEEDS.len() {
     }
 
     rows_main.push(r_main);
+    rows_val.push([0, 0, 0, r_main[4]]);
     rows_off.push(r_off);
-    rows_shuf.push(r_shuf);
     rows_raw.push(r_raw);
+    rows_cooc.push(r_cooc);
+    rows_p.push(p_seed);
 
     print("seed " + seed_val +
-          "  main auc=" + f3.call(r_main[3]) +
+          "  main auc=" + f3.call(r_main[3]) + " (val=" + f3.call(r_main[4]) +
+          ")  p=" + f3.call(p_seed) +
           "  off=" + f3.call(r_off[3]) +
-          "  shuf=" + f3.call(r_shuf[3]) + " (1-draw sd=" +
-            f3.call(sd_of.call(draws, 3, r_shuf[3])) + ")" +
-          "  raw=" + f3.call(r_raw[3]));
+          "  raw=" + f3.call(r_raw[3]) +
+          "  cooc=" + f3.call(r_cooc[3]) +
+          "  null=" + f3.call(nm) + "±" + f3.call(ns));
 }
 
 // ---------- summary ----------
@@ -269,19 +340,30 @@ let summary = |name, rows| {
     }
 };
 summary.call("main        ", rows_main);
+let mv = mean_of.call(rows_val, 3);
+print("main (val)   ridge_auc = " + f3.call(mv) +
+      " ± " + f3.call(sd_of.call(rows_val, 3, mv)));
 summary.call("signal off  ", rows_off);
-summary.call("shuffled    ", rows_shuf);
 summary.call("raw baseline", rows_raw);
+summary.call("cooc (28-d) ", rows_cooc);
 let nm = mean_of.call(null_draws.map(|v| [0, 0, 0, v]), 3);
-print("shuffled single-draw ridge AUC: mean=" + f3.call(nm) +
-      " sd=" + f3.call(sd_of.call(null_draws.map(|v| [0, 0, 0, v]), 3, nm)) +
-      " (the old control was ONE of these draws)");
+let ns = sd_of.call(null_draws.map(|v| [0, 0, 0, v]), 3, nm);
+let p_pool = (1.0 + null_above) / (null_draws.len() + 1.0);
+let pm = mean_of.call(rows_p.map(|v| [0, 0, 0, v]), 3);
+print("permutation null: mean=" + f3.call(nm) + " sd=" + f3.call(ns) +
+      "  pooled p=" + f3.call(p_pool) +
+      "  mean per-seed p=" + f3.call(pm) +
+      " (" + null_draws.len() + " draws)");
 
-// strength sweep on the last-built (last seed) liquid, for reference
+// strength sweep on the last-built liquid: liquid vs coincidence features
 print("\nstrength sweep (seed " + SEEDS[SEEDS.len() - 1] + " liquid):");
 for s in [0.0, 0.5, 0.8, 1.0] {
-    let Ss = gen_set.call(SEEDS[SEEDS.len() - 1], s, false);
-    let r = eval_fit.call(Ss[0], n_liq_last, Ss[1], Ss[2], Ss[3]);
-    print("  s=" + s + "  delta_auc=" + f3.call(r[1]) + " ridge_auc=" + f3.call(r[3]));
+    let Sl = gen_set.call(SEEDS[SEEDS.len() - 1], s, MODE_LIQ);
+    let rl = eval_fit.call(Sl[0], n_liq_last, Sl[1], Sl[2], Sl[3], Sl[4], Sl[5]);
+    let Sc = gen_set.call(SEEDS[SEEDS.len() - 1], s, MODE_COOC);
+    let rc = eval_fit.call(Sc[0], 28, Sc[1], Sc[2], Sc[3], Sc[4], Sc[5]);
+    print("  s=" + s +
+          "  liquid ridge_auc=" + f3.call(rl[3]) +
+          "  cooc ridge_auc=" + f3.call(rc[3]));
 }
 print("done");
