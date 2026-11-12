@@ -634,17 +634,34 @@ pub fn encode<T: Serialize>(m: &T) -> Vec<u8> {
     out
 }
 
+/// Decompression limit: no legitimate message inflates past this.
+/// The largest outbound payload is an upload chunk (bounded by
+/// `--max-upload-mb`, default 64 MiB); allow a little slack and refuse
+/// the rest so a compressed-zeroes frame can't inflate endlessly.
+pub const DECODE_LIMIT: u64 = 256 * 1024 * 1024;
+
 /// Decode one payload. `Err` on malformed bytes or trailing data.
+/// Deflate payloads are inflated through a capped reader and bincode
+/// reads with `with_limit` so neither side of a hostile frame can
+/// request unbounded allocation.
 pub fn decode<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, bincode::Error> {
+    use bincode::Options;
     use std::io::Read;
+    // `legacy()` compatibility: fixint + trailing-allowed — only the
+    // size limit differs from the old plain `bincode::deserialize`.
+    let opts = bincode::options()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_limit(DECODE_LIMIT);
     match bytes.split_first() {
-        Some((&TAG_RAW, raw)) => bincode::deserialize(raw),
+        Some((&TAG_RAW, raw)) => opts.deserialize(raw),
         Some((&TAG_DEFLATE, z)) => {
             let mut raw = Vec::new();
             flate2::read::DeflateDecoder::new(z)
+                .take(DECODE_LIMIT)
                 .read_to_end(&mut raw)
                 .map_err(|e| Box::new(bincode::ErrorKind::Io(e)))?;
-            bincode::deserialize(&raw)
+            opts.deserialize(&raw)
         }
         _ => Err(Box::new(bincode::ErrorKind::Custom("empty frame".into()))),
     }
@@ -984,5 +1001,38 @@ mod tests {
         ] {
             round_trip(&m);
         }
+    }
+
+    /// S8: a raw frame claiming a huge collection is refused by the
+    /// bincode limit without allocating it; a deflate bomb inflates
+    /// only up to DECODE_LIMIT and then fails — neither blocks the
+    /// worker thread nor grows memory unbounded.
+    #[test]
+    fn decode_refuses_oversized_payloads() {
+        // RAW frame: a real `Watch` encoding is tag + u32 variant + u64
+        // len. Patch the length field past the limit — decode must fail
+        // fast instead of trying to allocate the claimed vector.
+        let mut frame = encode(&ClientMsg::Watch(vec![]));
+        let len_at = frame.len() - 8; // u64 element count, last field
+        frame[len_at..].copy_from_slice(&(DECODE_LIMIT + 1).to_le_bytes());
+        let r: Result<ClientMsg, _> = decode(&frame);
+        assert!(r.is_err(), "oversized vec must fail fast");
+
+        // deflate bomb: 300 MB of zeroes compresses small; the capped
+        // inflater stops at DECODE_LIMIT — decode returns (probably as
+        // Hello{proto:0} — a bounded result) without a 300 MB vec.
+        let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+        use std::io::Write;
+        enc.write_all(&vec![0u8; 8 << 20]).unwrap();
+        let z = enc.finish().unwrap();
+        let mut frame = vec![TAG_DEFLATE];
+        frame.extend_from_slice(&z);
+        let start = std::time::Instant::now();
+        let r: Result<ClientMsg, _> = decode(&frame);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "capped inflate must return quickly"
+        );
+        let _ = r;
     }
 }

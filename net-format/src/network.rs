@@ -103,6 +103,30 @@ pub struct GridShape {
     pub axes: [u8; 3],
 }
 
+/// Upper bound on `w*h*d` for a single grid-create call (script or
+/// wire edit). Guards the `as usize`/`Vec::with_capacity` paths in the
+/// builders: a negative `rhai::INT` or a `u32::MAX` dim would otherwise
+/// request an absurd allocation and abort the worker.
+pub const MAX_GRID_TEXELS: u64 = 1 << 26; // ~67M neurons
+
+/// `Ok(total)` when all dims are non-negative (callers pass `i64` so a
+/// negative script arg is an error, not a giant `usize`) and their
+/// product fits `MAX_GRID_TEXELS`.
+pub fn check_grid_dims(dims: [i64; 3]) -> Result<u64, String> {
+    for d in dims {
+        if d <= 0 {
+            return Err(format!("grid dims {dims:?}: each must be >= 1"));
+        }
+    }
+    let total = dims[0] as u64 * dims[1] as u64 * dims[2] as u64;
+    if total > MAX_GRID_TEXELS {
+        return Err(format!(
+            "grid dims {dims:?} = {total} texels (limit {MAX_GRID_TEXELS})"
+        ));
+    }
+    Ok(total)
+}
+
 impl GridShape {
     /// Total texel count — must equal `members.len()` for a valid grid.
     pub fn texels(&self) -> usize {
@@ -634,6 +658,37 @@ impl Network {
                         "group '{}' references neuron {m} but only {n} exist",
                         g.name
                     ));
+                }
+            }
+            if let Some(grid) = &g.grid {
+                // axes must be a permutation of {0,1,2}: an index >= 3
+                // panics in world()/lattice_at() (out-of-bounds on pos),
+                // and duplicate axes fold two lattice dims onto one world
+                // axis.
+                let mut seen = [false; 3];
+                for (k, &a) in grid.axes.iter().enumerate() {
+                    if a as usize >= 3 || seen[a as usize] {
+                        return Err(format!(
+                            "group '{}' grid axes {a} at dim {k} is invalid \
+                             (want each of 0,1,2 exactly once)",
+                            g.name
+                        ));
+                    }
+                    seen[a as usize] = true;
+                }
+                if !(grid.spacing.is_finite() && grid.spacing != 0.0) {
+                    return Err(format!(
+                        "group '{}' grid spacing {} must be finite and non-zero",
+                        g.name, grid.spacing
+                    ));
+                }
+                for &d in &grid.dims {
+                    if d == 0 {
+                        return Err(format!(
+                            "group '{}' grid dims {:?} contains a zero",
+                            g.name, grid.dims
+                        ));
+                    }
                 }
             }
         }

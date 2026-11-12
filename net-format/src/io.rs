@@ -121,12 +121,20 @@ impl From<io::Error> for LoadError {
     }
 }
 
-pub fn save(net: &Network, path: impl AsRef<Path>) -> io::Result<()> {
-    let mut w = BufWriter::new(File::create(path)?);
+/// The exact bytes `save` would write — lets callers check a size or a
+/// quota before touching the filesystem.
+pub fn to_bytes(net: &Network) -> io::Result<Vec<u8>> {
+    let mut w = Vec::new();
     w.write_all(MAGIC)?;
     w.write_all(&FORMAT_VERSION.to_le_bytes())?;
+    let mut w = BufWriter::new(w);
     bincode::serialize_into(&mut w, net).map_err(io::Error::other)?;
-    w.flush()
+    w.flush()?;
+    Ok(w.into_inner().map_err(io::Error::other)?)
+}
+
+pub fn save(net: &Network, path: impl AsRef<Path>) -> io::Result<()> {
+    std::fs::write(path, to_bytes(net)?)
 }
 
 pub fn load(path: impl AsRef<Path>) -> Result<Network, LoadError> {
@@ -180,13 +188,18 @@ pub fn from_json(s: &str) -> Result<Network, LoadError> {
     Ok(net)
 }
 
-/// `.nsamples`: the original's samples file — one "time value" pair per line.
-pub fn save_samples(s: &crate::Samples, path: impl AsRef<Path>) -> io::Result<()> {
+/// `.nsamples` contents — the text `save_samples` writes.
+pub fn samples_to_string(s: &crate::Samples) -> String {
     let mut out = String::new();
     for (t, v) in s.times.iter().zip(&s.values) {
         out.push_str(&format!("{t} {v}\n"));
     }
-    std::fs::write(path, out)
+    out
+}
+
+/// `.nsamples`: the original's samples file — one "time value" pair per line.
+pub fn save_samples(s: &crate::Samples, path: impl AsRef<Path>) -> io::Result<()> {
+    std::fs::write(path, samples_to_string(s))
 }
 
 /// Load a `.nsamples` file ("time value" per line; blank/# lines ignored).
