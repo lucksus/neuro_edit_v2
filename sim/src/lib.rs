@@ -198,10 +198,7 @@ impl Sim {
     /// Play a per-step series on `input` starting at the current step.
     pub fn play_input(&mut self, input: usize, series: Vec<f32>) {
         match self {
-            Sim::Cpu(s) => {
-                s.stimulus.series[input] = series;
-                s.stimulus.play_start = s.t;
-            }
+            Sim::Cpu(s) => s.stimulus.play(input, s.t, series),
             #[cfg(feature = "cuda")]
             Sim::Cuda(s) => s.play_input(input, series),
         }

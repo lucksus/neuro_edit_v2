@@ -467,8 +467,7 @@ impl CudaSim {
     }
 
     pub fn play_input(&mut self, input: usize, series: Vec<f32>) {
-        self.stimulus.series[input] = series;
-        self.stimulus.play_start = self.t;
+        self.stimulus.play(input, self.t, series);
     }
 
     pub fn set_external(&mut self, neuron: usize, amps: f32) {

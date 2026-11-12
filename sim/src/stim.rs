@@ -11,8 +11,9 @@ pub struct Stimulus {
     pub constants: Vec<f32>,
     /// input index -> time series (one value per step)
     pub series: Vec<Vec<f32>>,
-    /// step at which series playback starts
-    pub play_start: u64,
+    /// input index -> step at which that input's series playback starts.
+    /// Per-input: playing input B must not move input A's playhead.
+    pub play_start: Vec<u64>,
 }
 
 /// Per-neuron stimulus routing, flattened for the simulators:
@@ -57,15 +58,29 @@ impl Stimulus {
         Stimulus {
             constants: vec![0.0; net.inputs.len()],
             series: vec![Vec::new(); net.inputs.len()],
-            play_start: 0,
+            play_start: vec![0; net.inputs.len()],
         }
+    }
+
+    /// Start playing `series` on input `k` at step `t` — other inputs'
+    /// playheads are unaffected.
+    pub fn play(&mut self, k: usize, t: u64, series: Vec<f32>) {
+        if k >= self.series.len() {
+            self.series.resize(k + 1, Vec::new());
+        }
+        if k >= self.play_start.len() {
+            self.play_start.resize(k + 1, 0);
+        }
+        self.series[k] = series;
+        self.play_start[k] = t;
     }
 
     /// Value of input `k` at step `t` (0 outside a played series' range).
     pub fn value(&self, k: usize, t: u64) -> f32 {
         if let Some(series) = self.series.get(k) {
             if !series.is_empty() {
-                let idx = t.wrapping_sub(self.play_start) as usize;
+                let start = self.play_start.get(k).copied().unwrap_or(0);
+                let idx = t.wrapping_sub(start) as usize;
                 return if idx < series.len() { series[idx] } else { 0.0 };
             }
         }
