@@ -107,6 +107,10 @@ pub struct EditorApp {
     /// U1: `Shared::err_seq` at the last console-open — the Console
     /// button gets an unread dot while unseen errors exist.
     err_seq_seen: u64,
+    /// U5: last successful connect (url, session token) — the
+    /// disconnect banner's reconnect button.
+    connect_url: String,
+    connect_tok: String,
     pub(crate) show_console: bool,
     pub(crate) show_plots: bool,
     pub(crate) show_inspector: bool,
@@ -581,6 +585,8 @@ impl EditorApp {
             hist_idx: None,
             last_error: None,
             err_seq_seen: 0,
+            connect_url: String::new(),
+            connect_tok: String::new(),
             show_console: wins.console,
             show_plots: wins.plots,
             show_inspector: wins.inspector,
@@ -1488,7 +1494,7 @@ impl EditorApp {
                         let btn = if dot {
                             icons::button(
                                 icon,
-                                egui::RichText::new(format!("{label} ●"))
+                                egui::RichText::new(format!("{label} !"))
                                     .color(egui::Color32::LIGHT_RED),
                             )
                             .selected(*flag)
@@ -1801,6 +1807,49 @@ impl EditorApp {
                 ui.add(egui::Label::new(crate::view::mode_hint(self.mode)).wrap());
             }
         });
+    }
+
+    /// U5: transport dropped — an explicit banner, not a silent freeze.
+    /// Native (login-mode) offers a reconnect using the stored session;
+    /// browser reloads (the cookie session survives).
+    fn disconnect_banner(&mut self, ctx: &egui::Context) {
+        if !show_disconnect_banner(
+            self.ctl.shared.read().unwrap().connected,
+            self.login.is_some(),
+        ) {
+            return;
+        }
+        egui::Window::new("disconnected")
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 8.0))
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("connection to server lost")
+                            .color(egui::Color32::LIGHT_RED),
+                    );
+                    #[cfg(target_arch = "wasm32")]
+                    if ui.button("reconnect").clicked() {
+                        if let Some(w) = web_sys::window() {
+                            let _ = w.location().reload();
+                        }
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if ui
+                        .add_enabled(!self.connect_url.is_empty(), egui::Button::new("reconnect"))
+                        .clicked()
+                    {
+                        match SimCtl::connect_secure(&self.connect_url, &self.connect_tok) {
+                            Ok(ctl) => {
+                                self.ctl = ctl;
+                                self.status = "reconnected".into();
+                            }
+                            Err(e) => self.status = format!("reconnect: {e}"),
+                        }
+                    }
+                });
+            });
     }
 
     fn inspector(&mut self, ctx: &egui::Context) {
@@ -2410,6 +2459,8 @@ impl EditorApp {
                 match SimCtl::connect_secure(url, &tok) {
                     Ok(ctl) => {
                         self.ctl = ctl;
+                        self.connect_url = url.to_string();
+                        self.connect_tok = tok;
                         self.status = "connected".into();
                         return;
                     }
@@ -2450,6 +2501,8 @@ impl EditorApp {
         match done {
             Some(Ok((ctl, token))) => {
                 self.ctl = ctl;
+                self.connect_url = lg.url.clone();
+                self.connect_tok = token.clone();
                 if lg.remember {
                     self.saved_token = Some((lg.url.clone(), token));
                 }
@@ -3850,6 +3903,7 @@ impl eframe::App for EditorApp {
         self.toolbar(ctx);
         self.status_bar(ctx);
         self.hints_bar(ctx);
+        self.disconnect_banner(ctx);
         self.inspector(ctx);
         self.console(ctx);
         self.script_window(ctx);
@@ -3931,6 +3985,12 @@ fn toolbar_group(
 /// resizes get pulled back on-screen automatically.
 fn app_win<'open>(ctx: &egui::Context, title: impl Into<egui::WidgetText>) -> egui::Window<'open> {
     egui::Window::new(title).constrain_to(usable_rect(ctx))
+}
+
+/// U5: the banner shows only on a real mid-session disconnect — not
+/// while the login dialog is up (there is no session to lose yet).
+fn show_disconnect_banner(connected: bool, login_open: bool) -> bool {
+    !connected && !login_open
 }
 
 /// Parent dir of a path for a `ListFiles` request ("." at the top).
@@ -4120,6 +4180,13 @@ mod tests {
         g.pos.truncate(3);
         assert!(!example_geo_covers(Some(7), Some(&g), &ids));
         assert!(!example_geo_covers(Some(7), None, &ids));
+    }
+
+    #[test]
+    fn disconnect_banner_gating() {
+        assert!(show_disconnect_banner(false, false));
+        assert!(!show_disconnect_banner(true, false));
+        assert!(!show_disconnect_banner(false, true));
     }
 
     #[test]

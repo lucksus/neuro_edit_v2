@@ -203,6 +203,12 @@ impl SimCtl {
                         fold.apply(&mut w, m);
                     }
                 }
+                // U5: the socket died — the banner offers a reconnect.
+                if let Ok(mut w) = sh.write() {
+                    w.connected = false;
+                    w.dirty_seq += 1;
+                    w.log("! connection to server closed");
+                }
             })
             .expect("spawn ws reader");
 
@@ -319,6 +325,8 @@ impl SimCtl {
         let sh = shared.clone();
         let onclose = Closure::wrap(Box::new(move |_: web_sys::CloseEvent| {
             if let Ok(mut w) = sh.write() {
+                w.connected = false;
+                w.dirty_seq += 1;
                 w.log("! connection to server closed");
             }
         }) as Box<dyn FnMut(web_sys::CloseEvent)>);

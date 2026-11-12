@@ -178,6 +178,9 @@ pub struct Shared {
     /// Unread-console indicator: bumped on Errors; the app clears it
     /// when the console is opened (U1).
     pub err_seq: u64,
+    /// U5: the transport is live. Native readers set it false on recv
+    /// failure; wasm onclose does. The app shows a reconnect banner.
+    pub connected: bool,
 }
 
 /// Snapshot of an `OpenJob` reply for the jobs panel.
@@ -220,6 +223,7 @@ impl Default for Shared {
             loaded_ack: None,
             last_error: None,
             err_seq: 0,
+            connected: true,
         }
     }
 }
@@ -795,16 +799,10 @@ mod tests {
         // unrelated errors don't touch the counter
         fold.apply(&mut sh, proto::ServerMsg::Error("disk full".into()));
         assert_eq!(sh.edits_in_flight, 1);
-        fold.apply(
-            &mut sh,
-            proto::ServerMsg::Error("edit refused: bad".into()),
-        );
+        fold.apply(&mut sh, proto::ServerMsg::Error("edit refused: bad".into()));
         assert_eq!(sh.edits_in_flight, 0);
         // never goes negative
-        fold.apply(
-            &mut sh,
-            proto::ServerMsg::Error("edit refused: bad".into()),
-        );
+        fold.apply(&mut sh, proto::ServerMsg::Error("edit refused: bad".into()));
         assert_eq!(sh.edits_in_flight, 0);
         // and a fresh edit now bases on the true version again
         sh.edits_in_flight += 1;
