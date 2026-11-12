@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>neuro_edit v2</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #101014; overflow: hidden; }
+  #ne_canvas { width: 100%; height: 100%; display: block; }
+  #loading {
+    position: fixed; inset: 0; display: grid; place-items: center;
+    color: #888; font: 14px/1.5 monospace;
+  }
+</style>
+</head>
+<body>
+<canvas id="ne_canvas"></canvas>
+<div id="loading">loading neuro_edit v2…</div>
+<script type="module">
+  import init from './editor.js';
+  init().finally(() => document.getElementById('loading')?.remove());
+</script>
+</body>
+</html>

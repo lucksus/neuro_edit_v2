@@ -1,48 +1,87 @@
-//! Local transport: the sim worker runs `sim::serve::run` on a thread,
-//! speaking `ClientMsg`/`ServerMsg` over channels — the same protocol a
-//! remote transport would use. A pump thread folds `ServerMsg`s into
-//! `Shared`, so the UI keeps one read model regardless of where the sim
-//! lives.
+//! The editor's wire endpoint: `send` accepts `ClientMsg`s, a fold keeps
+//! `Shared` current from `ServerMsg`s. Two transports, one API:
 //!
-//! `SimCtl::send_edit` attaches the `base` version the server checks
-//! (stale edits are refused + resynced); `Shared::net_version` tracks
-//! the last-applied version and `edits_in_flight` lets several edits go
-//! out in one frame with optimistic bases.
+//! - **native** (`SimCtl::start[_cfg]` for the in-process worker, or
+//!   `SimCtl::connect` for a `server` over TCP+tungstenite WebSocket);
+//! - **wasm** (`SimCtl::connect` over the browser `WebSocket` — the only
+//!   transport there; sending before `onopen` queues).
+//!
+//! `send_edit` attaches the `base` version the server checks (stale
+//! edits are refused + resynced); `Shared::net_version` tracks the
+//! last-applied version and `edits_in_flight` lets several edits go out
+//! in one frame with optimistic bases.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, RwLock};
-use std::thread::JoinHandle;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc;
+use std::sync::Arc;
+#[cfg(any(feature = "native", target_arch = "wasm32"))]
+use std::sync::RwLock;
 
-use net_format::Network;
-use proto::{ClientMsg, NetEdit, ServerEvent};
-use sim::{BackendKind, SimConfig};
+use proto::{ClientMsg, NetEdit};
 
-use crate::snap::{Fold, Shared, SharedRef};
+#[cfg(any(feature = "native", target_arch = "wasm32"))]
+use crate::snap::Shared;
+use crate::snap::SharedRef;
 
 pub use proto;
-pub use sim::serve::{geo_from_net, PLANE_TAU_MS};
+
+pub use proto::PLANE_TAU_MS;
+#[cfg(feature = "native")]
+pub use sim::serve::geo_from_net;
 
 pub struct SimCtl {
+    /// Request channel — the transport's writer drains it (native only;
+    /// wasm sends hit the browser socket directly from `send`).
+    #[cfg(not(target_arch = "wasm32"))]
     tx: mpsc::Sender<(u64, ClientMsg)>,
     pub shared: SharedRef,
     /// Ask a running chunked run to stop early.
     pub abort: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
-    pump: Option<JoinHandle<()>>,
+    imp: Imp,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct Imp {
+    worker: Option<std::thread::JoinHandle<()>>,
+    pump: Option<std::thread::JoinHandle<()>>,
     /// Remote only: kills the socket so the pump's `recv` unblocks.
     remote_shutdown: Option<std::net::TcpStream>,
 }
 
+#[cfg(target_arch = "wasm32")]
+struct Imp {
+    ws: web_sys::WebSocket,
+    /// Encoded frames sent before `onopen`.
+    queue: std::rc::Rc<std::cell::RefCell<Vec<Vec<u8>>>>,
+    // Callbacks kept alive for the connection's life.
+    _onmsg: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::MessageEvent)>,
+    _onopen: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>,
+    _onclose: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::CloseEvent)>,
+}
+
 impl SimCtl {
-    pub fn start(net: Network, backend: BackendKind, seed: u64) -> SimCtl {
-        Self::start_cfg(net, backend, seed, SimConfig::default())
+    #[cfg(feature = "native")]
+    pub fn start(net: net_format::Network, backend: sim::BackendKind, seed: u64) -> SimCtl {
+        Self::start_cfg(net, backend, seed, sim::SimConfig::default())
     }
 
-    pub fn start_cfg(net: Network, backend: BackendKind, seed: u64, cfg: SimConfig) -> SimCtl {
+    /// Local transport: the sim worker runs `sim::serve::run` on a thread,
+    /// speaking `ClientMsg`/`ServerMsg` over channels — the same protocol
+    /// a remote transport uses. A pump thread folds `ServerMsg`s into
+    /// `Shared`, so the UI keeps one read model regardless of where the
+    /// sim lives.
+    #[cfg(feature = "native")]
+    pub fn start_cfg(
+        net: net_format::Network,
+        backend: sim::BackendKind,
+        seed: u64,
+        cfg: sim::SimConfig,
+    ) -> SimCtl {
         let shared: SharedRef = Arc::new(RwLock::new(Shared::default()));
         let abort = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel::<(u64, ClientMsg)>();
-        let (etx, erx) = mpsc::channel::<ServerEvent>();
+        let (etx, erx) = mpsc::channel::<proto::ServerEvent>();
 
         let ab = abort.clone();
         let worker = std::thread::Builder::new()
@@ -70,7 +109,7 @@ impl SimCtl {
         let pump = std::thread::Builder::new()
             .name("sim-fold".into())
             .spawn(move || {
-                let mut fold = Fold::default();
+                let mut fold = crate::snap::Fold::default();
                 for ev in erx {
                     if let Ok(mut w) = sh.write() {
                         fold.apply(&mut w, ev.msg);
@@ -83,9 +122,11 @@ impl SimCtl {
             tx,
             shared,
             abort,
-            worker: Some(worker),
-            pump: Some(pump),
-            remote_shutdown: None,
+            imp: Imp {
+                worker: Some(worker),
+                pump: Some(pump),
+                remote_shutdown: None,
+            },
         };
         // hydrate (the worker also broadcasts an initial Geo, but a
         // targeted Hello/Status keeps the handshake uniform with remote)
@@ -95,9 +136,9 @@ impl SimCtl {
         ctl
     }
 
-    /// Remote transport: the same protocol over WebSocket. `addr` is a
-    /// `server` process's bind address (`host:port`). The UI sees the
-    /// same `Shared` — nothing downstream knows the sim is remote.
+    /// Remote transport, native: the same protocol over TCP+tungstenite.
+    /// `addr` is a `server` process's bind address (`host:port`).
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     pub fn connect(addr: &str) -> anyhow::Result<SimCtl> {
         let shared: SharedRef = Arc::new(RwLock::new(Shared::default()));
         let abort = Arc::new(AtomicBool::new(false));
@@ -123,7 +164,7 @@ impl SimCtl {
         let reader = std::thread::Builder::new()
             .name("sim-ws-rx".into())
             .spawn(move || {
-                let mut fold = Fold::default();
+                let mut fold = crate::snap::Fold::default();
                 while let Ok(m) = wrecv.recv() {
                     if let Ok(mut w) = sh.write() {
                         fold.apply(&mut w, m);
@@ -136,9 +177,11 @@ impl SimCtl {
             tx,
             shared,
             abort,
-            worker: Some(writer),
-            pump: Some(reader),
-            remote_shutdown,
+            imp: Imp {
+                worker: Some(writer),
+                pump: Some(reader),
+                remote_shutdown,
+            },
         };
         ctl.send(ClientMsg::Hello {
             proto: proto::PROTO_VERSION,
@@ -146,7 +189,79 @@ impl SimCtl {
         Ok(ctl)
     }
 
+    /// Remote transport, wasm: the browser `WebSocket` speaks the same
+    /// bincode frames. No threads — `onmessage` folds straight into
+    /// `Shared`; sends before `onopen` queue up.
+    #[cfg(target_arch = "wasm32")]
+    pub fn connect(addr: &str) -> anyhow::Result<SimCtl> {
+        use wasm_bindgen::{closure::Closure, JsCast};
+        let url = format!("ws://{addr}");
+        let ws = web_sys::WebSocket::new(&url).map_err(|e| anyhow::anyhow!("ws {url}: {e:?}"))?;
+        ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
+
+        let shared: SharedRef = Arc::new(RwLock::new(Shared::default()));
+        let abort = Arc::new(AtomicBool::new(false));
+        let queue = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Vec<u8>>::new()));
+
+        let sh = shared.clone();
+        let onmsg = Closure::wrap(Box::new(move |e: web_sys::MessageEvent| {
+            if let Ok(buf) = e.data().dyn_into::<js_sys::ArrayBuffer>() {
+                let bytes = js_sys::Uint8Array::new(&buf).to_vec();
+                if let Ok(m) = proto::decode::<proto::ServerMsg>(&bytes) {
+                    if let Ok(mut w) = sh.write() {
+                        FOLD.with(|f| f.borrow_mut().apply(&mut w, m));
+                    }
+                }
+            }
+        }) as Box<dyn FnMut(web_sys::MessageEvent)>);
+        ws.set_onmessage(Some(onmsg.as_ref().unchecked_ref()));
+
+        let (q, ws_open) = (queue.clone(), ws.clone());
+        let onopen = Closure::wrap(Box::new(move |_: web_sys::Event| {
+            for b in q.borrow_mut().drain(..) {
+                let _ = ws_open.send_with_u8_array(&b);
+            }
+        }) as Box<dyn FnMut(web_sys::Event)>);
+        ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+
+        let sh = shared.clone();
+        let onclose = Closure::wrap(Box::new(move |_: web_sys::CloseEvent| {
+            if let Ok(mut w) = sh.write() {
+                w.log("! connection to server closed");
+            }
+        }) as Box<dyn FnMut(web_sys::CloseEvent)>);
+        ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
+
+        let ctl = SimCtl {
+            shared,
+            abort,
+            imp: Imp {
+                ws,
+                queue,
+                _onmsg: onmsg,
+                _onopen: onopen,
+                _onclose: onclose,
+            },
+        };
+        ctl.send(ClientMsg::Hello {
+            proto: proto::PROTO_VERSION,
+        });
+        Ok(ctl)
+    }
+
+    /// Send a request — native queues it for the transport writer; wasm
+    /// hits the browser socket directly (queued until `onopen`).
     pub fn send(&self, c: ClientMsg) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let b = proto::encode(&c);
+            if self.imp.ws.ready_state() == web_sys::WebSocket::OPEN {
+                let _ = self.imp.ws.send_with_u8_array(&b);
+            } else {
+                self.imp.queue.borrow_mut().push(b);
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = self.tx.send((0, c));
     }
 
@@ -168,24 +283,39 @@ impl SimCtl {
     /// drains. (The queued command alone can't interrupt a blocked eval.)
     pub fn abort_now(&self) {
         self.abort.store(true, Ordering::Relaxed);
-        let _ = self.tx.send((0, ClientMsg::Abort));
+        self.send(ClientMsg::Abort);
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for SimCtl {
     fn drop(&mut self) {
         let _ = self.tx.send((0, ClientMsg::Bye));
-        if let Some(h) = self.worker.take() {
+        if let Some(h) = self.imp.worker.take() {
             let _ = h.join();
         }
         // remote: the server never closes our socket — kill it so the
         // reader's blocking recv returns an error and exits
-        if let Some(s) = &self.remote_shutdown {
+        if let Some(s) = &self.imp.remote_shutdown {
             let _ = s.shutdown(std::net::Shutdown::Both);
         }
         // worker gone → event channel closed → pump exits
-        if let Some(h) = self.pump.take() {
+        if let Some(h) = self.imp.pump.take() {
             let _ = h.join();
         }
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for SimCtl {
+    fn drop(&mut self) {
+        let _ = self.imp.ws.close();
+    }
+}
+
+// The fold lives on the one browser thread — TLS avoids a shared cell.
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static FOLD: std::cell::RefCell<crate::snap::Fold> =
+        std::cell::RefCell::new(crate::snap::Fold::default());
 }

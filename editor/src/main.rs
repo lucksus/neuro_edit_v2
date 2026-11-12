@@ -1,13 +1,21 @@
 //! neuro_edit v2 editor — egui/wgpu 3D editor + sim worker + Rhai console.
 //!
 //! GUI:      `editor [--net file.ne2] [--cpu|--cuda]`
+//! Remote:   `editor --connect host:port`
 //! Headless: `editor --screenshot out.png [--net file.ne2] [--script x.rhai]
 //!           [--after-ms 500] [--size 1280x800]`
+//! Browser:  `cargo build --target wasm32-unknown-unknown -p editor
+//!           --no-default-features --features web` + wasm-bindgen, served
+//!           by `server --web` — connects back to the serving host.
 
+#[cfg(feature = "native")]
 use clap::Parser;
+#[cfg(feature = "native")]
 use eframe::egui;
+#[cfg(feature = "native")]
 use sim::BackendKind;
 
+#[cfg(feature = "native")]
 #[derive(Parser)]
 #[command(name = "editor", about = "neuro_edit v2 editor")]
 struct Cli {
@@ -65,6 +73,7 @@ struct Cli {
     seed: u64,
 }
 
+#[cfg(feature = "native")]
 fn backend_of(cli: &Cli) -> BackendKind {
     if cli.cpu {
         BackendKind::Cpu
@@ -73,6 +82,7 @@ fn backend_of(cli: &Cli) -> BackendKind {
     }
 }
 
+#[cfg(feature = "native")]
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let backend = backend_of(&cli);
@@ -168,4 +178,73 @@ fn main() -> anyhow::Result<()> {
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))
+}
+
+/// Stub for `cargo check -p editor --no-default-features` on native —
+/// the real entries are `native` (local worker + CLI) or `web` (wasm).
+#[cfg(all(not(feature = "native"), not(target_arch = "wasm32")))]
+fn main() {
+    eprintln!("editor built without the `native` feature — nothing to run");
+}
+
+/// Browser entry: the page is served by `server --web`; the editor
+/// connects its wire transport back to the serving host. WebGPU only —
+/// the scene pipelines need storage buffers, so a WebGL2 fallback would
+/// fail later anyway; when no adapter exists we say so on the page.
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    use wasm_bindgen::JsCast;
+
+    let window = web_sys::window().expect("window");
+    let document = window.document().expect("document");
+    let canvas = document
+        .get_element_by_id("ne_canvas")
+        .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+        .expect("<canvas id=ne_canvas>");
+    let host = window
+        .location()
+        .host()
+        .unwrap_or_else(|_| "127.0.0.1:3090".into());
+
+    let mut opts = eframe::WebOptions::default();
+    opts.wgpu_options.wgpu_setup =
+        eframe::egui_wgpu::WgpuSetup::CreateNew(eframe::egui_wgpu::WgpuSetupCreateNew {
+            instance_descriptor: wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::BROWSER_WEBGPU,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+    wasm_bindgen_futures::spawn_local(async move {
+        let runner = eframe::WebRunner::new();
+        let r = runner
+            .start(
+                canvas,
+                opts,
+                Box::new(move |cc| {
+                    let ctl = editor::simctl::SimCtl::connect(&host)
+                        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+                    cc.egui_ctx.set_visuals(eframe::egui::Visuals::dark());
+                    Ok(Box::new(editor::app::EditorApp::new(ctl, cc.storage)))
+                }),
+            )
+            .await;
+        if let Err(e) = r {
+            let msg = format!(
+                "neuro_edit v2 needs WebGPU (the 3D view uses storage buffers). \
+                 Adapter/device request failed: {e:?}"
+            );
+            if let Some(w) = web_sys::window() {
+                if let Some(d) = w.document() {
+                    if let Some(b) = d.body() {
+                        b.set_inner_html(&format!(
+                            "<div style='color:#ddd;background:#181818;\
+                             font:15px/1.6 monospace;padding:3em'>{msg}</div>"
+                        ));
+                    }
+                }
+            }
+        }
+    });
 }

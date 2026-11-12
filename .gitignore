@@ -6,3 +6,4 @@ docs/screenshots/*.png
 !docs/screenshots/grid_plane.png
 !docs/screenshots/grid_plane_3d.png
 !docs/screenshots/lsm_plane.png
+editor/dist-web/

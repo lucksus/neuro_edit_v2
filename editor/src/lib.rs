@@ -7,6 +7,7 @@ pub mod gpu;
 pub mod icons;
 pub mod plane;
 pub mod scene;
+#[cfg(feature = "native")]
 pub mod shot;
 pub mod simctl;
 pub mod snap;
