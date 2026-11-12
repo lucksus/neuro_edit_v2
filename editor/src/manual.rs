@@ -44,7 +44,7 @@ pub fn render(ui: &mut egui::Ui, md: &str) {
             continue;
         }
         if in_code {
-            ui.monospace(line);
+            ui.add(egui::Label::new(egui::RichText::new(line).monospace()).wrap());
             continue;
         }
         let (h, rest) = match line.strip_prefix('#') {
@@ -61,10 +61,10 @@ pub fn render(ui: &mut egui::Ui, md: &str) {
             let text = bullet.unwrap_or(rest);
             match h {
                 1 => {
-                    ui.heading(text);
+                    ui.add(egui::Label::new(egui::RichText::new(text).heading()).wrap());
                 }
                 2 | 3 => {
-                    ui.label(egui::RichText::new(text).strong());
+                    ui.add(egui::Label::new(egui::RichText::new(text).strong()).wrap());
                 }
                 _ => {
                     rich_line(ui, text);
@@ -75,6 +75,9 @@ pub fn render(ui: &mut egui::Ui, md: &str) {
 }
 
 /// Split `**bold**` / `` `code` `` spans into RichText fragments.
+/// Each fragment label wraps, so a long paragraph can't run off the
+/// window edge (`horizontal_wrapped` gives a wrapped label the rest
+/// of the row and it breaks there).
 fn rich_line(ui: &mut egui::Ui, s: &str) {
     let mut buf = String::new();
     let mut bold = false;
@@ -90,7 +93,7 @@ fn rich_line(ui: &mut egui::Ui, s: &str) {
         if code {
             t = t.monospace();
         }
-        ui.label(t);
+        ui.add(egui::Label::new(t).wrap());
     };
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
@@ -127,5 +130,102 @@ mod tests {
         let controls = PAGES.iter().find(|p| p.title == "Controls").unwrap();
         assert!(controls.md.contains("Shift"));
         assert!(controls.md.contains("X / Y / Z"));
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    /// The rendered page must wrap inside the window — a long body line
+    /// must never produce a text galley wider than the available width
+    /// (egui's Shape::Text galley size is pre-clip, so overflow shows up
+    /// here even when the window's own clip rect would hide it on screen).
+    #[test]
+    fn body_text_wraps_to_window() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(360.0, 480.0),
+            )),
+            ..Default::default()
+        };
+        let md = "One deliberately long body sentence that cannot possibly fit on a single row at this narrow window width, so wrapping is the only correct outcome for the renderer to choose.";
+        let mut out = ctx.run(input.clone(), |ctx| {
+            egui::Window::new("Manual").show(ctx, |ui| render(ui, md));
+        });
+        // a second frame so the window has laid out and painted content
+        out = ctx.run(input, |ctx| {
+            egui::Window::new("Manual").show(ctx, |ui| render(ui, md));
+        });
+        let mut widest = 0.0f32;
+        for shape in &out.shapes {
+            if let egui::epaint::Shape::Text(t) = &shape.shape {
+                widest = widest.max(t.galley.size().x);
+            }
+        }
+        assert!(widest > 0.0, "no text was painted at all");
+        assert!(
+            widest <= 340.0,
+            "a body line painted {widest}px wide in a 360px window — text is not wrapping"
+        );
+    }
+    /// Any non-ASCII char in a user-visible string must exist in the bundled
+    /// fonts, or egui paints a tofu box. Manual prose renders proportional,
+    /// fenced code monospace; `src/*.rs` lines containing a `"` are treated
+    /// as string-bearing and checked against the proportional family (the
+    /// strict one). Comment-only lines carry no `"` and are skipped.
+    #[test]
+    fn ui_strings_stay_in_font_coverage() {
+        let fonts = egui::epaint::Fonts::new(
+            1.0,
+            1024,
+            egui::epaint::AlphaFromCoverage::Linear,
+            egui::FontDefinitions::default(),
+        );
+        let prop = egui::FontId::proportional(14.0);
+        let mono = egui::FontId::monospace(13.0);
+        let mut bad = Vec::new();
+
+        for page in PAGES {
+            let mut fenced = false;
+            for (ln, line) in page.md.lines().enumerate() {
+                if line.trim_start().starts_with("```") {
+                    fenced = !fenced;
+                    continue;
+                }
+                let id = if fenced { &mono } else { &prop };
+                for c in line.chars().filter(|c| !c.is_ascii()) {
+                    if !fonts.has_glyph(id, c) {
+                        bad.push(format!("{}:{} {c:?}", page.title, ln + 1));
+                    }
+                }
+            }
+        }
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for e in std::fs::read_dir(&src).unwrap() {
+            let e = e.unwrap();
+            if e.path().extension().and_then(|x| x.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(e.path()).unwrap();
+            for (ln, line) in text.lines().enumerate() {
+                if !line.contains('"') {
+                    continue;
+                }
+                for c in line.chars().filter(|c| !c.is_ascii()) {
+                    if !fonts.has_glyph(&prop, c) {
+                        bad.push(format!("{}:{} {c:?}", e.path().display(), ln + 1));
+                    }
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "glyphs missing from bundled fonts:\n{}",
+            bad.join("\n")
+        );
     }
 }

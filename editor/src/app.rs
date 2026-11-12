@@ -2354,8 +2354,8 @@ impl EditorApp {
         let mut open = self.show_manual;
         egui::Window::new("Manual")
             .open(&mut open)
-            .default_size([560.0, 420.0])
-            .default_pos([80.0, 70.0])
+            .default_size([640.0, 520.0])
+            .default_pos([90.0, 60.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
