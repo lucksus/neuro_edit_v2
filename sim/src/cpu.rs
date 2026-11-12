@@ -35,6 +35,21 @@ pub struct CpuSim {
     /// delay ring: ring[slot * n + i], D = ring_depth
     pub ring: Vec<f32>,
     pub d: usize,
+
+    // --- per-synapse current traces (only when some synapse has tau_ms>0) ---
+    /// custom-id of each CSR synapse, u32::MAX = merged global path
+    pub xsyn_map: Vec<u32>,
+    /// trace value per custom synapse (`x += w` on arrival, `x *= xd` each step)
+    pub xsyn: Vec<f32>,
+    /// per-step decay `1 - dt/tau` per custom synapse
+    pub xdecay: Vec<f32>,
+    /// weight added on arrival per custom synapse
+    pub xw: Vec<f32>,
+    /// arrival event lists: xring[slot] = custom ids arriving that step
+    pub xring: Vec<Vec<u32>>,
+    /// target-major rows for the input sum: xt_ptr[i]..xt_ptr[i+1] of xt_idx
+    pub xt_ptr: Vec<u32>,
+    pub xt_idx: Vec<u32>,
     /// constant external current per neuron (clamped drive)
     pub ext: Vec<f32>,
     /// spike recording: bits per step in a rolling window
@@ -86,6 +101,28 @@ impl CpuSim {
         } else {
             0
         };
+        // Per-synapse traces: custom synapses (tau_ms > 0) get their own
+        // exponential current; all others keep the merged s[i] path.
+        let mut xsyn_map = vec![u32::MAX; csr.w.len()];
+        let mut xt_rows: Vec<Vec<u32>> = vec![Vec::new(); n];
+        let (mut xsyn, mut xdecay, mut xw) = (Vec::new(), Vec::new(), Vec::new());
+        for (j, &tau) in csr.tau_ms.iter().enumerate() {
+            if tau > 0.0 {
+                xsyn_map[j] = xsyn.len() as u32;
+                xsyn.push(0.0);
+                xdecay.push(1.0 - cfg.dt_ms / tau.max(1e-6));
+                xw.push(csr.w[j]);
+                xt_rows[csr.tgt[j] as usize].push(xsyn_map[j]);
+            }
+        }
+        let mut xt_ptr = vec![0u32; n + 1];
+        let mut xt_idx = Vec::with_capacity(xsyn.len());
+        for row in &xt_rows {
+            xt_idx.extend_from_slice(row);
+        }
+        for i in 0..n {
+            xt_ptr[i + 1] = xt_ptr[i] + xt_rows[i].len() as u32;
+        }
         CpuSim {
             n,
             csr,
@@ -98,6 +135,13 @@ impl CpuSim {
             trace: vec![0.0; n],
             ring: vec![0.0; d * n],
             d,
+            xsyn_map,
+            xsyn,
+            xdecay,
+            xw,
+            xring: vec![Vec::new(); d],
+            xt_ptr,
+            xt_idx,
             ext: vec![0.0; n],
             spike_bits: vec![0; spike_record_steps * words],
             spike_counts: vec![0; spike_record_steps],
@@ -126,6 +170,10 @@ impl CpuSim {
         self.s.fill(0.0);
         self.trace.fill(0.0);
         self.ring.fill(0.0);
+        self.xsyn.fill(0.0);
+        for l in &mut self.xring {
+            l.clear();
+        }
         self.spike_bits.fill(0);
         self.spike_counts.fill(0);
         self.pn_total.fill(0);
@@ -160,6 +208,12 @@ impl CpuSim {
         let decay_t = 1.0 - dt / self.cfg.readout_tau_ms.max(1e-6);
         let record = self.cfg.record_spikes;
 
+        // arrivals for custom-tau synapses: x += w at the arriving step
+        for &k in &self.xring[slot] {
+            self.xsyn[k as usize] += self.xw[k as usize];
+        }
+        self.xring[slot].clear();
+
         let slot_base = slot * n;
         let mut spiked: Vec<u32> = Vec::new();
         for i in 0..n {
@@ -167,6 +221,14 @@ impl CpuSim {
             self.ring[slot_base + i] = 0.0;
             self.s[i] += arr;
             let mut input = self.s[i] + self.ext[i];
+            // per-synapse traces into this neuron: sum for input, then
+            // decay each trace in the same pass (decay-after-use, same as
+            // the merged s[i] path)
+            for j in self.xt_ptr[i] as usize..self.xt_ptr[i + 1] as usize {
+                let k = self.xt_idx[j] as usize;
+                input += self.xsyn[k];
+                self.xsyn[k] *= self.xdecay[k];
+            }
             // stimulus: sum over this neuron's (input, weight) entries
             let (lo, hi) = (
                 self.stim_map.neuron_ptr[i] as usize,
@@ -208,7 +270,12 @@ impl CpuSim {
             );
             for j in lo..hi {
                 let dst = (t + self.csr.delay_steps[j] as u64) as usize % self.d;
-                self.ring[dst * n + self.csr.tgt[j] as usize] += self.csr.w[j];
+                let xid = self.xsyn_map[j];
+                if xid != u32::MAX {
+                    self.xring[dst].push(xid);
+                } else {
+                    self.ring[dst * n + self.csr.tgt[j] as usize] += self.csr.w[j];
+                }
             }
         }
 

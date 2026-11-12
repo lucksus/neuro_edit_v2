@@ -56,6 +56,13 @@ pub struct Synapse {
     pub w: f32,
     /// Axonal delay in ms (distance / conduction speed at creation time).
     pub delay_ms: f32,
+    /// Per-synapse current-trace time constant in ms. `0.0` = follow the
+    /// simulation-wide `synapse_tau_ms` (the merged-current fast path —
+    /// a network where every synapse has `tau_ms == 0` runs exactly the
+    /// pre-per-synapse code). `> 0` gives this synapse its own
+    /// exponential current trace decaying with `x *= 1 - dt/tau_ms`.
+    #[serde(default)]
+    pub tau_ms: f32,
 }
 
 /// A named set of neuron indices — the original's `Group`.
@@ -266,6 +273,8 @@ pub struct SynCsr {
     pub w: Vec<f32>,
     /// Delay in steps of the dt this CSR was built for.
     pub delay_steps: Vec<u16>,
+    /// Per-synapse tau in ms, CSR order (`0.0` = merged global path).
+    pub tau_ms: Vec<f32>,
 }
 
 impl Network {
@@ -319,6 +328,7 @@ impl Network {
             tgt,
             w,
             delay_ms,
+            tau_ms: 0.0,
         });
         self.synapses.len() - 1
     }
@@ -351,11 +361,13 @@ impl Network {
             tgt: Vec::with_capacity(self.synapses.len()),
             w: Vec::with_capacity(self.synapses.len()),
             delay_steps: Vec::with_capacity(self.synapses.len()),
+            tau_ms: Vec::with_capacity(self.synapses.len()),
         };
         for &i in &order {
             let s = &self.synapses[i];
             csr.tgt.push(s.tgt);
             csr.w.push(s.w);
+            csr.tau_ms.push(s.tau_ms);
             let steps = (s.delay_ms / dt_ms).round().max(1.0);
             csr.delay_steps.push(steps.min(u16::MAX as f32) as u16);
             csr.src_ptr[s.src as usize + 1] += 1;
@@ -608,6 +620,12 @@ impl Network {
                     s.src, s.tgt
                 ));
             }
+            if !(s.tau_ms >= 0.0 && s.tau_ms.is_finite()) {
+                return Err(format!(
+                    "synapse {i} has bad tau_ms {} (want >= 0, finite)",
+                    s.tau_ms
+                ));
+            }
         }
         for g in &self.groups {
             for &m in &g.members {
@@ -795,6 +813,7 @@ mod tests {
             tgt: 5,
             w: 1.0,
             delay_ms: 1.0,
+            tau_ms: 0.0,
         });
         assert!(n.validate().unwrap_err().contains("synapse"));
 
@@ -824,6 +843,7 @@ mod tests {
             tgt: 7,
             w: 1.0,
             delay_ms: 1.0,
+            tau_ms: 0.0,
         });
         let g = sub.add_group("g");
         sub.groups[g].members = vec![0, 7];

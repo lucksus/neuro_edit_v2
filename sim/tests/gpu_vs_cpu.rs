@@ -48,6 +48,37 @@ fn gpu_matches_cpu_spike_counts_quiet() {
     assert_eq!(cpu_total, gpu_total, "spike counts differ");
 }
 
+/// Per-synapse tau on the recurrent edges must agree between backends:
+/// deterministic (no noise), so exact spike counts should match.
+#[test]
+fn gpu_matches_cpu_with_custom_tau() {
+    if !gpu_available() {
+        eprintln!("no GPU, skipping");
+        return;
+    }
+    let mut net = lsm_like_net(8, 42);
+    let mut rng = Rng::new(9);
+    builders::set_synapse_tau_dist(&mut net, "liquid", "liquid", 25.0, 10.0, &mut rng);
+    let n_custom = net.synapses.iter().filter(|s| s.tau_ms > 0.0).count();
+    assert!(n_custom > 0, "expected custom-tau synapses");
+    let cfg = SimConfig {
+        record_spikes: true,
+        ..Default::default()
+    };
+    let mut cpu = Sim::new(&net, cfg.clone(), BackendKind::Cpu).unwrap();
+    let mut gpu = Sim::new(&net, cfg, BackendKind::Cuda).unwrap();
+    for i in 0..8 {
+        cpu.set_external(i, 12.0);
+        gpu.set_external(i, 12.0);
+    }
+    cpu.run_ms(50.0).unwrap();
+    gpu.run_ms(50.0).unwrap();
+    let (a, g) = (cpu.spikes_total(), gpu.spikes_total());
+    eprintln!("custom tau: cpu={a} gpu={g} (C={n_custom})");
+    assert!(a > 0);
+    assert_eq!(a, g, "spike counts differ with custom tau");
+}
+
 #[test]
 fn gpu_cpu_close_with_noise() {
     if !gpu_available() {

@@ -36,6 +36,8 @@ __device__ __forceinline__ u32 noise_hash(u32 i, u64 t, u64 seed){
 }
 
 // One neuron per thread. t is the absolute step index.
+// xt_ptr/xt_idx/xsyn/xdecay: per-synapse current traces for synapses with
+// their own tau (C custom synapses, target-major rows like a CSR).
 extern "C" __global__ void neuron_kernel(
     int N, u64 t, int D, float dt,
     float pkick, float kick,
@@ -52,7 +54,8 @@ extern "C" __global__ void neuron_kernel(
     u64* spk_row,
     u64* pn_total,
     const u32* vwatch, int nwatch, float* vrec, int vrec_d,
-    const int* gmap, int n_grids, u32* gls, const u32* goff)
+    const int* gmap, int n_grids, u32* gls, const u32* goff,
+    const u32* xt_ptr, const u32* xt_idx, float* xsyn, const float* xdecay)
 {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if(i >= N) return;
@@ -61,6 +64,13 @@ extern "C" __global__ void neuron_kernel(
   ring[(u64)slot * N + i] = rt_put(0.f);
   float sv = s[i] + arr;
   float I = sv + ext[i];
+  // per-synapse traces into this neuron: sum for input, decay in the
+  // same pass (decay-after-use, same as the merged s path)
+  for(u32 j = xt_ptr[i]; j < xt_ptr[i+1]; ++j){
+    u32 k = xt_idx[j];
+    I += xsyn[k];
+    xsyn[k] *= xdecay[k];
+  }
 
   // stimulus
   long long rel = (long long)t - stim_t0;
@@ -108,7 +118,8 @@ extern "C" __global__ void neuron_kernel(
 }
 
 // One thread per possible spike; iterates the spike's out-degree (CSR by
-// source) and scatters weights into the delay ring.
+// source) and scatters weights into the delay ring — custom-tau synapses
+// go to the per-synapse arrival ring instead of the merged per-neuron one.
 // Also: thread 0 resets the NEXT step's counter slot and accumulates the
 // total spike count — that is why there is no per-step host readback.
 extern "C" __global__ void prop_kernel(
@@ -116,7 +127,8 @@ extern "C" __global__ void prop_kernel(
     const int* spk, const int* cnt_cur, int* cnt_next,
     u64* spikes_total,
     const u32* src_ptr, const u32* tgt, const float* w, const u16* delay,
-    rt_t* ring)
+    rt_t* ring,
+    const u32* xsyn_map, int C, rt_t* xring)
 {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   if(tid == 0){
@@ -132,9 +144,25 @@ extern "C" __global__ void prop_kernel(
     u32 lo = src_ptr[i], hi = src_ptr[i + 1];
     for(u32 j = lo + lane; j < hi; j += 32){
       int slot = (int)((t + (u64)delay[j]) % (u64)D);
-      atomicAdd(&ring[(u64)slot * N + tgt[j]], rt_put(w[j]));
+      u32 xid = xsyn_map[j];
+      if(xid != 0xFFFFFFFFu){
+        atomicAdd(&xring[(u64)slot * (u64)C + (u64)xid], rt_put(w[j]));
+      }else{
+        atomicAdd(&ring[(u64)slot * N + tgt[j]], rt_put(w[j]));
+      }
     }
   }
+}
+
+// One thread per custom synapse: fold this step's arrivals into the
+// trace (x += w) and clear the slot — runs before neuron_kernel.
+extern "C" __global__ void xsyn_arrive_kernel(
+    int C, int slot, rt_t* xring, float* xsyn)
+{
+  int j = blockIdx.x * blockDim.x + threadIdx.x;
+  if(j >= C) return;
+  xsyn[j] += rt_get(xring[(u64)slot * (u64)C + (u64)j]);
+  xring[(u64)slot * (u64)C + (u64)j] = rt_put(0.f);
 }
 
 // Materialize one grid group's spike-trace buffer for readback:

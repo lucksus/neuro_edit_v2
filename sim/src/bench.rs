@@ -51,6 +51,7 @@ pub fn bench_net(n: usize, k: usize, seed: u64, w_scale: f32, w_inh: f32, dt: f3
                 tgt,
                 w,
                 delay_ms,
+                tau_ms: 0.0,
             });
         }
     }

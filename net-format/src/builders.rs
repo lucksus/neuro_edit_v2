@@ -196,6 +196,47 @@ pub fn set_synapse_weights(net: &mut Network, group: &str, mean: f64, stddev: f6
     }
 }
 
+/// Set a uniform per-synapse tau (ms) on every synapse from group
+/// `src_g` to group `tgt_g`. `tau <= 0` clears the override — those
+/// synapses return to the merged global-tau path.
+pub fn set_synapse_tau(net: &mut Network, src_g: &str, tgt_g: &str, tau: f64) {
+    let (sg, tg) = match (net.group(src_g), net.group(tgt_g)) {
+        (Some(a), Some(b)) => (a.members.clone(), b.members.clone()),
+        _ => return,
+    };
+    let src: std::collections::HashSet<u32> = sg.into_iter().collect();
+    let tgt: std::collections::HashSet<u32> = tg.into_iter().collect();
+    let tau = (tau.max(0.0)) as f32;
+    for s in &mut net.synapses {
+        if src.contains(&s.src) && tgt.contains(&s.tgt) {
+            s.tau_ms = tau;
+        }
+    }
+}
+
+/// Gaussian per-synapse tau (ms) on src_g→tgt_g edges, seeded by `rng`.
+/// Negative draws clamp to 0 — the merged global-tau path.
+pub fn set_synapse_tau_dist(
+    net: &mut Network,
+    src_g: &str,
+    tgt_g: &str,
+    mean: f64,
+    stddev: f64,
+    rng: &mut Rng,
+) {
+    let (sg, tg) = match (net.group(src_g), net.group(tgt_g)) {
+        (Some(a), Some(b)) => (a.members.clone(), b.members.clone()),
+        _ => return,
+    };
+    let src: std::collections::HashSet<u32> = sg.into_iter().collect();
+    let tgt: std::collections::HashSet<u32> = tg.into_iter().collect();
+    for s in &mut net.synapses {
+        if src.contains(&s.src) && tgt.contains(&s.tgt) {
+            s.tau_ms = rng.gauss(mean, stddev).max(0.0) as f32;
+        }
+    }
+}
+
 /// Assign `NeuronKind` by 80/20 excitatory/inhibitory split of the group's
 /// members (seeded), a standard LSM mix the original made by hand.
 pub fn set_exc_inh(net: &mut Network, group: &str, inh_fraction: f64, rng: &mut Rng) {

@@ -9,13 +9,36 @@ use std::path::Path;
 use crate::Network;
 
 const MAGIC: &[u8; 4] = b"NE2\0";
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 
 /// `Group` as serialized by format v1 — before the `grid` field existed.
 #[derive(serde::Deserialize)]
 struct GroupV1 {
     name: String,
     members: Vec<u32>,
+}
+
+/// `Synapse` as serialized by format v1/v2 — before `tau_ms` existed.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SynapseV2 {
+    src: u32,
+    tgt: u32,
+    w: f32,
+    delay_ms: f32,
+}
+
+/// Lift v1/v2 synapses (no `tau_ms`) into today's `Synapse` — `0.0`
+/// keeps them on the merged global-tau path, exactly their old meaning.
+fn lift_synapses(ss: Vec<SynapseV2>) -> Vec<crate::Synapse> {
+    ss.into_iter()
+        .map(|s| crate::Synapse {
+            src: s.src,
+            tgt: s.tgt,
+            w: s.w,
+            delay_ms: s.delay_ms,
+            tau_ms: 0.0,
+        })
+        .collect()
 }
 
 /// Decode a v1 stream field-by-field (bincode has no defaults for missing
@@ -26,7 +49,10 @@ fn load_v1(r: &mut impl Read) -> Result<Network, LoadError> {
     }
     let net = Network {
         neurons: de("neurons", r)?,
-        synapses: de("synapses", r)?,
+        synapses: {
+            let ss: Vec<SynapseV2> = de("synapses", r)?;
+            lift_synapses(ss)
+        },
         groups: {
             let gs: Vec<GroupV1> = de("groups", r)?;
             gs.into_iter()
@@ -37,6 +63,28 @@ fn load_v1(r: &mut impl Read) -> Result<Network, LoadError> {
                 })
                 .collect()
         },
+        inputs: de("inputs", r)?,
+        samples: de("samples", r)?,
+        readouts: de("readouts", r)?,
+        scripts: de("scripts", r)?,
+        meta: de("meta", r)?,
+    };
+    Ok(net)
+}
+
+/// Decode a v2 stream field-by-field — same as v3 minus `Synapse::tau_ms`
+/// (groups already carry `grid` in v2).
+fn load_v2(r: &mut impl Read) -> Result<Network, LoadError> {
+    fn de<T: serde::de::DeserializeOwned>(t: &str, r: &mut impl Read) -> Result<T, LoadError> {
+        bincode::deserialize_from(r).map_err(|e| LoadError::Decode(format!("{t}: {e}")))
+    }
+    let net = Network {
+        neurons: de("neurons", r)?,
+        synapses: {
+            let ss: Vec<SynapseV2> = de("synapses", r)?;
+            lift_synapses(ss)
+        },
+        groups: de("groups", r)?,
         inputs: de("inputs", r)?,
         samples: de("samples", r)?,
         readouts: de("readouts", r)?,
@@ -93,6 +141,7 @@ pub fn load(path: impl AsRef<Path>) -> Result<Network, LoadError> {
     let version = u32::from_le_bytes(ver);
     let mut net = match version {
         1 => load_v1(&mut r)?,
+        2 => load_v2(&mut r)?,
         FORMAT_VERSION => {
             bincode::deserialize_from(&mut r).map_err(|e| LoadError::Decode(e.to_string()))?
         }
@@ -202,6 +251,61 @@ mod tests {
     }
 
     #[test]
+    fn synapse_tau_round_trips() {
+        let mut net = Network::new();
+        net.add_neuron([0.0; 3], crate::NeuronKind::Excitatory);
+        net.add_neuron([50.0; 3], crate::NeuronKind::Excitatory);
+        let s0 = net.connect(0, 1, 1.0);
+        net.synapses[s0].tau_ms = 37.5;
+        net.connect(0, 1, 2.0); // stays default
+        let path = tempdir().join("tau.ne2");
+        save(&net, &path).unwrap();
+        let back = load(&path).unwrap();
+        assert_eq!(back.synapses[0].tau_ms, 37.5);
+        assert_eq!(back.synapses[1].tau_ms, 0.0);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn v2_file_lifts_synapses_with_default_tau() {
+        // hand-build a v2 stream: same field order as v3 minus tau_ms
+        let mut net = Network::new();
+        net.add_neuron([0.0; 3], crate::NeuronKind::Excitatory);
+        net.add_neuron([50.0; 3], crate::NeuronKind::Excitatory);
+        net.connect(0, 1, 1.5);
+        let path = tempdir().join("v2.ne2");
+        {
+            use std::io::Write;
+            let mut w = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+            w.write_all(MAGIC).unwrap();
+            w.write_all(&2u32.to_le_bytes()).unwrap();
+            bincode::serialize_into(&mut w, &net.neurons).unwrap();
+            let v2syns: Vec<SynapseV2> = net
+                .synapses
+                .iter()
+                .map(|s| SynapseV2 {
+                    src: s.src,
+                    tgt: s.tgt,
+                    w: s.w,
+                    delay_ms: s.delay_ms,
+                })
+                .collect();
+            bincode::serialize_into(&mut w, &v2syns).unwrap();
+            bincode::serialize_into(&mut w, &net.groups).unwrap();
+            bincode::serialize_into(&mut w, &net.inputs).unwrap();
+            bincode::serialize_into(&mut w, &net.samples).unwrap();
+            bincode::serialize_into(&mut w, &net.readouts).unwrap();
+            bincode::serialize_into(&mut w, &net.scripts).unwrap();
+            bincode::serialize_into(&mut w, &net.meta).unwrap();
+        }
+        let back = load(&path).unwrap();
+        assert_eq!(back.synapses.len(), 1);
+        assert_eq!(back.synapses[0].w, 1.5);
+        assert_eq!(back.synapses[0].tau_ms, 0.0);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn csr_sorted_and_delayed() {
         let mut net = Network::new();
         net.meta.conduction_speed = 1000.0; // 1 um -> 1 us = 0.001 ms
@@ -282,7 +386,17 @@ mod tests {
         w.extend_from_slice(b"NE2\0");
         w.extend_from_slice(&1u32.to_le_bytes());
         bincode::serialize_into(&mut w, &net.neurons).unwrap();
-        bincode::serialize_into(&mut w, &net.synapses).unwrap();
+        let syns: Vec<SynapseV2> = net
+            .synapses
+            .iter()
+            .map(|s| SynapseV2 {
+                src: s.src,
+                tgt: s.tgt,
+                w: s.w,
+                delay_ms: s.delay_ms,
+            })
+            .collect();
+        bincode::serialize_into(&mut w, &syns).unwrap();
         let g1: Vec<(String, Vec<u32>)> = net
             .groups
             .iter()
@@ -333,6 +447,7 @@ mod tests {
                     tgt: 9,
                     w: 1.0,
                     delay_ms: 1.0,
+                    tau_ms: 0.0,
                 });
                 n
             },

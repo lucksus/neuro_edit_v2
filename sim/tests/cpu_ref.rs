@@ -69,6 +69,7 @@ fn synapse_arrives_after_delay_and_decays() {
         tgt: 1,
         w: 30.0,
         delay_ms: 0.2,
+        tau_ms: 0.0,
     });
     // dt=0.1 -> delay 2 steps
     let mut sim = CpuSim::new(&net, SimConfig::default());
@@ -102,6 +103,136 @@ fn synapse_arrives_after_delay_and_decays() {
         sim.s[1],
         expected
     );
+}
+
+#[test]
+fn custom_tau_synapse_arrives_then_decays_its_own_trace() {
+    // Same wiring as synapse_arrives_after_delay_and_decays but tau_ms=20:
+    // the spike's current must live in xsyn (not the merged s), decay with
+    // the synapse's own constant, and s[1] must stay 0.
+    let mut net = net_with(2);
+    net.synapses.push(net_format::Synapse {
+        src: 0,
+        tgt: 1,
+        w: 30.0,
+        delay_ms: 0.2,
+        tau_ms: 20.0,
+    });
+    let mut sim = CpuSim::new(&net, SimConfig::default());
+    assert_eq!(sim.xsyn.len(), 1, "one custom synapse expected");
+    sim.set_external(0, 25.0);
+    let mut first_spike_t = None;
+    for _ in 0..500 {
+        let before = sim.spikes_total;
+        sim.run_steps(1).unwrap();
+        if sim.spikes_total > before {
+            first_spike_t = Some(sim.t - 1);
+            break;
+        }
+    }
+    first_spike_t.unwrap();
+    sim.set_external(0, 0.0);
+    // in flight: still nothing anywhere
+    sim.run_steps(1).unwrap();
+    assert_eq!(sim.xsyn[0], 0.0);
+    assert_eq!(sim.s[1], 0.0);
+    // arrival step: x += w, neuron reads it, then the trace decays once
+    sim.run_steps(1).unwrap();
+    let dec = 1.0 - 0.1 / 20.0;
+    assert_eq!(sim.s[1], 0.0, "custom synapse must not feed merged s");
+    assert!(
+        (sim.xsyn[0] - 30.0 * dec).abs() < 1e-3,
+        "xsyn={} vs {}",
+        sim.xsyn[0],
+        30.0 * dec
+    );
+    sim.run_steps(1).unwrap();
+    let expected = 30.0f32 * dec.powi(2);
+    assert!(
+        (sim.xsyn[0] - expected).abs() < 1e-2,
+        "xsyn={} vs {}",
+        sim.xsyn[0],
+        expected
+    );
+}
+
+#[test]
+fn slow_tau_keeps_target_firing_longer() {
+    // One spike into B: a 50 ms synaptic trace must drive the target
+    // noticeably longer than the default 2 ms merged current.
+    let make = |tau: f32| {
+        let mut net = net_with(2);
+        net.synapses.push(net_format::Synapse {
+            src: 0,
+            tgt: 1,
+            w: 15.0,
+            delay_ms: 0.2,
+            tau_ms: tau,
+        });
+        CpuSim::new(&net, SimConfig::default())
+    };
+    let mut def = make(0.0);
+    let mut slow = make(50.0);
+    for sim in [&mut def, &mut slow] {
+        sim.set_external(0, 25.0);
+        // fire neuron 0 exactly once
+        loop {
+            let before = sim.spikes_total;
+            sim.run_steps(1).unwrap();
+            if sim.spikes_total > before {
+                break;
+            }
+        }
+        sim.set_external(0, 0.0);
+    }
+    def.run_steps(400).unwrap();
+    slow.run_steps(400).unwrap();
+    let d_spikes = def.pn_total[1];
+    let s_spikes = slow.pn_total[1];
+    assert!(
+        s_spikes > d_spikes,
+        "slow tau should prolong target firing: default={d_spikes} slow={s_spikes}"
+    );
+    // and the custom trace itself must still be nonzero well past arrival
+    assert!(slow.xsyn[0] > 0.5, "xsyn={}", slow.xsyn[0]);
+}
+
+#[test]
+fn default_tau_is_bit_exact() {
+    // Pinned: a net where every synapse has tau_ms == 0 runs the merged
+    // pre-per-synapse code path — the spike train must reproduce the
+    // pre-change bits on a fixed seed.
+    use net_format::builders;
+    let mut net = Network::new();
+    net.meta.dt_ms = 0.1;
+    let mut rng = net_format::Rng::new(3);
+    builders::create_2d_grid(&mut net, "g", 8, 8, 30.0, [0.0; 3]);
+    builders::create_connections(&mut net, "g", 0.35, 80.0, 6.0, &mut rng);
+    let cfg = SimConfig {
+        record_spikes: true,
+        spike_record_steps: 512,
+        noise_rate_hz: 20.0,
+        noise_kick_mv: 0.8,
+        seed: 7,
+        ..Default::default()
+    };
+    let mut sim = CpuSim::new(&net, cfg);
+    sim.run_steps(400).unwrap();
+    // fingerprint: spike bits + v for the whole recorded window
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut fold = |x: u64| {
+        h ^= x;
+        h = h.wrapping_mul(0x0000_0100_0000_01B3);
+    };
+    for back in 0..400 {
+        for &w in sim.spike_row(back).unwrap() {
+            fold(w);
+        }
+    }
+    for &x in &sim.v {
+        fold(x.to_bits() as u64);
+    }
+    assert_eq!(h, 0x9d79_2bd2_3313_2f5d, "default-path fingerprint changed");
 }
 
 #[test]

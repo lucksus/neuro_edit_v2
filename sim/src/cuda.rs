@@ -30,6 +30,7 @@ pub struct CudaSim {
     f_neuron: CudaFunction,
     f_prop: CudaFunction,
     f_gtrace: CudaFunction,
+    f_xsyn: CudaFunction,
 
     // device state
     v: CudaSlice<f32>,
@@ -49,6 +50,15 @@ pub struct CudaSim {
     tgt: CudaSlice<u32>,
     w: CudaSlice<f32>,
     delay: CudaSlice<u16>,
+    // per-synapse current traces (C custom synapses; empty = merged path)
+    xsyn_map: CudaSlice<u32>,
+    xsyn: CudaSlice<f32>,
+    xdecay: CudaSlice<f32>,
+    xt_ptr: CudaSlice<u32>,
+    xt_idx: CudaSlice<u32>,
+    /// per-(slot, custom-synapse) arrival accumulation, rt_t elements
+    xring: CudaSlice<u32>,
+    n_xsyn: usize,
     // stimulus routing
     stim_ptr: CudaSlice<u32>,
     stim_input: CudaSlice<u32>,
@@ -126,6 +136,7 @@ impl CudaSim {
         let f_neuron = module.load_function("neuron_kernel")?;
         let f_prop = module.load_function("prop_kernel")?;
         let f_gtrace = module.load_function("grid_trace_kernel")?;
+        let f_xsyn = module.load_function("xsyn_arrive_kernel")?;
 
         let stim_ptr_host: Vec<u32> = stim_map.neuron_ptr.clone();
         let stim_input_host = stim_map.input_idx.clone();
@@ -151,6 +162,28 @@ impl CudaSim {
         }
         let na = n.max(1);
 
+        // Per-synapse traces: custom synapses (tau_ms > 0) get their own
+        // exponential current; all others keep the merged s path.
+        let mut xsyn_map = vec![u32::MAX; csr.w.len()];
+        let mut xt_rows: Vec<Vec<u32>> = vec![Vec::new(); n];
+        let (mut xdecay, mut n_xsyn) = (Vec::new(), 0usize);
+        for (j, &tau) in csr.tau_ms.iter().enumerate() {
+            if tau > 0.0 {
+                xsyn_map[j] = n_xsyn as u32;
+                xdecay.push(1.0 - cfg.dt_ms / tau.max(1e-6));
+                xt_rows[csr.tgt[j] as usize].push(xsyn_map[j]);
+                n_xsyn += 1;
+            }
+        }
+        let mut xt_ptr = vec![0u32; n + 1];
+        let mut xt_idx = Vec::with_capacity(n_xsyn);
+        for row in &xt_rows {
+            xt_idx.extend_from_slice(row);
+        }
+        for i in 0..n {
+            xt_ptr[i + 1] = xt_ptr[i] + xt_rows[i].len() as u32;
+        }
+
         let sim = CudaSim {
             v: stream.clone_htod(&vec![params.init_v; na])?,
             u: stream.clone_htod(&pad(params.init_u.clone()))?,
@@ -166,6 +199,13 @@ impl CudaSim {
             tgt: stream.clone_htod(&pad(csr.tgt.clone()))?,
             w: stream.clone_htod(&pad(csr.w.clone()))?,
             delay: stream.clone_htod(&pad(csr.delay_steps.clone()))?,
+            xsyn_map: stream.clone_htod(&pad(xsyn_map))?,
+            xsyn: stream.alloc_zeros(n_xsyn.max(1))?,
+            xdecay: stream.clone_htod(&pad(xdecay))?,
+            xt_ptr: stream.clone_htod(&pad(xt_ptr))?,
+            xt_idx: stream.clone_htod(&pad(xt_idx))?,
+            xring: stream.alloc_zeros((d * n_xsyn).max(1))?,
+            n_xsyn,
             stim_ptr: stream.clone_htod(&pad(stim_ptr_host.clone()))?,
             stim_input: stream.clone_htod(&pad(stim_input_host.clone()))?,
             stim_w: stream.clone_htod(&pad(stim_w_host.clone()))?,
@@ -204,6 +244,7 @@ impl CudaSim {
             f_neuron,
             f_prop,
             f_gtrace,
+            f_xsyn,
         };
         Ok(sim)
     }
@@ -263,6 +304,25 @@ impl CudaSim {
         let (cnt_cur, cnt_next) = if cur == 0 { (c0, c1) } else { (c1, c0) };
 
         unsafe {
+            // per-synapse arrivals: x[j] += w, clear the slot (skip when
+            // no synapse carries its own tau)
+            if self.n_xsyn > 0 {
+                let c_i32 = self.n_xsyn as i32;
+                let slot_i32 = (t as usize % self.ring_d) as i32;
+                let grid_x = (self.n_xsyn as u32).div_ceil(BLOCK);
+                let cfg_x = LaunchConfig {
+                    grid_dim: (grid_x, 1, 1),
+                    block_dim: (BLOCK, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                let mut bx = self.stream.launch_builder(&self.f_xsyn);
+                bx.arg(&c_i32)
+                    .arg(&slot_i32)
+                    .arg(&mut self.xring)
+                    .arg(&mut self.xsyn);
+                bx.launch(cfg_x)?;
+            }
+
             // neuron
             let mut b = self.stream.launch_builder(&self.f_neuron);
             b.arg(&n_i32)
@@ -309,7 +369,11 @@ impl CudaSim {
                 .arg(&self.gmap)
                 .arg(&n_grids_i32)
                 .arg(&mut self.gls)
-                .arg(&self.goff);
+                .arg(&self.goff)
+                .arg(&self.xt_ptr)
+                .arg(&self.xt_idx)
+                .arg(&mut self.xsyn)
+                .arg(&self.xdecay);
             b.launch(cfg_launch)?;
         }
 
@@ -335,6 +399,7 @@ impl CudaSim {
                 block_dim: (BLOCK, 1, 1),
                 shared_mem_bytes: 0,
             };
+            let c_i32 = self.n_xsyn as i32;
             let mut b = self.stream.launch_builder(&self.f_prop);
             b.arg(&n_i32)
                 .arg(&t)
@@ -347,7 +412,10 @@ impl CudaSim {
                 .arg(&self.tgt)
                 .arg(&self.w)
                 .arg(&self.delay)
-                .arg(&mut self.ring);
+                .arg(&mut self.ring)
+                .arg(&self.xsyn_map)
+                .arg(&c_i32)
+                .arg(&mut self.xring);
             b.launch(cfg_prop)?;
         }
         self.t += 1;
@@ -552,6 +620,10 @@ impl CudaSim {
         self.stream.memset_zeros(&mut self.s).unwrap();
         self.stream.memset_zeros(&mut self.trace).unwrap();
         self.stream.memset_zeros(&mut self.ring).unwrap();
+        if self.n_xsyn > 0 {
+            self.stream.memset_zeros(&mut self.xsyn).unwrap();
+            self.stream.memset_zeros(&mut self.xring).unwrap();
+        }
         self.stream.memset_zeros(&mut self.cnt[0]).unwrap();
         self.stream.memset_zeros(&mut self.cnt[1]).unwrap();
         self.stream.memset_zeros(&mut self.total).unwrap();
