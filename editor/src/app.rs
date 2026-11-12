@@ -182,6 +182,13 @@ pub enum Dialog {
         mean: f32,
         sd: f32,
     },
+    /// Per-synapse current trace tau on src→dst edges (sd=0 → uniform).
+    SynTau {
+        src: String,
+        dst: String,
+        mean: f32,
+        sd: f32,
+    },
     ExcInh {
         group: String,
         frac: f32,
@@ -881,6 +888,15 @@ impl EditorApp {
                             group: "grid".into(),
                             mean: 6.0,
                             sd: 1.0,
+                        });
+                        ui.close();
+                    }
+                    if ui.button("Set synapse tau…").clicked() {
+                        self.dlg = Some(Dialog::SynTau {
+                            src: "grid".into(),
+                            dst: "grid".into(),
+                            mean: 2.0,
+                            sd: 0.0,
                         });
                         ui.close();
                     }
@@ -1924,6 +1940,30 @@ impl EditorApp {
                             let (g, m, s) = (group.clone(), *mean, *sd);
                             self.send(ClientMsg::Eval {
                                 code: format!("net.set_synapse_weights({g:?}, {m:?}, {s:?})"),
+                            });
+                            keep = false;
+                        }
+                    });
+            }
+            Dialog::SynTau { src, dst, mean, sd } => {
+                egui::Window::new("Set synapse tau (ms)")
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        ui.label("0 = merged global tau; >0 = own current trace");
+                        ui.horizontal(|ui| {
+                            ui.label("src group");
+                            self.group_combo(ui, "tau_src", src);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("dst group");
+                            self.group_combo(ui, "tau_dst", dst);
+                        });
+                        ui.add(egui::DragValue::new(mean).prefix("mean ms "));
+                        ui.add(egui::DragValue::new(sd).prefix("sd "));
+                        if ui.button("Apply").clicked() {
+                            let (a, b, m, s) = (src.clone(), dst.clone(), *mean, *sd);
+                            self.send(ClientMsg::Eval {
+                                code: format!("net.set_syn_tau_dist({a:?}, {b:?}, {m:?}, {s:?})"),
                             });
                             keep = false;
                         }

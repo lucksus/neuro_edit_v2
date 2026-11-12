@@ -544,3 +544,45 @@ fn upload_dataset_writes_limits_and_loads() {
     rig.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn per_synapse_tau_over_wire() {
+    // script: 2 neurons, A->B w=30; set tau 50ms on the edge, fire A once,
+    // B keeps firing for tens of ms — and syn_tau reads back 50.
+    let rig = start(Network::new(), None);
+    rig.send(ClientMsg::Hello { proto: 1 });
+    rig.until(|m| matches!(m, ServerMsg::Status { .. }));
+    rig.send(ClientMsg::Eval {
+        code: r#"net.add_neuron(0,0,0);
+            net.add_neuron(50,0,0);
+            net.connect(0,1,25.0);
+            net.set_syn_tau_one(0,1,50.0);
+            net.add_to_group("all", [0,1]);
+            net.set_syn_tau("all","all",0.0);   // group-pair setter resets it
+            net.set_syn_tau_dist("all","all",60.0,0.0);
+            print("tau=" + net.syn_tau(0,1));
+            sim.set_external(0,25);
+            let t0 = sim.time();
+            while sim.spikes() == 0 { sim.run(1); }
+            sim.set_external(0,0);
+            sim.run(200);
+            print("b_spikes=" + (sim.spikes() - 1));
+            print("done")"#
+            .into(),
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Console(s) if s == "done"));
+    let tau = evs.iter().find_map(|e| match &e.msg {
+        ServerMsg::Console(s) if s.starts_with("tau=") => Some(s.clone()),
+        _ => None,
+    });
+    assert_eq!(tau.as_deref(), Some("tau=60.0"), "{evs:?}");
+    let sp = evs.iter().find_map(|e| match &e.msg {
+        ServerMsg::Console(s) if s.starts_with("b_spikes=") => Some(s.clone()),
+        _ => None,
+    });
+    // with a 60 ms trace a single kick fires B repeatedly (the merged
+    // 2 ms default barely fires once — cpu_ref covers the comparison)
+    let n: i64 = sp.unwrap().trim_start_matches("b_spikes=").parse().unwrap();
+    assert!(n >= 2, "expected prolonged firing, got {n}");
+    rig.stop();
+}

@@ -497,7 +497,7 @@ pub fn register_api(
 
     // ---- help ----
     engine.register_fn("help", || -> String {
-        "API:\n  net.add_neuron(x,y,z)  net.connect(a,b,w)  net.clear()\n  net.create_2d_grid(g,w,h,d)  net.create_3d_grid(g,w,h,d,sp)\n  net.create_connections(g,scaling,lambda,w)  net.set_synapse_weights(g,mean,sd)\n  net.set_exc_inh(g,frac)  net.neurons_of(g)  net.add_input(name,[[n,w],..])\n  net.neuron_count()  net.synapse_count()  net.save(path)  net.load(path)\n  sim.run(ms)  sim.run_steps(n)  sim.time()  sim.reset()  sim.rate()  sim.spikes()\n  sim.trace()  sim.trace_of(ids)  sim.v(id)  sim.set_input(name,x)\n  sim.play_input(name,arr)  sim.set_external(id,amps)  sim.set_noise(hz,kick)\n  sim.rebuild()  sim.set_dt(dt)  sim.set_int_weights(on)\n  net.add_readout(name,units)  net.set_readout_weights(name,w)  net.readout_weights(name)\n  net.samples_write(n,t,v)  net.samples_save(n,p)  net.samples_load(n,p)\n  net.script_add(n,code)  net.script_remove(n)\n  readouts: delta_new(n) r.learn(trace,target,rate) r.output(trace)\n  fit_ridge(x_flat,T,F,y,lambda)  ridge_output(w,x)  accuracy(s,y)  auc(s,y)\n  streams: rng_stream(seed,n_src,p) .window(steps,label,pairs,strength)\n  misc: rand(a,b)  gauss(m,sd)  seed(s)  print(x)"
+        "API:\n  net.add_neuron(x,y,z)  net.connect(a,b,w)  net.clear()\n  net.create_2d_grid(g,w,h,d)  net.create_3d_grid(g,w,h,d,sp)\n  net.create_connections(g,scaling,lambda,w)  net.set_synapse_weights(g,mean,sd)\n  net.set_syn_tau(g1,g2,tau)  net.set_syn_tau_dist(g1,g2,mean,sd)\n  net.set_syn_tau_one(src,tgt,tau)  net.syn_tau(src,tgt)\n  net.set_exc_inh(g,frac)  net.neurons_of(g)  net.add_input(name,[[n,w],..])\n  net.neuron_count()  net.synapse_count()  net.save(path)  net.load(path)\n  sim.run(ms)  sim.run_steps(n)  sim.time()  sim.reset()  sim.rate()  sim.spikes()\n  sim.trace()  sim.trace_of(ids)  sim.v(id)  sim.set_input(name,x)\n  sim.play_input(name,arr)  sim.set_external(id,amps)  sim.set_noise(hz,kick)\n  sim.rebuild()  sim.set_dt(dt)  sim.set_int_weights(on)\n  net.add_readout(name,units)  net.set_readout_weights(name,w)  net.readout_weights(name)\n  net.samples_write(n,t,v)  net.samples_save(n,p)  net.samples_load(n,p)\n  net.script_add(n,code)  net.script_remove(n)\n  readouts: delta_new(n) r.learn(trace,target,rate) r.output(trace)\n  fit_ridge(x_flat,T,F,y,lambda)  ridge_output(w,x)  accuracy(s,y)  auc(s,y)\n  streams: rng_stream(seed,n_src,p) .window(steps,label,pairs,strength)\n  misc: rand(a,b)  gauss(m,sd)  seed(s)  print(x)"
             .to_string()
     });
 
@@ -663,6 +663,91 @@ pub fn register_api(
             },
         );
     }
+    // ---- per-synapse tau ----
+    // tau semantics: >0 gives that synapse its own exponential current
+    // trace; 0 returns it to the merged global synapse_tau path.
+    {
+        let (s, v) = (sim.clone(), net_version.clone());
+        engine.register_fn(
+            "set_syn_tau",
+            move |n: &mut NetHandle,
+                  g1: &str,
+                  g2: &str,
+                  tau: Dynamic|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                group_or_err(n, g1)?;
+                group_or_err(n, g2)?;
+                invalidate(&s, &v);
+                builders::set_synapse_tau(&mut n.borrow_mut(), g1, g2, d_f64(&tau));
+                Ok(())
+            },
+        );
+    }
+    {
+        let (r, s, v) = (rng.clone(), sim.clone(), net_version.clone());
+        engine.register_fn(
+            "set_syn_tau_dist",
+            move |n: &mut NetHandle,
+                  g1: &str,
+                  g2: &str,
+                  mean: Dynamic,
+                  sd: Dynamic|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                group_or_err(n, g1)?;
+                group_or_err(n, g2)?;
+                invalidate(&s, &v);
+                builders::set_synapse_tau_dist(
+                    &mut n.borrow_mut(),
+                    g1,
+                    g2,
+                    d_f64(&mean),
+                    d_f64(&sd),
+                    &mut r.borrow_mut(),
+                );
+                Ok(())
+            },
+        );
+    }
+    {
+        let (s, v) = (sim.clone(), net_version.clone());
+        engine.register_fn(
+            "set_syn_tau_one",
+            move |n: &mut NetHandle, src: rhai::INT, tgt: rhai::INT, tau: Dynamic| {
+                invalidate(&s, &v);
+                let mut nn = n.borrow_mut();
+                let (src, tgt) = (src as u32, tgt as u32);
+                for syn in &mut nn.synapses {
+                    if syn.src == src && syn.tgt == tgt {
+                        syn.tau_ms = (d_f64(&tau) as f32).max(0.0);
+                    }
+                }
+            },
+        );
+    }
+    {
+        let (s, v) = (sim.clone(), net_version.clone());
+        engine.register_fn(
+            "set_syn_tau_idx",
+            move |n: &mut NetHandle, idx: rhai::INT, tau: Dynamic| {
+                invalidate(&s, &v);
+                if let Some(syn) = n.borrow_mut().synapses.get_mut(idx as usize) {
+                    syn.tau_ms = (d_f64(&tau) as f32).max(0.0);
+                }
+            },
+        );
+    }
+    engine.register_fn(
+        "syn_tau",
+        |n: &mut NetHandle, src: rhai::INT, tgt: rhai::INT| {
+            let nn = n.borrow();
+            let (src, tgt) = (src as u32, tgt as u32);
+            nn.synapses
+                .iter()
+                .find(|s| s.src == src && s.tgt == tgt)
+                .map(|s| s.tau_ms)
+                .unwrap_or(0.0)
+        },
+    );
     {
         let (r, s, v) = (rng.clone(), sim.clone(), net_version.clone());
         engine.register_fn(
