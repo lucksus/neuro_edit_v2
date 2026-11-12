@@ -2290,9 +2290,12 @@ impl EditorApp {
             match self.files.local_root.clone() {
                 Some(root) => {
                     let p = root.join(&self.files.cwd).join(&e.name);
-                    if let Ok(t) = std::fs::read_to_string(&p) {
-                        self.script_file = p.to_string_lossy().into_owned();
-                        self.script_text = t;
+                    match std::fs::read_to_string(&p) {
+                        Ok(t) => {
+                            self.script_file = p.to_string_lossy().into_owned();
+                            self.script_text = t;
+                        }
+                        Err(err) => self.files.status = format!("read {}: {err}", e.name),
                     }
                 }
                 None => self.ctl.send(ClientMsg::ReadFile { path }),
@@ -2304,7 +2307,11 @@ impl EditorApp {
     fn file_mkdir(&mut self) {
         let name = self.files.mkdir.clone();
         if let Some(root) = self.files.local_root.clone() {
-            let _ = std::fs::create_dir_all(root.join(&self.files.cwd).join(&name));
+            // Q14: local-mode errors must reach files.status too.
+            match std::fs::create_dir_all(root.join(&self.files.cwd).join(&name)) {
+                Ok(()) => self.files.status = format!("mkdir {name}"),
+                Err(e) => self.files.status = format!("mkdir {name}: {e}"),
+            }
             self.files.mkdir.clear();
             self.files_refresh();
         } else {
@@ -2325,7 +2332,10 @@ impl EditorApp {
         let to_name = self.files.rename_to.clone();
         if let Some(root) = self.files.local_root.clone() {
             let dir = root.join(&self.files.cwd);
-            let _ = std::fs::rename(dir.join(&sel), dir.join(&to_name));
+            match std::fs::rename(dir.join(&sel), dir.join(&to_name)) {
+                Ok(()) => self.files.status = format!("renamed {sel} -> {to_name}"),
+                Err(e) => self.files.status = format!("rename {sel}: {e}"),
+            }
             self.files_refresh();
         } else {
             let (a, b) = if self.files.cwd.is_empty() {
@@ -2344,10 +2354,14 @@ impl EditorApp {
     fn file_delete(&mut self, name: &str) {
         if let Some(root) = self.files.local_root.clone() {
             let p = root.join(&self.files.cwd).join(name);
-            if p.is_dir() {
-                let _ = std::fs::remove_dir_all(&p);
+            let r = if p.is_dir() {
+                std::fs::remove_dir_all(&p)
             } else {
-                let _ = std::fs::remove_file(&p);
+                std::fs::remove_file(&p)
+            };
+            match r {
+                Ok(()) => self.files.status = format!("deleted {name}"),
+                Err(e) => self.files.status = format!("delete {name}: {e}"),
             }
             self.files_refresh();
         } else {
@@ -2367,8 +2381,9 @@ impl EditorApp {
         };
         if let Some(root) = self.files.local_root.clone() {
             let p = root.join(&self.files.cwd).join(&sel);
-            if let Ok(bytes) = std::fs::read(&p) {
-                self.save_download(&sel, &bytes);
+            match std::fs::read(&p) {
+                Ok(bytes) => self.save_download(&sel, &bytes),
+                Err(e) => self.files.status = format!("read {sel}: {e}"),
             }
         } else {
             let path = if self.files.cwd.is_empty() {
@@ -3802,8 +3817,7 @@ impl eframe::App for EditorApp {
         // system paste events (Ctrl+V when no text field owns it) —
         // Q9: a Paste event fired while a text field has keyboard
         // focus belongs to the field, not the network.
-        for txt in paste_events(&ctx.input(|i| i.events.clone()), ctx.wants_keyboard_input())
-        {
+        for txt in paste_events(&ctx.input(|i| i.events.clone()), ctx.wants_keyboard_input()) {
             self.paste(Some(txt));
         }
 
@@ -4133,5 +4147,54 @@ mod tests {
         assert_eq!(paste_events(&evs, false), vec!["subnet json".to_string()]);
         // a text field owns the keyboard → it ate the paste
         assert!(paste_events(&evs, true).is_empty());
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn local_file_errors_reach_status() {
+        // Q14: local-mode file ops used to discard errors (`let _ =`)
+        // leaving files.status silent on failure.
+        let root = std::env::temp_dir().join(format!("q14_{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = EditorApp::new(SimCtl::offline(), None);
+        app.files.local_root = Some(root.clone());
+        app.files.cwd.clear();
+
+        // rename a file that doesn't exist -> status must say so
+        app.files.sel = Some("ghost.txt".into());
+        app.files.rename_to = "renamed.txt".into();
+        app.file_rename();
+        assert!(
+            app.files.status.contains("rename"),
+            "rename error hidden: {:?}",
+            app.files.status
+        );
+
+        // delete a missing file -> same
+        app.files.status.clear();
+        app.file_delete("ghost.txt");
+        assert!(
+            app.files.status.contains("delete"),
+            "delete error hidden: {:?}",
+            app.files.status
+        );
+
+        // mkdir over an existing FILE -> error, not silence
+        std::fs::write(root.join("afile"), b"x").unwrap();
+        app.files.status.clear();
+        app.files.mkdir = "afile".into();
+        app.file_mkdir();
+        assert!(
+            app.files.status.starts_with("mkdir afile"),
+            "mkdir outcome hidden: {:?}",
+            app.files.status
+        );
+
+        // and the happy path reports too
+        app.files.status.clear();
+        app.files.mkdir = "okdir".into();
+        app.file_mkdir();
+        assert_eq!(app.files.status, "mkdir okdir");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
