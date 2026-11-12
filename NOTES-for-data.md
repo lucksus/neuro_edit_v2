@@ -485,3 +485,107 @@ Still open by design (the [Nico]/[split] tags): real pause/resume for
 scripts, raster density heat map, density-aware synapse alpha tuning,
 backend fallback notice (the field exists but is never set — cuda
 failure currently just errors the eval that built the sim).
+
+## Stage 4 — server / UI split, part 1 (review/STAGE4.md, this run)
+
+Seven commits `b306182`..`27e783a`. Part 1 only: the protocol, the
+worker extraction, a headless WebSocket server, and `editor --connect`.
+No wasm/browser (spec's own scope).
+
+- **`b306182` proto crate**: serde types for everything crossing the
+  line — `ClientMsg` (Hello/Subscribe/Eval/LoadNet/NewNet/AutoRun/
+  SetSpeed/RunMs/Abort/Reset/Watch/versioned Edit/CopySubnet/backend +
+  input controls/SetExternal/Bye), `ServerMsg` (Hello/Geo/GeoDelta/
+  Status/Console/Activity/GridTraces/Clipboard/Error), `NetEdit` enum
+  covering all 16 former closure edit sites, `ServerEvent{to}` for
+  targeted-vs-broadcast, `PROTO_VERSION` in the hello. bincode codec
+  with a 1-byte tag; payloads >256 B deflate (`flate2` fast). Round-trip
+  tests for every type.
+- **`0c5a38f` sim::serve**: the worker extracted from `simctl.rs` into
+  `sim::serve::run(net, opts, rx, emit)` — consumes `(client_id,
+  ClientMsg)`, emits `ServerEvent`. One `Emit` callback feeds print
+  capture, the run-progress hook, and the main loop. Versioned edits:
+  `Edit{base}` against `net_version` refuses stale bases with `Error` +
+  Geo/Status/GridTraces resync. Deletions send full Geo (ids renumber);
+  other edits send `GeoDelta` (incl. insert-subnet merging into
+  same-named groups — diffed by member-count snapshots). Activity
+  published rate-limited (`MIN_ACTIVITY_MS`); run/eval tails always
+  flush so `time_ms`/totals never lag. Rhai file fns (`net.save/load`,
+  `net_load`, `samples_save/load`, `write_to_file`, `read_to_vec`,
+  `play_input` files) resolve inside `ServeOpts::data_dir` when set —
+  absolute paths and `..` refused. 10 tests in `sim/tests/serve.rs`.
+- **`6fec43c` wire size**: the first sketch put per-texel `(idx,val)`
+  activity deltas + a `(idx,glow)` list on the wire — on a hot 1M grid
+  that measured ~2.5 MB/frame compressed. Now `Activity` carries only
+  `spike_bits` (whole-id-space bitmap), watched-v samples, input values,
+  totals + `steps_per_sec`; grid/non-grid glow is reconstructed
+  client-side (decay cached glow per frame, stamp spiked ids to 255 —
+  the worker's own `trace_u8` does the same decay so client/server
+  agree). Full-truth resync rides the existing `GridTraces`. Also
+  removed a `sim.trace()` readback from the publish path (~4 MB/frame
+  on CUDA, now dead).
+- **`2290d38` server + `editor --connect`**: `server` crate/binary —
+  one `sim::serve` worker + thread-per-client tungstenite (blocking WS;
+  no tokio needed at a handful of clients). Binds 127.0.0.1, `--bind` +
+  `--data-dir` flags. `ClientConn` typed test/tool client with
+  `into_split`. `SimCtl::connect(addr)` splits the socket into
+  reader/writer threads feeding the same `Shared` fold as the local
+  transport — the UI can't tell where the sim lives. `--connect`
+  ignores `--net`/`--cpu`/`--cuda`/`--int-weights` (server owns those,
+  message printed); window title shows the remote address.
+- **`27e783a` multi-client fixes**: `ClientMsg::Bye` from a client is
+  swallowed server-side — a client leaving must not kill the shared
+  worker (leaving = socket close; `Server::shutdown` injects Bye
+  directly). `WsReader::shutdown_stream` lets `SimCtl::drop` unblock the
+  parked recv thread (was a guaranteed hang on remote quit).
+
+Divergence from the spec's wording, honestly: there's no `Transport`
+trait object — the seam is the `mpsc::Sender<(u64, ClientMsg)>` +
+`Fold`/`Shared` pair; `SimCtl::start_cfg` and `SimCtl::connect` are two
+constructors onto it. Same effect, less plumbing.
+
+### Tests (all green both ways)
+
+`cargo test --workspace` (cuda) + `cargo test -p sim
+--no-default-features`; `cargo fmt` clean.
+
+- proto round trips for every wire type.
+- stale-version edit refused (+ resync) — ws + serve levels.
+- local ≡ remote: identical scripted session → identical `N`/`S`/`K`
+  (net, synapse, spike counts) over channel and WS transports.
+- path escape refused (`net.save("../escape.ne2")`; also live: the lsm
+  script's `save examples/lsm.ne2` errored inside `--data-dir`).
+- second client sees first's `GeoDelta`; client Bye isolation.
+- `SimCtl::connect` hydrate + fold + hang-free drop.
+- GUI smoke on Miguel: `server --bind 127.0.0.1:3090 --data-dir
+  /tmp/ne_server_data` on the 3090 + `editor --connect` under Xvfb :99.
+  `lsm_hidden.rhai` ran server-side ("liquid 512 neurons, 2256
+  synapses"); a second wire client's eval (400-neuron grid + noise)
+  appeared in the editor live; plane glow lit cyan under
+  `spike_bits`-driven client decay. Screenshots /tmp/remote7-8.png.
+
+### Measured bandwidth (server/examples/bandwidth.rs, RTX 3090 CUDA)
+
+1,000,000-neuron `100x100x100` grid, encoded `Activity` bytes counted
+over a 15 s wall window:
+
+| scenario | frames | avg frame | activity B/s | cadence | set bits/frame |
+|---|---|---|---|---|---|
+| noise 60 Hz | ~30 | ~700 B | ~1.35 KB/s | ~2 fps | ~all neurons |
+| noise 5 Hz  | ~30 | ~111 KB | ~0.22 MB/s  | ~2 fps | ~700,861 |
+
+Both far under the 2 MB/s target. Honest caveats: (a) the cadence was
+~2 fps under these loads — publish pacing is the sim's, not a transport
+throttle; at a true 30 fps the per-frame spike window shrinks ~10x so
+sparse-frame size shrinks roughly proportionally (bandwidth scales with
+spikes/s, not frame size), and the all-ones dense bitmap deflates to
+nothing. (b) Client glow within a publish window is an approximation —
+a spiked texel stamps 255 rather than the true exp-of-last-spike value;
+bounded by the window, and `GridTraces` restores truth on geo changes.
+
+### Next steps (not in part 1, per spec)
+
+wasm/browser build of the UI against the same protocol; dataset upload
++ training jobs; auth beyond localhost binding. Also open from 3b: real
+script pause/resume, raster density heat map, synapse-alpha tuning,
+backend-fallback `notice` (field exists, never set).
