@@ -209,7 +209,13 @@ pub fn landing_with(text: &str, kind: &str) -> String {
 
 /// `GET /admin` — the back office user table (admins only; caller 404s
 /// otherwise). Pending users float to the top with a count.
-pub fn admin(users: &[User], live_runs: &[i64], csrf: &str, flash: Option<&str>) -> String {
+pub fn admin(
+    users: &[User],
+    live_runs: &[i64],
+    csrf: &str,
+    flash: Option<&str>,
+    default_quota: u64,
+) -> String {
     let pending = users.iter().filter(|u| u.status == "pending").count();
     let mut b = header();
     b.push_str(&format!(
@@ -229,7 +235,13 @@ pub fn admin(users: &[User], live_runs: &[i64], csrf: &str, flash: Option<&str>)
         } else {
             fmt_date(u.last_login_ms)
         };
-        let quota_mb = u.quota_bytes / (1 << 20);
+        // Row value 0 = "use the server default" — show what the user
+        // actually gets, marked as default (same rule as `quota_of`).
+        let quota = if u.quota_bytes == 0 {
+            format!("{} MB (default)", default_quota / (1 << 20))
+        } else {
+            format!("{} MB", u.quota_bytes / (1 << 20))
+        };
         let run = if live_runs.contains(&u.id) {
             "live"
         } else {
@@ -239,14 +251,14 @@ pub fn admin(users: &[User], live_runs: &[i64], csrf: &str, flash: Option<&str>)
             "<tr><td><b>{}</b><br><span class=small>{}</span></td>\
              <td><span class=\"badge {}\">{}{}</span></td>\
              <td class=small>{}</td><td class=small>{created}</td><td class=small>{login}</td>\
-             <td class=small>quota {} MB</td><td class=small>{run}</td><td>",
+             <td class=small>quota {}</td><td class=small>{run}</td><td>",
             esc(&u.name),
             esc(&u.email),
             u.status,
             u.status,
             if u.is_admin { " · admin" } else { "" },
             esc(&u.note),
-            quota_mb,
+            quota,
         ));
         // Actions — each its own small form with the session CSRF.
         let form = |action: &str, extra: &str, label: &str| {
@@ -311,4 +323,41 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 /// in `landing` itself). Kept tiny on purpose.
 pub fn _runs_full(runs: &Arc<Runs>, max: usize) -> bool {
     runs.count() >= max
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user(id: i64, quota_bytes: u64) -> User {
+        User {
+            id,
+            email: format!("u{id}@x.dev"),
+            name: format!("U{id}"),
+            status: "active".into(),
+            is_admin: false,
+            created_ms: 1_700_000_000_000,
+            last_login_ms: 0,
+            quota_bytes,
+            note: String::new(),
+        }
+    }
+
+    /// Stage 13 L: a stored quota of 0 means "the server default" — the
+    /// table shows the effective MB, marked `(default)`; an explicit
+    /// quota renders without the marker.
+    #[test]
+    fn admin_shows_effective_quota_marked_default() {
+        let html = admin(
+            &[user(1, 0), user(2, 512 << 20)],
+            &[],
+            "c",
+            None,
+            2048 << 20,
+        );
+        assert!(html.contains("quota 2048 MB (default)"), "{html}");
+        assert!(html.contains("quota 512 MB"));
+        assert!(!html.contains("512 MB (default)"));
+        assert!(!html.contains("quota 0 MB"));
+    }
 }

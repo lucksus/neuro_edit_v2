@@ -434,17 +434,13 @@ impl Multi {
             }
             ("GET", "/admin") => match &sess {
                 Some((u, csrf)) if u.is_admin => {
-                    let users: Vec<User> = self
-                        .accounts
-                        .list()
-                        .into_iter()
-                        .map(|mut u| {
-                            u.quota_bytes = self.quota_of(&u);
-                            u
-                        })
-                        .collect();
-                    let body =
-                        pages::admin(&users, &self.runs.live(), csrf, req.query("did").as_deref());
+                    let body = pages::admin(
+                        &self.accounts.list(),
+                        &self.runs.live(),
+                        csrf,
+                        req.query("did").as_deref(),
+                        self.opts.default_quota_bytes,
+                    );
                     respond(
                         stream,
                         "200 OK",
