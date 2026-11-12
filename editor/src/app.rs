@@ -1424,6 +1424,29 @@ impl EditorApp {
         });
     }
 
+    /// Group-name picker for dialogs: combo of the live groups instead of
+    /// a free-text field that happily accepted typos.
+    fn group_combo(&self, ui: &mut egui::Ui, id: &str, group: &mut String) {
+        let names: Vec<String> = self
+            .geo
+            .as_ref()
+            .map(|g| g.groups.iter().map(|(n, _)| n.clone()).collect())
+            .unwrap_or_default();
+        let label = if group.is_empty() {
+            "(group)".to_string()
+        } else {
+            group.clone()
+        };
+        egui::ComboBox::from_id_salt(id)
+            .width(140.0)
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                for n in &names {
+                    ui.selectable_value(group, n.clone(), n);
+                }
+            });
+    }
+
     fn dialog(&mut self, ctx: &egui::Context) {
         let Some(mut d) = self.dlg.take() else { return };
         let mut open = true;
@@ -1513,7 +1536,7 @@ impl EditorApp {
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
                             ui.label("group");
-                            ui.text_edit_singleline(group);
+                            self.group_combo(ui, "conn_group", group);
                         });
                         ui.add(egui::DragValue::new(scaling).prefix("scaling ").speed(0.01));
                         ui.add(egui::DragValue::new(lambda).prefix("lambda "));
@@ -1533,7 +1556,7 @@ impl EditorApp {
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
                             ui.label("group");
-                            ui.text_edit_singleline(group);
+                            self.group_combo(ui, "w_group", group);
                         });
                         ui.add(egui::DragValue::new(mean).prefix("mean "));
                         ui.add(egui::DragValue::new(sd).prefix("sd "));
@@ -1552,7 +1575,7 @@ impl EditorApp {
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
                             ui.label("group");
-                            ui.text_edit_singleline(group);
+                            self.group_combo(ui, "ei_group", group);
                         });
                         ui.add(egui::Slider::new(frac, 0.0..=1.0).text("inh frac"));
                         if ui.button("Apply").clicked() {

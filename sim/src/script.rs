@@ -227,6 +227,16 @@ fn dyn_f64(x: f64) -> Dynamic {
     Dynamic::from(x)
 }
 
+/// Error for a group-name parameter that doesn't match — silent no-ops on
+/// typos were a review complaint.
+fn group_or_err(n: &NetHandle, g: &str) -> Result<(), Box<rhai::EvalAltResult>> {
+    if n.borrow().group(g).is_some() {
+        Ok(())
+    } else {
+        Err(s_err(format!("unknown group \"{g}\"")))
+    }
+}
+
 /// Script error shorthand.
 fn s_err(s: impl Into<String>) -> Box<rhai::EvalAltResult> {
     s.into().into()
@@ -447,6 +457,7 @@ pub fn register_api(
                   lambda: Dynamic,
                   w: Dynamic|
                   -> Result<(), Box<rhai::EvalAltResult>> {
+                group_or_err(n, g)?;
                 invalidate(&s, &v);
                 let cancelled = builders::create_connections_checked(
                     &mut n.borrow_mut(),
@@ -469,7 +480,12 @@ pub fn register_api(
         let (r, s, v) = (rng.clone(), sim.clone(), net_version.clone());
         engine.register_fn(
             "set_synapse_weights",
-            move |n: &mut NetHandle, g: &str, mean: Dynamic, sd: Dynamic| {
+            move |n: &mut NetHandle,
+                  g: &str,
+                  mean: Dynamic,
+                  sd: Dynamic|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                group_or_err(n, g)?;
                 invalidate(&s, &v);
                 builders::set_synapse_weights(
                     &mut n.borrow_mut(),
@@ -478,6 +494,7 @@ pub fn register_api(
                     d_f64(&sd),
                     &mut r.borrow_mut(),
                 );
+                Ok(())
             },
         );
     }
@@ -485,9 +502,14 @@ pub fn register_api(
         let (r, s, v) = (rng.clone(), sim.clone(), net_version.clone());
         engine.register_fn(
             "set_exc_inh",
-            move |n: &mut NetHandle, g: &str, frac: Dynamic| {
+            move |n: &mut NetHandle,
+                  g: &str,
+                  frac: Dynamic|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                group_or_err(n, g)?;
                 invalidate(&s, &v);
                 builders::set_exc_inh(&mut n.borrow_mut(), g, d_f64(&frac), &mut r.borrow_mut());
+                Ok(())
             },
         );
     }
@@ -594,16 +616,19 @@ pub fn register_api(
             .map(|i| i as rhai::INT)
             .unwrap_or(-1)
     });
-    engine.register_fn("neurons_of", |n: &mut NetHandle, g: &str| -> rhai::Array {
-        match n.borrow().group(g) {
-            Some(gr) => gr
+    engine.register_fn(
+        "neurons_of",
+        |n: &mut NetHandle, g: &str| -> Result<rhai::Array, Box<rhai::EvalAltResult>> {
+            group_or_err(n, g)?;
+            let b = n.borrow();
+            Ok(b.group(g)
+                .unwrap()
                 .members
                 .iter()
                 .map(|&m| Dynamic::from(m as rhai::INT))
-                .collect(),
-            None => Vec::new(),
-        }
-    });
+                .collect())
+        },
+    );
     engine.register_fn("group_names", |n: &mut NetHandle| -> rhai::Array {
         n.borrow()
             .groups

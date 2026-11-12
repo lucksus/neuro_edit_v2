@@ -100,3 +100,27 @@ fn cancel_check_stops_slow_builders() {
         "cancel should stop before all pairs are tried (got {n_syn})"
     );
 }
+
+/// Stage 3b: group-name parameters used to silently no-op on typos —
+/// `net.set_exc_inh("liguid", 0.2)` did nothing. They now error.
+#[test]
+fn unknown_group_is_an_error() {
+    let mut env = sim::script::Env::new(Network::new(), BackendKind::Cpu, 1).unwrap();
+    for code in [
+        "net.create_connections(\"nope\", 0.5, 50.0, 1.0)",
+        "net.set_synapse_weights(\"nope\", 1.0, 0.1)",
+        "net.set_exc_inh(\"nope\", 0.2)",
+        "net.neurons_of(\"nope\")",
+    ] {
+        let err = env.eval_str(code).unwrap_err();
+        assert!(
+            err.contains("unknown group"),
+            "{code} should report unknown group, got: {err}"
+        );
+    }
+    // and a real group still works
+    env.eval_str("net.create_2d_grid(\"g\", 4, 4, 10.0);")
+        .unwrap();
+    let ids = env.eval_str("net.neurons_of(\"g\").len()").unwrap();
+    assert_eq!(ids.as_int().unwrap(), 16);
+}
