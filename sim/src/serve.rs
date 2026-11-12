@@ -557,7 +557,9 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                     labels_json,
                 } => {
                     let ext = if signal_ext == "npy" { "npy" } else { "f32" };
-                    let r = if signal.len() > max_upload_bytes {
+                    let r = if let Err(e) = crate::dataset::Dataset::check_name(&name) {
+                        Err(e)
+                    } else if signal.len() > max_upload_bytes {
                         Err(format!(
                             "upload {}: {} B over the {} B limit",
                             name,

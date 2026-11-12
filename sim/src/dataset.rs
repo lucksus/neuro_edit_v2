@@ -41,9 +41,25 @@ impl Dataset {
         datasets_root.join(name)
     }
 
+    /// Dataset names are plain directory names — no separators, no `.`
+    /// segments — so `dataset("../x")` can't walk out of `datasets/`
+    /// even before the sandbox resolver sees it.
+    pub fn name_ok(name: &str) -> bool {
+        !name.is_empty() && !name.starts_with('.') && !name.contains('/') && !name.contains('\\')
+    }
+
+    pub fn check_name(name: &str) -> Result<(), String> {
+        if Self::name_ok(name) {
+            Ok(())
+        } else {
+            Err(format!("bad dataset name {name:?}"))
+        }
+    }
+
     /// Write `signal.f32` + `meta.json` + `labels.json` into
     /// `datasets_root/<name>/`.
     pub fn save(&self, datasets_root: &Path) -> Result<(), String> {
+        Self::check_name(&self.name)?;
         let dir = Self::dir_under(datasets_root, &self.name);
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let mut bytes = Vec::with_capacity(4 * self.channels.len() * self.steps());
@@ -77,6 +93,7 @@ impl Dataset {
 
     /// Read `datasets_root/<name>/` back (generated or uploaded files).
     pub fn load(datasets_root: &Path, name: &str) -> Result<Dataset, String> {
+        Self::check_name(name)?;
         let dir = Self::dir_under(datasets_root, name);
         let meta_s = std::fs::read_to_string(dir.join("meta.json"))
             .map_err(|e| format!("dataset {name:?}: meta.json: {e}"))?;
@@ -143,6 +160,7 @@ impl Dataset {
     /// else generate + save. The cache path is what makes dataset_gen
     /// cheap on repeat runs — the spec echo decides reuse, not mtime.
     pub fn generate_or_load(datasets_root: &Path, spec: &GenSpec) -> Result<Dataset, String> {
+        Self::check_name(&spec.name)?;
         let dir = Self::dir_under(datasets_root, &spec.name);
         if let Ok(meta_s) = std::fs::read_to_string(dir.join("meta.json")) {
             if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_s) {
@@ -203,6 +221,91 @@ pub struct EventSpec {
 }
 
 impl GenSpec {
+    /// Parse the `dataset_gen(#{…})` map. Unknown keys are errors —
+    /// silently ignored spec fields would lie about reproducibility.
+    pub fn from_map(m: &rhai::Map) -> Result<GenSpec, String> {
+        let get = |k: &str| m.get(k).ok_or_else(|| format!("spec needs {k}"));
+        let f64_of = |v: &rhai::Dynamic| -> Result<f64, String> {
+            v.as_float()
+                .ok()
+                .map(|f| f as f64)
+                .or_else(|| v.as_int().ok().map(|i| i as f64))
+                .ok_or_else(|| format!("want number, got {v:?}"))
+        };
+        let int_of = |v: &rhai::Dynamic| -> Result<i64, String> { f64_of(v).map(|f| f as i64) };
+        let opt_f =
+            |k: &str, d: f64| -> Result<f64, String> { m.get(k).map_or(Ok(d), |v| f64_of(v)) };
+        let opt_i =
+            |k: &str, d: i64| -> Result<i64, String> { m.get(k).map_or(Ok(d), |v| int_of(v)) };
+        let strs = |v: Option<&rhai::Dynamic>| -> Result<Vec<usize>, String> {
+            match v {
+                None => Ok(vec![]),
+                Some(d) => d
+                    .clone()
+                    .try_cast::<rhai::Array>()
+                    .ok_or_else(|| "channels want an array".to_string())?
+                    .iter()
+                    .map(|x| int_of(x).map(|i| i.max(0) as usize))
+                    .collect(),
+            }
+        };
+        let f32s = |v: Option<&rhai::Dynamic>| -> Result<Vec<f32>, String> {
+            match v {
+                None => Ok(vec![]),
+                Some(d) => d
+                    .clone()
+                    .try_cast::<rhai::Array>()
+                    .ok_or_else(|| "pattern wants an array".to_string())?
+                    .iter()
+                    .map(|x| f64_of(x).map(|f| f as f32))
+                    .collect(),
+            }
+        };
+        let events = match m.get("events") {
+            None => None,
+            Some(d) => {
+                let em = d
+                    .read_lock::<rhai::Map>()
+                    .ok_or("events wants a map")?
+                    .clone();
+                let ef = |k: &str, dflt: f64| -> Result<f64, String> {
+                    em.get(k).map_or(Ok(dflt), |v| f64_of(v))
+                };
+                Some(EventSpec {
+                    kind: em
+                        .get("kind")
+                        .and_then(|v| v.clone().try_cast::<String>())
+                        .unwrap_or_else(|| "rate".into()),
+                    every_ms: ef("every_ms", 500.0)?,
+                    jitter_ms: ef("jitter_ms", 0.0)?,
+                    window_ms: ef("window_ms", 20.0)?,
+                    strength: ef("strength", 1.0)?,
+                    channels: strs(em.get("channels"))?,
+                    gap_ms: ef("gap_ms", 0.0)?,
+                    pattern: f32s(em.get("pattern"))?,
+                })
+            }
+        };
+        Ok(GenSpec {
+            name: get("name")?
+                .clone()
+                .try_cast::<String>()
+                .ok_or("name wants a string")?,
+            channels: opt_i("channels", 1)?.max(1) as usize,
+            len_ms: f64_of(get("len_ms")?)?,
+            dt_ms: opt_f("dt_ms", 0.1)?.max(1e-3),
+            dist: m
+                .get("dist")
+                .and_then(|v| v.clone().try_cast::<String>())
+                .unwrap_or_else(|| "poisson".into()),
+            rate_hz: opt_f("rate_hz", 30.0)?,
+            mean: opt_f("mean", 0.0)?,
+            sd: opt_f("sd", 1.0)?,
+            seed: opt_i("seed", 1)? as u64,
+            events,
+        })
+    }
+
     /// Deterministic JSON used as the cache key for `generate_or_load`.
     pub fn canonical_json(&self) -> String {
         let ev = self.events.as_ref().map(|e| {

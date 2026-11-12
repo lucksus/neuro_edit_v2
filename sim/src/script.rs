@@ -32,6 +32,11 @@ pub type ProgressFn = Rc<RefCell<dyn FnMut(&mut Sim) -> bool>>;
 /// abort now. Defaults to never.
 pub type CancelFn = Rc<dyn Fn() -> bool>;
 
+/// `job_progress(#{…})` sink — the interactive worker prints the fields
+/// to the console; the server job runner turns them into `JobProgress`
+/// messages instead.
+pub type JobSinkFn = Box<dyn FnMut(Vec<(String, f64)>)>;
+
 /// Scripting environment: engine + shared handles.
 pub struct Env {
     pub engine: Engine,
@@ -60,6 +65,9 @@ pub struct Env {
     /// `net.load`, `samples_*`, `write_to_file`, `read_to_vec`). Set by
     /// the server; `None` = local mode, paths used verbatim.
     pub data_dir: Rc<RefCell<Option<std::path::PathBuf>>>,
+    /// `job_progress(#{…})` fields land here (console print locally,
+    /// `ServerMsg::JobProgress` under a server job).
+    pub job_sink: Rc<RefCell<JobSinkFn>>,
 }
 
 impl Env {
@@ -89,6 +97,18 @@ impl Env {
         let backend: BackendCell = Rc::new(std::cell::Cell::new(backend));
         let cancel: Rc<RefCell<CancelFn>> = Rc::new(RefCell::new(Rc::new(|| false)));
         let data_dir: Rc<RefCell<Option<std::path::PathBuf>>> = Rc::new(RefCell::new(None));
+        // Interactive default: job_progress fields print to the console.
+        let job_sink: Rc<RefCell<JobSinkFn>> = {
+            let p = on_print.clone();
+            Rc::new(RefCell::new(Box::new(move |fields: Vec<(String, f64)>| {
+                let s = fields
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v:.4}"))
+                    .collect::<Vec<_>>()
+                    .join("  ");
+                p(&format!("job: {s}"));
+            }) as JobSinkFn))
+        };
         register_api(
             &mut engine,
             net.clone(),
@@ -102,6 +122,7 @@ impl Env {
             progress_chunk.clone(),
             cancel.clone(),
             data_dir.clone(),
+            job_sink.clone(),
         );
         Env {
             engine,
@@ -117,6 +138,7 @@ impl Env {
             progress_chunk,
             cancel,
             data_dir,
+            job_sink,
         }
     }
 
@@ -135,6 +157,11 @@ impl Env {
     /// Plug in a stop check polled by the slow native builders.
     pub fn set_cancel(&self, f: CancelFn) {
         *self.cancel.borrow_mut() = f;
+    }
+
+    /// Job mode: swap the `job_progress` sink (server → `JobProgress`).
+    pub fn set_job_sink(&self, f: JobSinkFn) {
+        *self.job_sink.borrow_mut() = f;
     }
 
     /// Switch the backend scripts build sims on (invalidates any built sim).
@@ -451,13 +478,15 @@ pub fn register_api(
     progress_chunk: Rc<std::cell::Cell<usize>>,
     cancel: Rc<RefCell<CancelFn>>,
     data_dir: Rc<RefCell<Option<std::path::PathBuf>>>,
+    job_sink: Rc<RefCell<JobSinkFn>>,
 ) {
     engine
         .register_type_with_name::<NetHandle>("Net")
         .register_type_with_name::<SimSlot>("Sim")
         .register_type_with_name::<RngHandle>("Rng")
         .register_type_with_name::<RngStream>("RngStream")
-        .register_type_with_name::<DeltaReadout>("DeltaReadout");
+        .register_type_with_name::<DeltaReadout>("DeltaReadout")
+        .register_type_with_name::<crate::dataset::Dataset>("Dataset");
 
     // ---- help ----
     engine.register_fn("help", || -> String {
@@ -1391,6 +1420,106 @@ pub fn register_api(
                         .collect()
                 })
                 .unwrap_or_default()
+        });
+    }
+
+    // ---- datasets (`datasets/` under the sandbox root) ----
+    {
+        let dd = data_dir.clone();
+        engine.register_fn(
+            "dataset",
+            move |name: &str| -> Result<crate::dataset::Dataset, Box<rhai::EvalAltResult>> {
+                let root = std::path::PathBuf::from(rdir(&dd, "datasets")?);
+                crate::dataset::Dataset::load(&root, name).map_err(s_err)
+            },
+        );
+        let dd = data_dir.clone();
+        engine.register_fn(
+            "dataset_gen",
+            move |spec: rhai::Map| -> Result<crate::dataset::Dataset, Box<rhai::EvalAltResult>> {
+                let spec = crate::dataset::GenSpec::from_map(&spec).map_err(s_err)?;
+                let root = std::path::PathBuf::from(rdir(&dd, "datasets")?);
+                crate::dataset::Dataset::generate_or_load(&root, &spec).map_err(s_err)
+            },
+        );
+        let dd = data_dir.clone();
+        engine.register_fn("datasets", move || -> rhai::Array {
+            let root = match rdir(&dd, "datasets") {
+                Ok(p) => std::path::PathBuf::from(p),
+                Err(_) => return Vec::new(),
+            };
+            std::fs::read_dir(root)
+                .map(|rd| {
+                    rd.flatten()
+                        .filter(|e| e.path().is_dir())
+                        .map(|e| e.file_name().to_string_lossy().into_owned().into())
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        engine.register_fn(
+            "channel",
+            |d: &mut crate::dataset::Dataset,
+             i: rhai::INT|
+             -> Result<rhai::Array, Box<rhai::EvalAltResult>> {
+                if i < 0 || i as usize >= d.channels.len() {
+                    return Err(s_err(format!("channel {i} out of 0..{}", d.channels.len())));
+                }
+                Ok(d.channels[i as usize]
+                    .iter()
+                    .map(|&v| rhai::FLOAT::from(v).into())
+                    .collect())
+            },
+        );
+        engine.register_fn("events", |d: &mut crate::dataset::Dataset| -> rhai::Array {
+            d.events_ms.iter().map(|&v| v.into()).collect()
+        });
+        engine.register_fn(
+            "events",
+            |d: &mut crate::dataset::Dataset, lo: rhai::FLOAT, hi: rhai::FLOAT| -> rhai::Array {
+                d.events_ms
+                    .iter()
+                    .filter(|&&v| v >= lo && v < hi)
+                    .map(|&v| v.into())
+                    .collect()
+            },
+        );
+        engine.register_get(
+            "n_channels",
+            |d: &mut crate::dataset::Dataset| -> rhai::INT { d.channels.len() as rhai::INT },
+        );
+        engine.register_get("steps", |d: &mut crate::dataset::Dataset| -> rhai::INT {
+            d.steps() as rhai::INT
+        });
+        engine.register_get("len_ms", |d: &mut crate::dataset::Dataset| -> rhai::FLOAT {
+            d.len_ms()
+        });
+        engine.register_get("dt_ms", |d: &mut crate::dataset::Dataset| -> rhai::FLOAT {
+            d.dt_ms as rhai::FLOAT
+        });
+        engine.register_get("name", |d: &mut crate::dataset::Dataset| -> String {
+            d.name.clone()
+        });
+        engine.register_get("spec_json", |d: &mut crate::dataset::Dataset| -> String {
+            d.spec_json.clone()
+        });
+    }
+
+    // ---- training jobs (`job_progress` streams fields; the server job
+    // runner swaps the sink for `JobProgress` messages) ----
+    {
+        let js = job_sink.clone();
+        engine.register_fn("job_progress", move |m: rhai::Map| {
+            let fields: Vec<(String, f64)> = m
+                .iter()
+                .filter_map(|(k, v)| {
+                    v.as_float()
+                        .ok()
+                        .map(|f| (k.to_string(), f as f64))
+                        .or_else(|| v.as_int().ok().map(|i| (k.to_string(), i as f64)))
+                })
+                .collect();
+            (js.borrow_mut())(fields);
         });
     }
 }

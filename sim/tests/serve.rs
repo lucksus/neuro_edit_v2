@@ -24,6 +24,10 @@ struct Rig {
 }
 
 fn start(net: Network, data_dir: Option<std::path::PathBuf>) -> Rig {
+    start_limit(net, data_dir, usize::MAX)
+}
+
+fn start_limit(net: Network, data_dir: Option<std::path::PathBuf>, max_upload_bytes: usize) -> Rig {
     let (tx, rx) = mpsc::channel::<(u64, ClientMsg)>();
     let (etx, erx) = mpsc::channel::<ServerEvent>();
     let handle = std::thread::spawn(move || {
@@ -37,7 +41,7 @@ fn start(net: Network, data_dir: Option<std::path::PathBuf>) -> Rig {
                 seed: 1,
                 cfg: SimConfig::default(),
                 data_dir,
-                max_upload_bytes: usize::MAX,
+                max_upload_bytes,
                 abort: Arc::new(AtomicBool::new(false)),
             },
             rx,
@@ -414,4 +418,129 @@ fn second_client_sees_edits() {
         .unwrap();
     assert_eq!(d.to, None, "deltas broadcast to all clients");
     rig.stop();
+}
+
+#[test]
+fn datasets_generate_load_and_stay_confined() {
+    let dir = std::env::temp_dir().join(format!("serve_ds_{}_{}", std::process::id(), line!()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rig = start(Network::new(), Some(dir.clone()));
+    rig.send(ClientMsg::Subscribe);
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+
+    // generate: 2 s @ 0.5 ms = 4000 steps, 4 channels, a rate event
+    // every 100 ms starting at t=100 → 19 event labels.
+    rig.send(ClientMsg::Eval {
+        code: r#"let d = dataset_gen(#{name:"ev", channels:4, len_ms:2000, dt_ms:0.5,
+            dist:"poisson", rate_hz:40, seed:9,
+            events:#{kind:"rate", every_ms:100, window_ms:10, strength:5}});
+            print("gen n=" + d.events().len() + " ch=" + d.n_channels + " st=" + d.steps)"#
+            .into(),
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Console(s) if s.starts_with("gen n=")));
+    let line = evs
+        .iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::Console(s) if s.starts_with("gen n=") => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(line.contains("ch=4 st=4000"), "{line}");
+    assert!(line.contains("n=19"), "{line}");
+    // cached on disk + reloadable + labels survive a fresh load
+    assert!(dir.join("datasets/ev/signal.f32").is_file());
+    assert!(dir.join("datasets/ev/labels.json").is_file());
+    rig.send(ClientMsg::Eval {
+        code: r#"let d = dataset("ev");
+            print("again " + d.events().len() + " c0=" + d.channel(0).len())"#
+            .into(),
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Console(s) if s.starts_with("again ")));
+    assert!(
+        evs.iter().any(|e| matches!(
+            &e.msg,
+            ServerMsg::Console(s) if s == "again 19 c0=4000"
+        )),
+        "{evs:?}"
+    );
+
+    // dataset names can't walk out of datasets/
+    rig.send(ClientMsg::Eval {
+        code: r#"dataset("../x")"#.into(),
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Console(s) if s.contains("bad dataset name")));
+    assert!(!evs.is_empty());
+    // and neither can dataset_gen
+    rig.send(ClientMsg::Eval {
+        code: r#"dataset_gen(#{name:"../x", channels:1, len_ms:10, seed:1})"#.into(),
+    });
+    rig.until(|m| matches!(m, ServerMsg::Console(s) if s.contains("bad dataset name")));
+
+    rig.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn upload_dataset_writes_limits_and_loads() {
+    let dir = std::env::temp_dir().join(format!("serve_ul_{}_{}", std::process::id(), line!()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // 64 B cap — one 4-sample f32 channel fits, 100 B doesn't
+    let rig = start_limit(Network::new(), Some(dir.clone()), 64);
+    rig.send(ClientMsg::Subscribe);
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+
+    let meta = r#"{"channels":1,"steps":4,"dt_ms":0.5}"#.to_string();
+    let labels = r#"{"events_ms":[1.0]}"#.to_string();
+    let f32s = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
+
+    // over-limit payload refused
+    rig.send(ClientMsg::UploadDataset {
+        name: "big".into(),
+        signal_ext: "f32".into(),
+        signal: vec![0u8; 100],
+        meta_json: meta.clone(),
+        labels_json: labels.clone(),
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Error(s) if s.contains("over the")));
+    assert!(!evs.is_empty());
+    assert!(!dir.join("datasets/big").exists());
+
+    // traversal refused
+    rig.send(ClientMsg::UploadDataset {
+        name: "../evil".into(),
+        signal_ext: "f32".into(),
+        signal: f32s(&[1.0; 4]),
+        meta_json: meta.clone(),
+        labels_json: labels.clone(),
+    });
+    rig.until(|m| matches!(m, ServerMsg::Error(s) if s.contains("bad dataset name")));
+    assert!(!dir.join("evil").exists());
+
+    // legit upload lands and loads through `dataset()`
+    rig.send(ClientMsg::UploadDataset {
+        name: "tiny".into(),
+        signal_ext: "f32".into(),
+        signal: f32s(&[1.0, 2.0, 3.0, 4.0]),
+        meta_json: meta,
+        labels_json: labels,
+    });
+    rig.until(|m| matches!(m, ServerMsg::FileWritten { path } if path == "datasets/tiny"));
+    assert!(dir.join("datasets/tiny/signal.f32").is_file());
+    rig.send(ClientMsg::Eval {
+        code: r#"let d = dataset("tiny");
+            print("up " + d.n_channels + "x" + d.steps + " ev=" + d.events().len()
+                  + " v=" + d.channel(0)[2])"#
+            .into(),
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Console(s) if s.starts_with("up ")));
+    assert!(
+        evs.iter().any(|e| matches!(
+            &e.msg,
+            ServerMsg::Console(s) if s == "up 1x4 ev=1 v=3.0"
+        )),
+        "{evs:?}"
+    );
+
+    rig.stop();
+    let _ = std::fs::remove_dir_all(&dir);
 }
