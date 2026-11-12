@@ -288,3 +288,67 @@ node-level axon/dendrite objects `[-]` by design, MLP/MNIST/PHOTOSS `[-]`.
 
 Checks: cargo fmt clean; cargo test --workspace 13/13 binaries pass with
 and without `sim/cuda`.
+
+## Stage 2 — review fixes (review/STAGE2.md, this run)
+
+Done in the review's order; each item is a separate commit.
+
+- **P1-1 spike ring** (`aa55bf4`): `CpuSim` `|=`/`CudaSim` `atomicOr`
+  never cleared ring rows, so long windows double-counted and wrapped
+  rows reported stale spikes. Both backends now memset the *next* row
+  after each step, `spike_row` clamps `back` to `t`, and
+  `spike_counts(rows)` is `Result`: `rows >= t` returns exact lifetime
+  totals (new `pn_total` counter), `rows > ring` errors, else the exact
+  window sum. `sim/tests/spike_ring.rs` reproduces red on both backends
+  (true 0 reported as 14 on CPU) and is green on the fix, incl. a
+  5000-step window.
+- **P1-2 robustness** (`4904d81`, `519104d`): `.ne2` load validates
+  synapse/input/readout/group indices and rejects malformed files
+  (`net_format::validate`, wired into `io::load`/`load_json`);
+  `insert_subnet` skips out-of-range refs instead of panicking. All
+  script neuron ids are bounds-checked → script errors (not panics).
+  CUDA host/device calls propagate `Result` through `run_steps`/`run_ms`
+  instead of `expect` panics; empty nets are safe on both backends
+  (padded allocations, guarded reset/read paths). The editor worker wraps
+  script eval in `catch_unwind` and stays alive after panics/errors.
+  Tests: `sim/tests/robustness.rs`, `bounds.rs`, net-format io/network
+  unit tests.
+- **P2-5 pause stops scripts** (`2e20d07`): the worker installs an Rhai
+  `on_progress` hook (fires per-operation, incl. inside `while` loops)
+  that checks a UI-side atomic abort flag — pause works even while the
+  worker is blocked in `eval_str`. Pause button is shown whenever a run
+  or script is busy, not only during continuous run. Test: infinite
+  `while(true){}` loop aborts and the worker keeps serving commands.
+- **P1-3 big scenes** (`e14b3b7`): the 16 B/synapse `lcol` buffer is
+  gone — the source endpoint's high bit carries exc/inh and the shader
+  picks the color (8 B/synapse total). `pairs` is uploaded/drawn in
+  chunks under `max_storage_buffer_binding_size`, capped by
+  `max_buffer_size`; `set_scene` indexes `geo.pos` defensively. Screenshot
+  readback now uses padded row strides (odd widths no longer panic).
+  `editor/tests/big_scene.rs`: 10 M synapses through `set_scene` + a real
+  offscreen draw in ~0.85 s; synapse colors visually verified on the LSM
+  liquid screenshot.
+- **P2-4 honest eval** (`37d64c5`, `c6b400f`): see the LSM section above.
+  500 independent permutations/seed (ridge refit each) → null mean 0.502,
+  sd 0.189, pooled p=0.001; independent train/val/test streams; 28-feature
+  coincidence baseline added — and it *beats* the liquid (1.000 vs 0.88),
+  which is now stated plainly in README/tutorial/parity. Tests:
+  `sim/tests/honest_eval.rs`, `lsm_null.rs` (kept).
+
+Optional review items also done:
+
+- **P2-7** (`01041ae`): `Env.backend` is an `Rc<Cell<BackendKind>>` read
+  live by `ensure_sim` — the toolbar backend combo now affects
+  script-built sims; `set_backend` invalidates the sim.
+- **P2-8** (`fff6d00`): `Stimulus.play_start` is per-input —
+  `play_input` on input B no longer re-zeroes input A.
+- **P2-9** (`ec3e720`): noise hash is splitmix64-style full-64-bit
+  avalanche mixing (was a weak linear pre-mix), identical on CPU/CUDA.
+- **P2-11** (`58b4ea4`): v(t) watch records every simulated step
+  (per-watch drain buffers), not one sample per published chunk; the app
+  back-dates samples by dt. `ProgressFn` takes `&mut Sim` accordingly.
+
+Checks: `cargo fmt` clean; `cargo test --workspace` all binaries pass
+with and without `sim/cuda` (21 test targets, 0 failures on the final
+head). Each of the four optional commits compiles standalone (worktree-
+verified). Not pushed; no remote configured.
