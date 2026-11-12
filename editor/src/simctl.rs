@@ -215,7 +215,18 @@ fn worker(
         let gv = env.net_version.get();
         if gv != published_geo_version {
             let geo = geo_snap(&env);
+            let new_gen = env.net_gen.get();
             if let Ok(mut w) = shared.write() {
+                if new_gen != w.net_gen {
+                    // Net replaced: sim stats (t, spikes) describe the old
+                    // net — publish a clean slate until the next run.
+                    w.snap = Snap {
+                        seq: w.snap.seq + 1,
+                        ..Default::default()
+                    };
+                    w.net_gen = new_gen;
+                    w.sim_built = false;
+                }
                 w.geo = Some(Arc::new(geo));
             }
             published_geo_version = gv;
@@ -269,6 +280,7 @@ fn worker(
                 Cmd::LoadNet(path) => match net_format::io::load(&path) {
                     Ok(n) => {
                         *env.net.borrow_mut() = n;
+                        env.net_gen.set(env.net_gen.get() + 1);
                         bump(&env);
                         log(&shared, format!("loaded {path}"));
                     }
@@ -276,6 +288,7 @@ fn worker(
                 },
                 Cmd::NewNet => {
                     *env.net.borrow_mut() = Network::new();
+                    env.net_gen.set(env.net_gen.get() + 1);
                     bump(&env);
                 }
                 Cmd::AutoRun(b) => {

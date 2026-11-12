@@ -42,6 +42,10 @@ pub struct Env {
     pub on_print: PrintFn,
     /// Bumped on every net mutation (any fn that invalidates the sim).
     pub net_version: Rc<std::cell::Cell<u64>>,
+    /// Bumped only on wholesale net REPLACEMENT (clear/load/New) — the
+    /// editor resets UI state (selection, watches, plots) on this, not on
+    /// ordinary edits.
+    pub net_gen: Rc<std::cell::Cell<u64>>,
     /// Between-chunks callback; `None` in headless use.
     pub progress: Rc<RefCell<Option<ProgressFn>>>,
     /// Chunk length for progress callbacks, in steps.
@@ -75,6 +79,7 @@ impl Env {
             engine.on_print(move |s| p(s));
         }
         let net_version = Rc::new(std::cell::Cell::new(1u64));
+        let net_gen = Rc::new(std::cell::Cell::new(1u64));
         let progress: Rc<RefCell<Option<ProgressFn>>> = Rc::new(RefCell::new(None));
         let progress_chunk = Rc::new(std::cell::Cell::new(200usize));
         let backend: BackendCell = Rc::new(std::cell::Cell::new(backend));
@@ -87,6 +92,7 @@ impl Env {
             cfg.clone(),
             backend.clone(),
             net_version.clone(),
+            net_gen.clone(),
             progress.clone(),
             progress_chunk.clone(),
             cancel.clone(),
@@ -100,6 +106,7 @@ impl Env {
             sim,
             on_print,
             net_version,
+            net_gen,
             progress,
             progress_chunk,
             cancel,
@@ -323,6 +330,7 @@ pub fn register_api(
     cfg: CfgHandle,
     backend: BackendCell,
     net_version: Rc<std::cell::Cell<u64>>,
+    net_gen: Rc<std::cell::Cell<u64>>,
     progress: Rc<RefCell<Option<ProgressFn>>>,
     progress_chunk: Rc<std::cell::Cell<usize>>,
     cancel: Rc<RefCell<CancelFn>>,
@@ -353,9 +361,10 @@ pub fn register_api(
         );
     }
     {
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, g) = (sim.clone(), net_version.clone(), net_gen.clone());
         engine.register_fn("clear", move |n: &mut NetHandle| {
             *n.borrow_mut() = Network::new();
+            g.set(g.get() + 1);
             invalidate(&s, &v);
         });
     }
@@ -751,13 +760,14 @@ pub fn register_api(
         }
     });
     {
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, g) = (sim.clone(), net_version.clone(), net_gen.clone());
         engine.register_fn(
             "load",
             move |n: &mut NetHandle, path: &str| -> Result<(), Box<rhai::EvalAltResult>> {
                 let loaded =
                     net_format::io::load(path).map_err(|e| s_err(format!("load {path}: {e}")))?;
                 *n.borrow_mut() = loaded;
+                g.set(g.get() + 1);
                 invalidate(&s, &v);
                 Ok(())
             },

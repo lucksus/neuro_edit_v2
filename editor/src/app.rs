@@ -87,6 +87,11 @@ pub struct EditorApp {
     pub net_path: Option<String>,
 
     dlg: Option<Dialog>,
+    /// Last net-replacement generation seen — a change means New/load/
+    /// `net.clear()` happened on the worker and UI state must reset.
+    last_net_gen: u64,
+    /// `GeoSnap::version` at the last save — anything newer = unsaved edits.
+    saved_version: u64,
     watch_sent: Vec<u32>,
     pub status: String,
     /// Last subnet JSON we copied (for the Paste menu without OS access).
@@ -123,8 +128,20 @@ pub struct MoveDrag {
     pub ids: Vec<u32>,
 }
 
+/// Action queued behind the unsaved-changes confirm dialog.
+#[derive(Clone)]
+pub enum PendingAction {
+    New,
+    Load(String),
+    Quit,
+}
+
 #[derive(Clone)]
 pub enum Dialog {
+    /// Unsaved edits — confirm before replacing/abandoning the net.
+    Discard {
+        then: PendingAction,
+    },
     Grid2d {
         group: String,
         w: i32,
@@ -243,6 +260,8 @@ impl EditorApp {
             noise_kick: 15.0,
             net_path: None,
             dlg: None,
+            last_net_gen: 0,
+            saved_version: 0,
             watch_sent: Vec::new(),
             status: String::new(),
             clipboard: None,
@@ -379,9 +398,64 @@ impl EditorApp {
         });
     }
 
+    /// True when the published net has edits since the last save.
+    fn dirty(&self) -> bool {
+        let sh = self.ctl.shared.read().unwrap();
+        sh.geo.as_ref().map(|g| g.version).unwrap_or(0) != self.saved_version
+    }
+
+    /// Run `act` immediately, or behind the unsaved-changes dialog.
+    fn guarded(&mut self, ctx: &egui::Context, act: PendingAction) {
+        if self.dirty() {
+            self.dlg = Some(Dialog::Discard { then: act });
+        } else {
+            self.do_pending(ctx, act);
+        }
+    }
+
+    fn do_pending(&mut self, ctx: &egui::Context, act: PendingAction) {
+        match act {
+            PendingAction::New => {
+                self.send(Cmd::NewNet);
+                self.net_path = None;
+            }
+            PendingAction::Load(p) => self.load_net(p),
+            PendingAction::Quit => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    /// New/load/`net.clear()` — drop every piece of UI state that refers
+    /// to the old net's ids, and ask for a reframe on the new geometry.
+    fn reset_net_state(&mut self) {
+        self.selection.clear();
+        self.connect_from = None;
+        self.move_drag = None;
+        self.preview_delta = None;
+        self.box_sel = None;
+        self.hover = None;
+        self.pick_click = None;
+        if !self.watch_sent.is_empty() {
+            self.watch_sent.clear();
+            self.send(Cmd::Watch(Vec::new()));
+        }
+        self.v_hist.clear();
+        self.raster.clear();
+        self.particles = Particles::new();
+        self.activity.clear();
+        self.grid_traces.clear();
+        self.input_values = Default::default();
+        self.plane_cfgs.clear();
+        self.frame_pending = true;
+        // The replaced net starts clean — its version is the saved marker.
+        let sh = self.ctl.shared.read().unwrap();
+        self.saved_version = sh.geo.as_ref().map(|g| g.version).unwrap_or(0);
+    }
+
     /// Pull fresh shared state (geometry + snapshot) into the UI.
     fn sync_shared(&mut self, gpu: &mut Gpu) {
-        let (geo_new, snap, running, sim_built, busy) = {
+        let (geo_new, snap, running, sim_built, busy, net_gen) = {
             let sh = self.ctl.shared.read().unwrap();
             (
                 sh.geo.clone(),
@@ -389,8 +463,13 @@ impl EditorApp {
                 sh.running,
                 sh.sim_built,
                 sh.busy,
+                sh.net_gen,
             )
         };
+        if net_gen != self.last_net_gen {
+            self.last_net_gen = net_gen;
+            self.reset_net_state();
+        }
         if let Some(g) = geo_new {
             if g.version != self.geo_version {
                 gpu.set_scene(&g);
@@ -548,9 +627,7 @@ impl EditorApp {
             ui.horizontal(|ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("New").clicked() {
-                        self.send(Cmd::NewNet);
-                        self.selection.clear();
-                        self.net_path = None;
+                        self.guarded(ctx, PendingAction::New);
                         ui.close();
                     }
                     if ui
@@ -569,7 +646,7 @@ impl EditorApp {
                         let rec: Vec<String> = self.recent.iter().cloned().collect();
                         for p in rec {
                             if ui.button(&p).clicked() {
-                                self.load_net(p);
+                                self.guarded(ctx, PendingAction::Load(p));
                                 ui.close();
                             }
                         }
@@ -581,6 +658,15 @@ impl EditorApp {
                         match &self.net_path {
                             Some(p) => {
                                 self.send(Cmd::Eval(format!("net.save({p:?})")));
+                                self.saved_version = self
+                                    .ctl
+                                    .shared
+                                    .read()
+                                    .unwrap()
+                                    .geo
+                                    .as_ref()
+                                    .map(|g| g.version)
+                                    .unwrap_or(0);
                                 let p = p.clone();
                                 self.push_recent(p);
                             }
@@ -603,7 +689,7 @@ impl EditorApp {
                     }
                     ui.separator();
                     if ui.button("Quit").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        self.guarded(ctx, PendingAction::Quit);
                     }
                 });
                 ui.menu_button("Edit", |ui| {
@@ -1760,6 +1846,23 @@ impl EditorApp {
                         }
                     });
             }
+            Dialog::Discard { then } => {
+                egui::Window::new("Unsaved changes")
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        ui.label("The network has unsaved changes — discard them?");
+                        ui.horizontal(|ui| {
+                            if ui.button("Discard").clicked() {
+                                let act = then.clone();
+                                self.do_pending(ctx, act);
+                                keep = false;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                keep = false;
+                            }
+                        });
+                    });
+            }
             Dialog::SaveAs { path } => {
                 egui::Window::new("Save as")
                     .open(&mut open)
@@ -1768,6 +1871,15 @@ impl EditorApp {
                         if ui.button("Save").clicked() {
                             let p = path.clone();
                             self.send(Cmd::Eval(format!("net.save({p:?})")));
+                            self.saved_version = self
+                                .ctl
+                                .shared
+                                .read()
+                                .unwrap()
+                                .geo
+                                .as_ref()
+                                .map(|g| g.version)
+                                .unwrap_or(0);
                             self.net_path = Some(p.clone());
                             self.push_recent(p);
                             keep = false;
@@ -1781,7 +1893,7 @@ impl EditorApp {
                         ui.text_edit_singleline(path);
                         if ui.button("Load").clicked() {
                             let p = path.clone();
-                            self.load_net(p);
+                            self.guarded(ctx, PendingAction::Load(p));
                             keep = false;
                         }
                     });
@@ -1849,6 +1961,17 @@ impl eframe::App for EditorApp {
         for ev in ctx.input(|i| i.events.clone()) {
             if let egui::Event::Paste(txt) = ev {
                 self.paste(Some(txt.clone()));
+            }
+        }
+
+        // OS close button: with unsaved edits, hold the window open behind
+        // the discard dialog instead of exiting silently.
+        if ctx.input(|i| i.viewport().close_requested()) && self.dirty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if !matches!(self.dlg, Some(Dialog::Discard { .. })) {
+                self.dlg = Some(Dialog::Discard {
+                    then: PendingAction::Quit,
+                });
             }
         }
 

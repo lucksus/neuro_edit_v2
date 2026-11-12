@@ -95,6 +95,9 @@ pub struct Snap {
 #[allow(dead_code)]
 pub struct Shared {
     pub geo: Option<Arc<GeoSnap>>,
+    /// Net-replacement generation (New / load / `net.clear()`) — the UI
+    /// resets selection, watches and plots when this changes.
+    pub net_gen: u64,
     pub snap: Snap,
     /// Worker is in continuous run mode.
     pub running: bool,
@@ -115,6 +118,7 @@ impl Default for Shared {
     fn default() -> Self {
         Self {
             geo: None,
+            net_gen: 0,
             snap: Snap::default(),
             running: false,
             sim_built: false,
