@@ -24,11 +24,15 @@ typedef unsigned short u16;
   __device__ __forceinline__ rt_t rt_put(float w){ return w; }
 #endif
 
-// Same mixing as state::noise_hash on the CPU.
+// Same mixing as state::noise_hash on the CPU (splitmix64).
 __device__ __forceinline__ u32 noise_hash(u32 i, u64 t, u64 seed){
-  u32 h = (u32)((u64)i * 747796405ull + t * 2891336453ull + seed * 12345ull);
-  h ^= h >> 16; h *= 2246822519u; h ^= h >> 13; h *= 3266489917u; h ^= h >> 16;
-  return h;
+  u64 h = (u64)i * 0x9E3779B97F4A7C15ull
+        + t * 0xBF58476D1CE4E5B9ull
+        + seed * 0x94D049BB133111EBull;
+  h ^= h >> 30; h *= 0xBF58476D1CE4E5B9ull;
+  h ^= h >> 27; h *= 0x94D049BB133111EBull;
+  h ^= h >> 31;
+  return (u32)(h >> 32);
 }
 
 // One neuron per thread. t is the absolute step index.
@@ -46,7 +50,8 @@ extern "C" __global__ void neuron_kernel(
     int model,
     int* spk, int* cnt_cur,
     u64* spk_row,
-    u64* pn_total)
+    u64* pn_total,
+    const u32* vwatch, int nwatch, float* vrec, int vrec_d)
 {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if(i >= N) return;
@@ -76,6 +81,10 @@ extern "C" __global__ void neuron_kernel(
     uu += dt * a[i] * (b[i]*vv - uu);
   }
   v[i] = vv; u[i] = uu;
+  // per-step v record for watched neurons (editor v(t) plot)
+  for(int w = 0; w < nwatch; ++w){
+    if((u32)i == vwatch[w]) vrec[(u64)(t % (u64)vrec_d) * (u64)nwatch + (u64)w] = vv;
+  }
 
   if(vv >= 30.f){
     int k = atomicAdd(cnt_cur, 1);

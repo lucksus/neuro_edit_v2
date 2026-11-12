@@ -95,18 +95,22 @@ pub fn ring_depth(csr: &SynCsr, _dt_ms: f32) -> usize {
 
 /// Counter-based per-(neuron,step) hash for reproducible background noise —
 /// the same mixing as the CUDA kernel uses, so both backends draw the same
-/// kicks for a given seed.
+/// kicks for a given seed. SplitMix64: the (i,t,seed) tuple is combined
+/// with three independent 64-bit strides and run through the full
+/// splitmix64 avalanche — the previous version truncated a linear combo
+/// to u32 before mixing, which weakens avalanche diffusion.
 #[inline(always)]
 pub fn noise_hash(i: u32, t: u64, seed: u64) -> u32 {
     let mut h = (i as u64)
-        .wrapping_mul(747796405)
-        .wrapping_add(t.wrapping_mul(2891336453))
-        .wrapping_add(seed.wrapping_mul(12345)) as u32;
-    h ^= h >> 16;
-    h = h.wrapping_mul(2246822519);
-    h ^= h >> 13;
-    h = h.wrapping_mul(3266489917);
-    h ^ (h >> 16)
+        .wrapping_mul(0x9E3779B97F4A7C15)
+        .wrapping_add(t.wrapping_mul(0xBF58476D1CE4E5B9))
+        .wrapping_add(seed.wrapping_mul(0x94D049BB133111EB));
+    h ^= h >> 30;
+    h = h.wrapping_mul(0xBF58476D1CE4E5B9);
+    h ^= h >> 27;
+    h = h.wrapping_mul(0x94D049BB133111EB);
+    h ^= h >> 31;
+    (h >> 32) as u32
 }
 
 /// Kick flag for neuron `i` at step `t`: Poisson with rate `rate_hz`.
