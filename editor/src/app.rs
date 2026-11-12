@@ -773,7 +773,11 @@ impl EditorApp {
             None => return,
         };
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            // Wrapped, not plain horizontal: a plain row that overflows
+            // grows the panel's max_rect past the window, which makes the
+            // sibling `horizontal_wrapped` mode row see an over-wide
+            // boundary and never wrap — controls clip off-screen instead.
+            ui.horizontal_wrapped(|ui| {
                 ui.menu_button("File", |ui| {
                     if ui.add(icons::button(&ic.new, "New")).clicked() {
                         self.guarded(ctx, PendingAction::New);

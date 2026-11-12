@@ -934,3 +934,159 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod wrap_probe {
+    use eframe::egui;
+
+    #[test]
+    fn horizontal_wrapped_wraps_in_panel() {
+        let ctx = egui::Context::default();
+        let mut h = 0.0f32;
+        for _ in 0..3 {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::pos2(0.0, 0.0),
+                        egui::vec2(300.0, 500.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::TopBottomPanel::top("t").show(ctx, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            for i in 0..10 {
+                                ui.button(format!("button-{i}-long-label"));
+                            }
+                        });
+                        h = ui.min_rect().height();
+                    });
+                },
+            );
+        }
+        assert!(h > 40.0, "wrap did not engage: panel height {h}");
+    }
+}
+
+#[cfg(test)]
+mod wrap_probe2 {
+    use eframe::egui;
+
+    // Repro of the toolbar wrap complaint: a narrow TopBottomPanel must
+    // wrap the controls row onto a second line instead of clipping.
+    #[test]
+    fn wrapped_row_grows_past_one_line() {
+        let ctx = egui::Context::default();
+        let mut row_h = 0.0f32;
+        for _ in 0..3 {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::pos2(0.0, 0.0),
+                        egui::vec2(300.0, 500.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::TopBottomPanel::top("t").show(ctx, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            for i in 0..10 {
+                                ui.button(format!("btn-{i}-long-text"));
+                            }
+                        });
+                        row_h = ui.min_rect().height();
+                    });
+                },
+            );
+        }
+        assert!(row_h > 40.0, "wrapped row only {row_h}px tall — no wrap");
+    }
+
+    // Same shape as the real toolbar: a plain `horizontal` sibling first,
+    // then the `horizontal_wrapped` mode row — does the wrap still engage?
+    #[test]
+    fn wrapped_row_after_plain_horizontal_wraps() {
+        let ctx = egui::Context::default();
+        let mut h = 0.0f32;
+        let mut wrapped_h = 0.0f32;
+        for _ in 0..3 {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::pos2(0.0, 0.0),
+                        egui::vec2(300.0, 500.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::TopBottomPanel::top("t").show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.button("File");
+                            ui.button("Run");
+                        });
+                        let inner = ui.horizontal_wrapped(|ui| {
+                            for i in 0..10 {
+                                ui.button(format!("btn-{i}-long-text"));
+                            }
+                        });
+                        wrapped_h = inner.response.rect.height();
+                        h = ui.min_rect().height();
+                    });
+                },
+            );
+        }
+        assert!(
+            wrapped_h > 40.0,
+            "wrapped row after sibling did not wrap: {wrapped_h}px (panel {h}px)"
+        );
+    }
+
+    // Real toolbar mix: selectable buttons + separator + label + ComboBox +
+    // tinted image + status label — find which widget poisons the wrap.
+    #[test]
+    fn wrapped_row_with_toolbar_mix_wraps() {
+        let ctx = egui::Context::default();
+        let mut wrapped_h = 0.0f32;
+        for _ in 0..3 {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::pos2(0.0, 0.0),
+                        egui::vec2(300.0, 500.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::TopBottomPanel::top("t").show(ctx, |ui| {
+                        let inner = ui.horizontal_wrapped(|ui| {
+                            let mut mode = 0usize;
+                            for name in ["Navigate", "Insert", "Connect", "Move"] {
+                                ui.selectable_value(&mut mode, usize::MAX, name);
+                            }
+                            ui.separator();
+                            ui.label("plane");
+                            ui.selectable_value(&mut 0, 0, "x-z");
+                            ui.selectable_value(&mut 0, 1, "x-y");
+                            ui.selectable_value(&mut 0, 2, "y-z");
+                            ui.separator();
+                            ui.selectable_value(&mut true, true, "synapses");
+                            ui.selectable_value(&mut true, true, "grid");
+                            egui::ComboBox::from_id_salt("gv")
+                                .selected_text("auto")
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut 0, 0, "auto");
+                                });
+                            ui.separator();
+                            ui.label("status text goes here");
+                        });
+                        wrapped_h = inner.response.rect.height();
+                    });
+                },
+            );
+        }
+        assert!(
+            wrapped_h > 40.0,
+            "toolbar-mix row did not wrap: {wrapped_h}px"
+        );
+    }
+}
