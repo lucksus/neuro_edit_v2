@@ -256,6 +256,94 @@ fn ws_job_progress_survives_client() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `examples/detector.rhai` end-to-end as a background job: the shipped
+/// script with its parameter block swapped for a tiny one (the
+/// `[TEST-BLOCK]` markers delimit it), run server-side under a sandbox.
+#[test]
+fn ws_detector_example_small() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/detector.rhai"),
+    )
+    .unwrap();
+    let b0 = src.find("// ---------- parameters").unwrap();
+    let b1 = src.find("// ---------- /parameters").unwrap();
+    let (head, tail) = (&src[..b0], &src[b1..]);
+    let script = format!(
+        "{head}\
+let SEEDS = [1];
+let DS_NAME = \"det_test\";
+let NCH = 4;
+let LEN_MS = 12000;
+let DT_MS = 1.0;
+let SPB = 10;
+let RATE_HZ = 25.0;
+let EV_EVERY = 400.0;
+let EV_JITTER = 100.0;
+let EV_WIN = 10.0;
+let EV_STR = 180.0;
+let DELAY_MS = 0.0;
+let WIN_MS = 20;
+let MARGIN = 60;
+let NEG_PRE = 200.0;
+let NEG_POST = 150.0;
+let RIDGE_L = 1.0;
+let NPERM = 5;
+let LIQ_SIDE = 4;
+let LIQ_SPACING = 60.0;
+let CONN_SCALING = 0.35;
+let CONN_LAMBDA = 90.0;
+let W_REC = 3.0;
+let W_IN = 12.0;
+let PER_SRC = 8;
+let TRAIN = [0.0, 6000.0];
+let VAL = [6000.0, 9000.0];
+let TEST = [9000.0, 12000.0];
+{tail}"
+    );
+
+    let dir = std::env::temp_dir().join(format!("ws_det_{}_{}", std::process::id(), line!()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let w = start(Network::new(), Some(dir.clone()), 7);
+    let mut c = w.client();
+    hydrate(&mut c);
+    c.send(&ClientMsg::StartJob {
+        name: "detector-small".into(),
+        script,
+    })
+    .unwrap();
+    let msgs = until(&mut c, |m| matches!(m, ServerMsg::JobDone { .. }));
+    let (id, status, error) = msgs
+        .iter()
+        .find_map(|m| match m {
+            ServerMsg::JobDone { id, status, error } => Some((*id, status.clone(), error.clone())),
+            _ => None,
+        })
+        .unwrap();
+    let console: Vec<String> = msgs
+        .iter()
+        .filter_map(|m| match m {
+            ServerMsg::Console(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(status, "done", "job console: {console:?} err: {error:?}");
+    assert!(
+        console.iter().any(|s| s.contains("liquid auc=")),
+        "no detector output: {console:?}"
+    );
+
+    // runs/<id>/ got the full record incl. the saved trained net
+    let run = dir.join("runs").join(id.to_string());
+    assert!(run.join("script.rhai").is_file());
+    assert!(run.join("metrics.json").is_file());
+    assert!(run.join("result.json").is_file());
+    assert!(run.join("detector.ne2").is_file());
+    // the generated dataset is cached under datasets/
+    assert!(dir.join("datasets/det_test/signal.f32").is_file());
+    w.srv.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn ws_job_cancel() {
     let dir = std::env::temp_dir().join(format!("ws_jc_{}_{}", std::process::id(), line!()));
