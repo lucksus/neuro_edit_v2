@@ -32,7 +32,10 @@ fn help_parens_returns_overview() {
 fn help_topic_gives_a_section() {
     let s = env().eval_str("help(\"sim\")").unwrap().to_string();
     assert!(s.contains("run(ms)"), "{s}");
-    assert!(!s.contains("add_neuron"), "topic slice must not be the dump");
+    assert!(
+        !s.contains("add_neuron"),
+        "topic slice must not be the dump"
+    );
     // aliases work too
     let s2 = env().eval_str("help(\"synapse\")").unwrap().to_string();
     assert!(s2.contains("set_syn_tau"), "{s2}");
