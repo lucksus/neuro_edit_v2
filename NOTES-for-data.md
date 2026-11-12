@@ -1946,3 +1946,23 @@ idle heartbeat fixes it (bounds the notice to ~1 s). (2) pgrep-style
 kills during verification kept hitting shell wrappers, not the
 server — the CDP run showed `WS OPEN→CLOSED→OPEN(retry)→ERR_REFUSED→CLOSED`
 and a restart recovered the session in place with no reload.
+
+## Stage 17C — the D test can actually fail now
+
+`drop_user_during_eval_is_fast` polled `run.dead()` — but `stop()`
+`.take()`s the join handle and `dead()` returned `true` for `None`,
+so the assertion passed whether or not the worker exited. With every
+`shutdown.load(..)`/`shut.load(..)` in `sim/src/serve.rs` replaced by
+`false`, the old test still passed (~3 s, the bounded join + detach).
+
+- `UserRun.alive: Arc<AtomicBool>` — set before spawn, cleared by a
+  `WorkerAlive` drop guard inside the thread (clears on panic too).
+  `worker_exited()` = `!alive`.
+- `dead()` now reads the same flag — identical "worker died on its
+  own" semantics for run-replacement, and honest after `stop()`.
+- Test: both queued evals `while true {}` (a finishing second eval
+  would re-clear `abort`; only `shutdown` ends the next one), then
+  poll `worker_exited()` up to 5 s.
+- Red check (done): all 5 `shutdown.load`/`shut.load` sites forced
+  `false` → the test FAILS in 8.07 s (3 s bounded join + 5 s poll —
+  the detached-but-alive worker is caught). Restored → passes.

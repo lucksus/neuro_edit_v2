@@ -40,6 +40,20 @@ pub struct UserRun {
     /// Last time a client was attached (or the run started).
     last_active: Mutex<Instant>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    /// Live while the worker thread runs: set before spawn, cleared by
+    /// a drop guard inside the thread — so a panic clears it too.
+    /// (17C: `stop()` `.take()`s the join handle, so "no handle" is
+    /// NOT a liveness signal.)
+    alive: Arc<AtomicBool>,
+}
+
+/// Clears the worker's `alive` flag on scope exit — normal return or
+/// panic unwinding alike (17C).
+struct WorkerAlive(Arc<AtomicBool>);
+impl Drop for WorkerAlive {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
 }
 
 /// How long `stop()` waits for the worker before detaching — a run
@@ -67,11 +81,16 @@ impl UserRun {
     }
     /// Worker exited on its own (panic or finished) — a dead run must
     /// be replaced, not left in the map to soak up client connections.
+    /// Reads the same liveness flag as `worker_exited` (17C): after
+    /// `stop()` took the handle, "no handle" would lie.
     pub fn dead(&self) -> bool {
-        match self.worker.lock().unwrap().as_ref() {
-            Some(w) => w.is_finished(),
-            None => true,
-        }
+        self.worker_exited()
+    }
+    /// The worker thread has really exited — the drop guard ran, even
+    /// through a panic. Unlike `dead`-via-handle this stays meaningful
+    /// after `stop()` detached.
+    pub fn worker_exited(&self) -> bool {
+        !self.alive.load(Ordering::Relaxed)
     }
     fn has_live_job(&self) -> bool {
         self.jobs
@@ -225,9 +244,13 @@ impl Runs {
             sim_limits: self.opts.sim_limits,
         };
         let cls = clients.clone();
+        let alive = Arc::new(AtomicBool::new(true));
+        let alive_guard = WorkerAlive(alive.clone());
         let worker = std::thread::Builder::new()
             .name("sim-user".into())
             .spawn(move || {
+                // 17C: cleared when this thread exits — return or panic.
+                let _alive_guard = alive_guard;
                 let emit: Emit =
                     std::rc::Rc::new(std::cell::RefCell::new(move |ev: ServerEvent| {
                         let bytes = proto::encode(&ev.msg);
@@ -246,6 +269,7 @@ impl Runs {
             shutdown,
             last_active: Mutex::new(Instant::now()),
             worker: Mutex::new(Some(worker)),
+            alive,
         }
     }
 

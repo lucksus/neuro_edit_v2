@@ -891,13 +891,15 @@ fn drop_user_during_eval_is_fast() {
     recv_until(&mut c, Duration::from_secs(5), |m| {
         matches!(m, ServerMsg::Hello { .. })
     });
-    // two long evals queued: the first runs, the second waits
+    // two endless evals queued: the first runs, the second waits.
+    // The second must ALSO be endless — a finishing eval would clear
+    // `abort`, and then only the `shutdown` flag ends the next eval.
     c.send(&ClientMsg::Eval {
         code: "while true {}".into(),
     })
     .unwrap();
     c.send(&ClientMsg::Eval {
-        code: "print(\"never\")".into(),
+        code: "while true {}".into(),
     })
     .unwrap();
     recv_until(&mut c, Duration::from_secs(5), |m| {
@@ -929,12 +931,17 @@ fn drop_user_during_eval_is_fast() {
         t.elapsed()
     );
     // and the worker thread actually exited — the eval saw the
-    // shutdown flag, it wasn't merely detached
+    // shutdown flag, it wasn't merely detached. worker_exited reads
+    // the thread's own liveness flag: stop() took the join handle, so
+    // dead()-via-handle is trivially true and proves nothing.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !run.dead() && Instant::now() < deadline {
+    while !run.worker_exited() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(run.dead(), "worker thread still alive after drop_user");
+    assert!(
+        run.worker_exited(),
+        "worker thread still alive after drop_user"
+    );
 }
 
 /// S2/S3: Abort over the socket ends an endless eval — the flag is
