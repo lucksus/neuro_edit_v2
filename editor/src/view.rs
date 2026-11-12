@@ -79,7 +79,7 @@ fn hash_pod<T: bytemuck::NoUninit>(s: &[T]) -> u64 {
 ///   hover      brightened instance
 ///   sel/act/pvs/parts/planes  per-frame buffer contents
 ///   params     draw toggles: pv/part counts, show_syn, show_grid,
-///              planes_on
+///              show_input_links (U7), planes_on
 ///   geo        instance-buffer version
 /// Deliberately unkeyed (compile-time or non-scene): clear colour, the
 /// scene:: palette constants, misc.x/y (cube size/glow), misc.z (time —
@@ -104,6 +104,7 @@ pub(crate) fn scene_key(
     (parts.len() as u32).hash(&mut h);
     show_syn.hash(&mut h);
     app.show_grid.hash(&mut h);
+    app.show_input_links.hash(&mut h);
     planes_on.hash(&mut h);
     crate::gpu::SceneKey {
         w_px,
@@ -378,6 +379,9 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
                 // selected input's on big ones (they'd double the line load).
                 let show_all_inputs = g.syn.len() < 10_000 || g.inputs.len() <= 4;
                 for (k, inp) in g.inputs.iter().enumerate() {
+                    if !app.show_input_links {
+                        break;
+                    }
                     let inst = (g.pos.len() + k) as u32;
                     if !show_all_inputs && !app.selection.contains(&inst) {
                         continue;
@@ -728,10 +732,11 @@ fn on_pick(app: &mut EditorApp, res: Option<u32>, ctx: &egui::Context) {
     }
 }
 
-/// Input→target links share the input node's gold (Stage 15 D: these are
-/// the gold lines seen when nothing is selected — the selection buffer is
+/// Input→target links use a dimmed input gold (Stage 15 D: these are the
+/// gold lines seen when nothing is selected — the selection buffer is
 /// zeroed each frame, so stale selection highlight cannot produce them).
-const INPUT_LINK_COL: [f32; 4] = crate::scene::rgba(crate::scene::INPUT_COL, 0.75);
+/// U7: dimmed so dense input fans stop dominating the default view.
+const INPUT_LINK_COL: [f32; 4] = crate::scene::rgba(crate::scene::INPUT_COL, 0.35);
 
 fn mode_input(
     app: &mut EditorApp,

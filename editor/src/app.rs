@@ -80,6 +80,8 @@ pub struct EditorApp {
     pub inst_half: Vec<f32>,
     pub show_grid: bool,
     pub show_synapses: bool,
+    /// U7: gold input→target links, toggled independently of synapses.
+    pub show_input_links: bool,
     /// Spike dots travelling display synapses (View toggle).
     pub show_dots: bool,
     /// Wall-clock ms (egui `i.time`) — particle flights ride this clock
@@ -627,6 +629,7 @@ impl EditorApp {
             last_jobs_poll: -10.0,
             show_grid: true,
             show_synapses: true,
+            show_input_links: true,
             show_dots: true,
             wall_ms: 0.0,
             grid_view: crate::plane::GridView::Auto,
@@ -1674,6 +1677,7 @@ impl EditorApp {
                 ui.separator();
                 toolbar_group(ui, 340.0, |ui| {
                     icons::toggle(ui, &mut self.show_synapses, &ic.synapses, "synapses");
+                    icons::toggle(ui, &mut self.show_input_links, &ic.connect, "input links");
                     icons::toggle(ui, &mut self.show_grid, &ic.grid, "grid");
                     icons::toggle(ui, &mut self.show_dots, &ic.raster, "spike dots");
                 });
@@ -4064,6 +4068,7 @@ mod tests {
         let base = key(&app);
         for f in [
             (|a: &mut EditorApp| a.show_grid = false) as fn(&mut EditorApp),
+            |a| a.show_input_links = false,
             |a| a.hover = Some(4),
             |a| a.preview_delta = Some(glam::Vec3::new(1.0, 0.0, 0.0)),
             |a| a.plane_key = 9,

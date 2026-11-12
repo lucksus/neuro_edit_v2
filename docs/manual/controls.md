@@ -32,6 +32,12 @@ A hint strip at the bottom of the viewport shows the active plane and
 the keys while dragging. Neurons and inputs move; readouts stay
 auto-placed above their units.
 
+## View toggles
+
+Toolbar toggles: synapses (thin lines between neurons), spike dots,
+input links (golden input->target lines — independent of the synapse
+toggle so dense inputs can be hidden on their own).
+
 ## Context menu
 
 Right-click: neuron -> Watch v(t) / Connect from here / Delete;

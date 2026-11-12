@@ -7,9 +7,9 @@ flash orange when spiking) and synapses are thin lines (salmon =
 from an excitatory source, blue = inhibitory; they turn golden when
 touching a selected neuron). Small dots travel along axons when
 "spike dots" is on — yellow from excitatory cells, light blue from
-inhibitory. Inputs are golden cubes, and each draws golden links
-to the neurons it drives — so gold lines can appear with nothing
-selected.
+inhibitory. Inputs are golden cubes, and each draws faint golden links
+to the neurons it drives (toggled independently of synapses) —
+so gold lines can appear with nothing selected.
 
 ## The toolbar
 
