@@ -361,6 +361,22 @@ fn fmt_date(ms: u64) -> String {
     format!("{:04}-{:02}-{:02}", if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// Q9: `Event::Paste` texts that belong to the network — none while a
+/// widget holds keyboard focus (the field's own Ctrl+V must not also
+/// paste a subnet into the scene).
+fn paste_events(events: &[egui::Event], kb_focused: bool) -> Vec<String> {
+    if kb_focused {
+        return Vec::new();
+    }
+    events
+        .iter()
+        .filter_map(|e| match e {
+            egui::Event::Paste(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Browser download: bytes → Blob → object URL → anchor click.
 #[cfg(target_arch = "wasm32")]
 fn download_blob(name: &str, bytes: &[u8]) {
@@ -3783,11 +3799,12 @@ impl eframe::App for EditorApp {
             ctx.copy_text(txt.clone());
             self.clipboard = Some(txt);
         }
-        // system paste events (Ctrl+V when no text field owns it)
-        for ev in ctx.input(|i| i.events.clone()) {
-            if let egui::Event::Paste(txt) = ev {
-                self.paste(Some(txt.clone()));
-            }
+        // system paste events (Ctrl+V when no text field owns it) —
+        // Q9: a Paste event fired while a text field has keyboard
+        // focus belongs to the field, not the network.
+        for txt in paste_events(&ctx.input(|i| i.events.clone()), ctx.wants_keyboard_input())
+        {
+            self.paste(Some(txt));
         }
 
         // OS close button: with unsaved edits, hold the window open behind
@@ -4104,5 +4121,17 @@ mod tests {
             }
         }
         assert!(app.files.upload.is_none(), "slot freed on FileWritten");
+    }
+
+    #[test]
+    fn paste_events_skip_when_text_field_focused() {
+        let evs = vec![
+            egui::Event::Paste("subnet json".into()),
+            egui::Event::Text("x".into()),
+        ];
+        // no keyboard focus → the paste goes to the network
+        assert_eq!(paste_events(&evs, false), vec!["subnet json".to_string()]);
+        // a text field owns the keyboard → it ate the paste
+        assert!(paste_events(&evs, true).is_empty());
     }
 }
