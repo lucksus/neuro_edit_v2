@@ -895,9 +895,10 @@ fn overlay_2d(app: &EditorApp, ui: &mut egui::Ui, rect: egui::Rect, aspect: f32)
     let painter = ui.painter();
     const SEL_COL: egui::Color32 = egui::Color32::from_rgb(255, 120, 40);
     // Move-drag hint: live plane + the modifier keys that switch it.
+    // One line above the standing mode hint.
     if let Some(md) = &app.move_drag {
         painter.text(
-            rect.left_bottom() + egui::vec2(8.0, -8.0),
+            rect.left_bottom() + egui::vec2(8.0, -24.0),
             egui::Align2::LEFT_BOTTOM,
             format!(
                 "plane: {} · Shift: vertical · X/Y/Z: axis lock · Esc: cancel",
