@@ -341,6 +341,22 @@ fn keys(app: &mut EditorApp, ui: &mut egui::Ui) {
         if i.key_pressed(egui::Key::F) {
             app.frame_all();
         }
+        if i.key_pressed(egui::Key::Questionmark) {
+            app.show_keys = true;
+        }
+        if i.modifiers.ctrl {
+            for (key, flag) in [
+                (egui::Key::Num1, &mut app.show_inspector),
+                (egui::Key::Num2, &mut app.show_plots),
+                (egui::Key::Num3, &mut app.show_console),
+                (egui::Key::Num4, &mut app.show_script),
+                (egui::Key::Num5, &mut app.show_inputs),
+            ] {
+                if i.key_pressed(key) {
+                    *flag = !*flag;
+                }
+            }
+        }
         if i.modifiers.ctrl && i.key_pressed(egui::Key::C) {
             app.copy_selection(false);
         }

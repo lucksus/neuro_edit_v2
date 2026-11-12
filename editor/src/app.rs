@@ -65,10 +65,13 @@ pub struct EditorApp {
     console_input: String,
     history: Vec<String>,
     hist_idx: Option<usize>,
-    show_console: bool,
-    show_plots: bool,
-    show_inspector: bool,
-    show_script: bool,
+    pub(crate) show_console: bool,
+    pub(crate) show_plots: bool,
+    pub(crate) show_inspector: bool,
+    pub(crate) show_script: bool,
+    pub(crate) show_inputs: bool,
+    /// `?` shortcut overlay.
+    pub(crate) show_keys: bool,
     plot_tab: PlotTab,
     /// Raster strip height in px — draggable in the plots header.
     raster_h: f32,
@@ -228,16 +231,43 @@ pub enum Dialog {
     About,
 }
 
-/// Persisted UI state (recent files) across sessions.
+/// Persisted UI state (recent files + window visibility) across sessions.
+/// Window positions/sizes persist separately through egui's own memory
+/// (eframe stores it under the same storage slot).
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct Persisted {
     pub recent: Vec<String>,
+    #[serde(default)]
+    pub windows: WindowVis,
+}
+
+/// Which floating windows are open.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct WindowVis {
+    pub inspector: bool,
+    pub plots: bool,
+    pub console: bool,
+    pub script: bool,
+    pub inputs: bool,
+}
+
+impl Default for WindowVis {
+    fn default() -> Self {
+        Self {
+            inspector: true,
+            plots: true,
+            console: true,
+            script: false,
+            inputs: false,
+        }
+    }
 }
 
 impl EditorApp {
     pub fn new(ctl: SimCtl, storage: Option<&dyn eframe::Storage>) -> Self {
-        let recent: VecDeque<String> = storage
-            .and_then(|s| eframe::get_value::<Persisted>(s, "state"))
+        let persisted = storage.and_then(|s| eframe::get_value::<Persisted>(s, "state"));
+        let wins = persisted.as_ref().map(|p| p.windows).unwrap_or_default();
+        let recent: VecDeque<String> = persisted
             .map(|p| p.recent.into_iter().collect())
             .unwrap_or_default();
         Self {
@@ -267,10 +297,12 @@ impl EditorApp {
             console_input: String::new(),
             history: Vec::new(),
             hist_idx: None,
-            show_console: true,
-            show_plots: true,
-            show_inspector: true,
-            show_script: false,
+            show_console: wins.console,
+            show_plots: wins.plots,
+            show_inspector: wins.inspector,
+            show_script: wins.script,
+            show_inputs: wins.inputs,
+            show_keys: false,
             plot_tab: PlotTab::Voltage,
             raster_h: 100.0,
             ro_sel: 0,
@@ -934,9 +966,33 @@ impl EditorApp {
                         ui.close();
                     }
                 });
+                ui.menu_button("View", |ui| {
+                    // toggles stay open so several windows can flip at once
+                    for (flag, icon, label) in [
+                        (&mut self.show_inspector, &ic.inspector, "Inspector"),
+                        (&mut self.show_plots, &ic.plots, "Plots"),
+                        (&mut self.show_console, &ic.console, "Console"),
+                        (&mut self.show_script, &ic.script, "Script editor"),
+                        (&mut self.show_inputs, &ic.connect, "Inputs"),
+                    ] {
+                        if ui.add(icons::button(icon, label).selected(*flag)).clicked() {
+                            *flag = !*flag;
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Reset layout").clicked() {
+                        // windows return to their default positions
+                        ctx.memory_mut(|m| m.reset_areas());
+                        ui.close();
+                    }
+                });
                 ui.menu_button("Help", |ui| {
                     if ui.add(icons::button(&ic.about, "About")).clicked() {
                         self.dlg = Some(Dialog::About);
+                        ui.close();
+                    }
+                    if ui.button("Shortcuts  (?)").clicked() {
+                        self.show_keys = true;
                         ui.close();
                     }
                 });
@@ -1044,7 +1100,7 @@ impl EditorApp {
                     });
                 }
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let m = &mut self.mode;
                 icons::selectable_value(ui, m, Mode::Navigate, &ic.navigate, "Navigate");
                 icons::selectable_value(ui, m, Mode::Insert, &ic.insert, "Insert");
@@ -1088,11 +1144,6 @@ impl EditorApp {
                 {
                     self.frame_all();
                 }
-                ui.separator();
-                icons::toggle(ui, &mut self.show_console, &ic.console, "console");
-                icons::toggle(ui, &mut self.show_plots, &ic.plots, "plots");
-                icons::toggle(ui, &mut self.show_inspector, &ic.inspector, "inspector");
-                icons::toggle(ui, &mut self.show_script, &ic.script, "script");
                 ui.separator();
                 ui.label(&self.status);
             });
@@ -1152,75 +1203,107 @@ impl EditorApp {
         if !self.show_inspector {
             return;
         }
-        egui::SidePanel::right("inspector")
+        let mut open = self.show_inspector;
+        let w = ctx.screen_rect().max.x;
+        egui::Window::new("Inspector")
+            .open(&mut open)
             .default_width(240.0)
+            .default_pos([w - 250.0, 60.0])
             .show(ctx, |ui| {
-                ui.heading("Inspector");
-                ui.separator();
-                let sel: Vec<u32> = self.selection.iter().copied().collect();
-                if sel.len() == 1 {
-                    self.inspect_one(ui, sel[0]);
-                } else if !sel.is_empty() {
-                    ui.label(format!("{} objects selected", sel.len()));
-                    if ui.button("Delete").clicked() {
-                        self.delete_selection();
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let sel: Vec<u32> = self.selection.iter().copied().collect();
+                    if sel.len() == 1 {
+                        self.inspect_one(ui, sel[0]);
+                    } else if !sel.is_empty() {
+                        ui.label(format!("{} objects selected", sel.len()));
+                        if ui.button("Delete").clicked() {
+                            self.delete_selection();
+                        }
+                    } else {
+                        ui.label("nothing selected");
                     }
-                } else {
-                    ui.label("nothing selected");
-                }
-                ui.separator();
-                ui.heading("Groups");
-                if let Some(g) = self.geo.clone() {
-                    for (gi, (name, members)) in g.groups.iter().enumerate() {
-                        ui.label(format!("{name}: {} neurons", members.len()));
-                        // 3D lattices get a slice/projection choice for the
-                        // activity plane (2D grids show their single sheet).
-                        if let Some(gs) = g.grids.iter().find(|x| x.group == gi) {
-                            if gs.dims[2] > 1 {
-                                let cfg = self.plane_cfgs.entry(gi as u32).or_default();
-                                ui.horizontal(|ui| {
-                                    ui.label("  collapse");
-                                    for a in 0..3u8 {
-                                        ui.selectable_value(&mut cfg.axis, a, format!("d{a}"));
-                                    }
-                                    ui.separator();
-                                    let cur = cfg.proj;
-                                    if ui
-                                        .selectable_label(cur == crate::plane::Proj::Max, "max")
-                                        .clicked()
-                                    {
-                                        cfg.proj = crate::plane::Proj::Max;
-                                    }
-                                    if ui
-                                        .selectable_label(cur == crate::plane::Proj::Mean, "mean")
-                                        .clicked()
-                                    {
-                                        cfg.proj = crate::plane::Proj::Mean;
-                                    }
-                                    if ui
-                                        .selectable_label(
-                                            matches!(cur, crate::plane::Proj::Slice(_)),
-                                            "slice",
-                                        )
-                                        .clicked()
-                                    {
-                                        cfg.proj = crate::plane::Proj::Slice(0);
-                                    }
-                                });
-                                if let crate::plane::Proj::Slice(k) = &mut cfg.proj {
-                                    let max = gs.dims[cfg.axis.min(2) as usize] - 1;
-                                    *k = (*k).min(max);
+                    ui.separator();
+                    ui.heading("Groups");
+                    if let Some(g) = self.geo.clone() {
+                        for (gi, (name, members)) in g.groups.iter().enumerate() {
+                            ui.label(format!("{name}: {} neurons", members.len()));
+                            // 3D lattices get a slice/projection choice for the
+                            // activity plane (2D grids show their single sheet).
+                            if let Some(gs) = g.grids.iter().find(|x| x.group == gi) {
+                                if gs.dims[2] > 1 {
+                                    let cfg = self.plane_cfgs.entry(gi as u32).or_default();
                                     ui.horizontal(|ui| {
-                                        ui.label("  slice");
-                                        ui.add(egui::DragValue::new(k).range(0..=max).speed(0.1));
-                                        ui.label(format!("/ {max}"));
+                                        ui.label("  collapse");
+                                        for a in 0..3u8 {
+                                            ui.selectable_value(&mut cfg.axis, a, format!("d{a}"));
+                                        }
+                                        ui.separator();
+                                        let cur = cfg.proj;
+                                        if ui
+                                            .selectable_label(cur == crate::plane::Proj::Max, "max")
+                                            .clicked()
+                                        {
+                                            cfg.proj = crate::plane::Proj::Max;
+                                        }
+                                        if ui
+                                            .selectable_label(
+                                                cur == crate::plane::Proj::Mean,
+                                                "mean",
+                                            )
+                                            .clicked()
+                                        {
+                                            cfg.proj = crate::plane::Proj::Mean;
+                                        }
+                                        if ui
+                                            .selectable_label(
+                                                matches!(cur, crate::plane::Proj::Slice(_)),
+                                                "slice",
+                                            )
+                                            .clicked()
+                                        {
+                                            cfg.proj = crate::plane::Proj::Slice(0);
+                                        }
                                     });
+                                    if let crate::plane::Proj::Slice(k) = &mut cfg.proj {
+                                        let max = gs.dims[cfg.axis.min(2) as usize] - 1;
+                                        *k = (*k).min(max);
+                                        ui.horizontal(|ui| {
+                                            ui.label("  slice");
+                                            ui.add(
+                                                egui::DragValue::new(k).range(0..=max).speed(0.1),
+                                            );
+                                            ui.label(format!("/ {max}"));
+                                        });
+                                    }
                                 }
                             }
                         }
+                        ui.separator();
+                        ui.heading("Readouts");
+                        for (name, units, _) in &g.readouts {
+                            ui.label(format!("{name}: {} units", units.len()));
+                        }
+                        if g.readouts.is_empty() {
+                            ui.label("(none)");
+                        }
                     }
-                    ui.separator();
-                    ui.heading("Inputs");
+                });
+            });
+        self.show_inspector = open;
+    }
+
+    /// Constant-drive inputs, in their own floating window.
+    fn inputs_window(&mut self, ctx: &egui::Context) {
+        if !self.show_inputs {
+            return;
+        }
+        let mut open = self.show_inputs;
+        egui::Window::new("Inputs")
+            .open(&mut open)
+            .default_size([220.0, 140.0])
+            .default_pos([260.0, 60.0])
+            .show(ctx, |ui| {
+                if let Some(g) = self.geo.clone() {
                     for (k, inp) in g.inputs.iter().enumerate() {
                         ui.horizontal(|ui| {
                             ui.label(&inp.name);
@@ -1238,16 +1321,69 @@ impl EditorApp {
                     if g.inputs.is_empty() {
                         ui.label("(none)");
                     }
-                    ui.separator();
-                    ui.heading("Readouts");
-                    for (name, units, _) in &g.readouts {
-                        ui.label(format!("{name}: {} units", units.len()));
-                    }
-                    if g.readouts.is_empty() {
-                        ui.label("(none)");
-                    }
                 }
             });
+        self.show_inputs = open;
+    }
+
+    /// `?` — every mode key and mouse gesture in one small overlay.
+    /// (WASD/QE pan the camera, so tools use other letters.)
+    fn keys_window(&mut self, ctx: &egui::Context) {
+        if !self.show_keys {
+            return;
+        }
+        let mut open = self.show_keys;
+        egui::Window::new("Shortcuts")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                egui::Grid::new("keys_grid").num_columns(2).show(ui, |ui| {
+                    let row = |ui: &mut egui::Ui, k: &str, what: &str| {
+                        ui.monospace(k);
+                        ui.label(what);
+                        ui.end_row();
+                    };
+                    ui.strong("modes");
+                    ui.end_row();
+                    row(ui, "V / Esc", "navigate");
+                    row(ui, "I", "insert neuron");
+                    row(ui, "C", "connect");
+                    row(ui, "M", "move");
+                    row(ui, "Esc", "cancel drag/connect, else navigate");
+                    ui.end_row();
+                    ui.strong("camera");
+                    ui.end_row();
+                    row(ui, "right-drag", "orbit");
+                    row(ui, "wheel", "zoom");
+                    row(ui, "W A S D / Q E", "pan");
+                    row(ui, "double-click", "focus");
+                    row(ui, "F", "frame network");
+                    ui.end_row();
+                    ui.strong("mouse (navigate)");
+                    ui.end_row();
+                    row(ui, "click", "select (Shift adds)");
+                    row(ui, "drag on object", "move it");
+                    row(ui, "drag on empty", "box select");
+                    row(ui, "right-click", "context menu");
+                    ui.end_row();
+                    ui.strong("edit");
+                    ui.end_row();
+                    row(ui, "Ctrl+C / X / V", "copy / cut / paste");
+                    row(ui, "Del", "delete selection");
+                    ui.end_row();
+                    ui.strong("windows");
+                    ui.end_row();
+                    row(
+                        ui,
+                        "Ctrl+1..5",
+                        "inspector · plots · console · script · inputs",
+                    );
+                    row(ui, "?", "this overlay");
+                });
+            });
+        self.show_keys = open;
     }
 
     fn inspect_one(&mut self, ui: &mut egui::Ui, inst_id: u32) {
@@ -1369,12 +1505,14 @@ impl EditorApp {
         if !self.show_console {
             return;
         }
-        egui::TopBottomPanel::bottom("console")
-            .resizable(true)
-            .default_height(240.0)
+        let mut open = self.show_console;
+        let r = ctx.screen_rect();
+        egui::Window::new("Console (Rhai)")
+            .open(&mut open)
+            .default_size([420.0, 240.0])
+            .default_pos([r.max.x - 430.0, r.max.y - 260.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.heading("Script console (Rhai)");
                     if ui.button("Clear").clicked() {
                         if let Ok(mut w) = self.ctl.shared.write() {
                             w.console.clear();
@@ -1444,6 +1582,7 @@ impl EditorApp {
                 });
                 ui.small("Ctrl+Enter runs · up/down = history · `net`, `sim`, `rng` in scope");
             });
+        self.show_console = open;
     }
 
     /// Multiline script editor (the original's QScintilla script window):
@@ -1558,13 +1697,14 @@ impl EditorApp {
         if !self.show_plots {
             return;
         }
-        egui::TopBottomPanel::bottom("plots")
-            .resizable(true)
-            .default_height(140.0)
+        let mut open = self.show_plots;
+        let r = ctx.screen_rect();
+        egui::Window::new("Plots")
+            .open(&mut open)
+            .default_size([480.0, 220.0])
+            .default_pos([12.0, r.max.y - 240.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.heading("Plots");
-                    ui.separator();
                     if let Some(ic) = &self.icons {
                         let t = &mut self.plot_tab;
                         icons::selectable_value(ui, t, PlotTab::Voltage, &ic.voltage, "v(t)");
@@ -1666,6 +1806,7 @@ impl EditorApp {
                     PlotTab::Jobs => self.jobs_ui(ui),
                 }
             });
+        self.show_plots = open;
     }
 
     /// Bar chart of the selected readout's trained weights (original's
@@ -2217,6 +2358,13 @@ impl eframe::App for EditorApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         let p = Persisted {
             recent: self.recent.iter().cloned().collect(),
+            windows: WindowVis {
+                inspector: self.show_inspector,
+                plots: self.show_plots,
+                console: self.show_console,
+                script: self.show_script,
+                inputs: self.show_inputs,
+            },
         };
         eframe::set_value(storage, "state", &p);
     }
@@ -2278,6 +2426,8 @@ impl eframe::App for EditorApp {
         self.console(ctx);
         self.script_window(ctx);
         self.plots(ctx);
+        self.inputs_window(ctx);
+        self.keys_window(ctx);
         self.dialog(ctx);
 
         crate::view::viewport(self, ctx, rs);
