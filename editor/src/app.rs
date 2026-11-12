@@ -3883,6 +3883,79 @@ mod tests {
         assert_eq!(got.min, usable.min);
     }
 
+    /// Stage 15 F: every app-state input to `render_offscreen` must move
+    /// the SceneKey — driven through real EditorApp fields, not literals.
+    #[test]
+    fn scene_key_changes_with_app_state() {
+        let app = EditorApp::new(crate::simctl::SimCtl::offline(), None);
+        let sel: Vec<u32> = vec![3, 7];
+        let act: Vec<f32> = vec![0.0; 8];
+        let pvs: Vec<crate::gpu::Pv> = Vec::new();
+        let parts: Vec<crate::gpu::Part> = Vec::new();
+        let no_planes: Option<Vec<bool>> = None;
+        let key = |a: &EditorApp| {
+            crate::view::scene_key(
+                a, 800, 600, 1.33, &sel, &act, &pvs, &parts, true, &no_planes,
+            )
+        };
+        let base = key(&app);
+        for f in [
+            (|a: &mut EditorApp| a.show_grid = false) as fn(&mut EditorApp),
+            |a| a.hover = Some(4),
+            |a| a.preview_delta = Some(glam::Vec3::new(1.0, 0.0, 0.0)),
+            |a| a.plane_key = 9,
+            |a| a.geo_version = 2,
+            |a| a.camera.orbit(10.0, 0.0),
+        ] {
+            let mut a2 = EditorApp::new(crate::simctl::SimCtl::offline(), None);
+            f(&mut a2);
+            assert_ne!(key(&a2), base, "SceneKey ignored an app-state input");
+        }
+        // Buffer/flag inputs (not on the app, but rendered too).
+        assert_ne!(
+            crate::view::scene_key(
+                &app,
+                800,
+                600,
+                1.33,
+                &[1],
+                &act,
+                &pvs,
+                &parts,
+                true,
+                &no_planes
+            ),
+            base
+        );
+        assert_ne!(
+            crate::view::scene_key(
+                &app, 801, 600, 1.33, &sel, &act, &pvs, &parts, true, &no_planes
+            ),
+            base
+        );
+        assert_ne!(
+            crate::view::scene_key(
+                &app, 800, 600, 1.33, &sel, &act, &pvs, &parts, false, &no_planes
+            ),
+            base
+        );
+        assert_ne!(
+            crate::view::scene_key(
+                &app,
+                800,
+                600,
+                1.33,
+                &sel,
+                &act,
+                &pvs,
+                &parts,
+                true,
+                &Some(vec![true])
+            ),
+            base
+        );
+    }
+
     /// Stage 15 B: `toolbar_group` units inside `horizontal_wrapped` wrap
     /// whole — a group never splits its icon/control across two rows, and
     /// a group that doesn't fit moves to the next row instead of

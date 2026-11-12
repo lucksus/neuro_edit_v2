@@ -71,6 +71,56 @@ fn hash_pod<T: bytemuck::NoUninit>(s: &[T]) -> u64 {
     h.finish()
 }
 
+/// Build the frame's SceneKey (Stage 14 B). Every input the scene pass
+/// reads is fingerprinted — Stage 15 F audit:
+///   w_px/h_px  scene-texture size (DPI is already in physical pixels)
+///   cam        camera + aspect + vp-height (syn-LOD inputs)
+///   preview    live move-drag delta uniform
+///   hover      brightened instance
+///   sel/act/pvs/parts/planes  per-frame buffer contents
+///   params     draw toggles: pv/part counts, show_syn, show_grid,
+///              planes_on
+///   geo        instance-buffer version
+/// Deliberately unkeyed (compile-time or non-scene): clear colour, the
+/// scene:: palette constants, misc.x/y (cube size/glow), misc.z (time —
+/// unread by the shader), misc.w (pick-mode flag — the pick pass writes
+/// its own uniform and never touches the scene texture).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn scene_key(
+    app: &EditorApp,
+    w_px: u32,
+    h_px: u32,
+    aspect: f32,
+    sel: &[u32],
+    act: &[f32],
+    pvs: &[crate::gpu::Pv],
+    parts: &[crate::gpu::Part],
+    show_syn: bool,
+    planes_on: &Option<Vec<bool>>,
+) -> crate::gpu::SceneKey {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    use std::hash::{Hash, Hasher};
+    (pvs.len() as u32).hash(&mut h);
+    (parts.len() as u32).hash(&mut h);
+    show_syn.hash(&mut h);
+    app.show_grid.hash(&mut h);
+    planes_on.hash(&mut h);
+    crate::gpu::SceneKey {
+        w_px,
+        h_px,
+        cam: cam_bits(&app.camera, aspect),
+        preview: app.preview_delta.map_or(0, |d| hash_pod(&[d])),
+        hover: app.hover.map_or(0, |i| i as u64 + 1),
+        sel: hash_pod(sel),
+        act: hash_pod(act),
+        pvs: hash_pod(pvs),
+        parts: hash_pod(parts),
+        planes: app.plane_key,
+        params: h.finish(),
+        geo: app.geo_version,
+    }
+}
+
 /// Ray ↔ plane (normal, a point on it).
 pub fn plane_hit_n(nrm: Vec3, pt: Vec3, ro: Vec3, rd: Vec3) -> Option<Vec3> {
     let d = rd.dot(nrm);
@@ -377,34 +427,16 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
                 // uploads when the snap or the display config changed.
                 let planes_on = app.plane_frame(gpu, h_px as f32);
                 let np = gpu.write_parts(&parts) as u32;
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                use std::hash::{Hash, Hasher};
-                pv_n.hash(&mut h);
-                np.hash(&mut h);
-                show_syn.hash(&mut h);
-                app.show_grid.hash(&mut h);
-                planes_on.hash(&mut h);
                 gpu.draw_params = Some(DrawParams {
                     pv_count: pv_n,
                     part_count: np,
                     show_syn,
                     show_grid: app.show_grid,
-                    planes_on,
+                    planes_on: planes_on.clone(),
                 });
-                let key = crate::gpu::SceneKey {
-                    w_px,
-                    h_px,
-                    cam: cam_bits(&app.camera, aspect),
-                    preview: app.preview_delta.map_or(0, |d| hash_pod(&[d])),
-                    hover: app.hover.map_or(0, |i| i as u64 + 1),
-                    sel: hash_pod(&sel),
-                    act: hash_pod(&act),
-                    pvs: hash_pod(&pvs),
-                    parts: hash_pod(&parts),
-                    planes: app.plane_key,
-                    params: h.finish(),
-                    geo: app.geo_version,
-                };
+                let key = scene_key(
+                    app, w_px, h_px, aspect, &sel, &act, &pvs, &parts, show_syn, &planes_on,
+                );
                 gpu.render_offscreen(w_px, h_px, &key);
                 // Unfinished pick readbacks and in-flight particles keep the
                 // repaint alive even when the sim is paused (Stage 14 E).
