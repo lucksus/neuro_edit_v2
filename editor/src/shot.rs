@@ -26,6 +26,13 @@ pub struct ShotOpts {
     pub cam_dist: Option<f32>,
     pub cam_yaw: Option<f32>,
     pub cam_pitch: Option<f32>,
+    /// Render grid groups as activity planes (slice/proj via `cfg`).
+    pub grid_planes: bool,
+    /// Per-group 3D display configs for `grid_planes` (group index -> cfg).
+    pub plane_cfgs: std::collections::HashMap<u32, crate::plane::PlaneCfg>,
+    /// Poisson background kick for the screenshot run (Hz / mV, 0 = quiet).
+    pub noise_hz: f32,
+    pub noise_kick: f32,
 }
 
 pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
@@ -54,10 +61,18 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
             seed: o.seed,
             record_spikes: true,
             int_weights: o.int_weights,
+            noise_rate_hz: o.noise_hz,
+            noise_kick_mv: o.noise_kick,
             ..Default::default()
         },
         o.backend,
     )?;
+    // Grid watches must be set BEFORE the run — the per-group trace
+    // buffers accumulate during steps; watching afterwards reads zeros.
+    if o.grid_planes && !geo.grids.is_empty() {
+        let lists: Vec<Vec<u32>> = geo.grids.iter().map(|g| g.members.clone()).collect();
+        sim.set_grid_watches(&lists);
+    }
     let steps = (o.after_ms / dt).round().max(0.0) as usize;
     sim.run_steps(steps)?;
     let activity = sim.trace();
@@ -82,6 +97,45 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
     let mut gpu = Gpu::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
     gpu.set_scene(&geo);
     gpu.write_activity(&activity);
+
+    // Grid activity planes: same reduce/upload path the live view uses,
+    // driven by `sim`'s grid watches (member lists are already in texel
+    // order inside `geo.grids`).
+    let mut planes_on = None;
+    if o.grid_planes && !geo.grids.is_empty() {
+        let traces = sim
+            .grid_traces(crate::simctl::PLANE_TAU_MS)
+            .unwrap_or_default();
+        let mut params = Vec::with_capacity(geo.grids.len());
+        let mut on = Vec::with_capacity(geo.grids.len());
+        let mut bits = vec![0u32; geo.pos.len() / 32 + 1];
+        for (i, gs) in geo.grids.iter().enumerate() {
+            let cfg = o
+                .plane_cfgs
+                .get(&(gs.group as u32))
+                .copied()
+                .unwrap_or_default();
+            let tr = traces.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
+            let (w, h, pix, pick) = crate::plane::reduce(gs, tr, &cfg);
+            gpu.ensure_plane_tex(i, w, h);
+            gpu.write_plane(i, &pix, &pick);
+            let (ua, va) = crate::plane::plane_dims(gs, &cfg);
+            let (origin, du, dv) = crate::plane::quad(gs, &cfg);
+            params.push(crate::gpu::PlaneParamsGpu {
+                origin,
+                du,
+                dv,
+                wh: [gs.dims[ua], gs.dims[va], 0, 0],
+            });
+            on.push(true);
+            for &m in &gs.members {
+                bits[m as usize >> 5] |= 1 << (m & 31);
+            }
+        }
+        gpu.write_plane_params(&params);
+        gpu.write_hide_bits(&bits);
+        planes_on = Some(on);
+    }
 
     let w = o.width.max(8);
     let h = o.height.max(8);
@@ -131,6 +185,12 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
     parts.feed(&geo, &counts, now_ms);
     let pinst = parts.instances(now_ms + 1.0);
     let part_count = gpu.write_parts(&pinst) as u32;
+    gpu.draw_params = Some(crate::gpu::DrawParams {
+        pv_count,
+        part_count,
+        show_syn: o.show_syn,
+        planes_on,
+    });
 
     let mut enc = gpu
         .device

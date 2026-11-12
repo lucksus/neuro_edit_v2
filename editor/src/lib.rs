@@ -5,6 +5,7 @@ pub mod app;
 pub mod camera;
 pub mod gpu;
 pub mod icons;
+pub mod plane;
 pub mod scene;
 pub mod shot;
 pub mod simctl;

@@ -66,6 +66,11 @@ pub struct SimCtl {
 const GEO_EDGES_PER_NEURON: usize = 4;
 const COUNTS_WINDOW: usize = 4096;
 
+/// Spike-trace decay constant for the plane view (sim time, ms).
+/// Deliberately slower than the readout trace's 2 ms — the plane is a
+/// visual summary, so texels should glow for a few hundred steps.
+pub const PLANE_TAU_MS: f32 = 20.0;
+
 struct Watch {
     ids: Vec<u32>,
 }
@@ -77,6 +82,10 @@ struct Pub {
     /// interval since then.
     prev_step: u64,
     sps: f32,
+    /// net version the cached grid member lists were built from.
+    grid_ver: u64,
+    /// texel-ordered member lists, one per grid group (`geo.grids` order).
+    grid_lists: Vec<Vec<u32>>,
 }
 
 impl SimCtl {
@@ -156,15 +165,18 @@ fn worker(
         watch: Watch { ids: Vec::new() },
         prev_step: 0,
         sps: 0.0,
+        grid_ver: 0,
+        grid_lists: Vec::new(),
     }));
 
     // Progress hook: publish between run chunks inside script `sim.run`s;
     // returning false aborts the rest of the run (pause pressed).
     {
         let (shp, abp, pr) = (shared.clone(), abort.clone(), pub_rc.clone());
+        let (neth, nver) = (env.net.clone(), env.net_version.clone());
         let cb: ProgressFn = Rc::new(std::cell::RefCell::new(move |sim: &mut Sim| -> bool {
             let mut p = pr.borrow_mut();
-            publish_sim(sim, &shp, &mut p);
+            publish_sim(&neth, nver.get(), sim, &shp, &mut p);
             !abp.load(Ordering::Relaxed)
         }));
         env.set_progress(200, cb);
@@ -350,7 +362,13 @@ fn worker(
                     {
                         let mut p = pub_rc.borrow_mut();
                         p.sps = chunk as f32 / el;
-                        publish_sim(&mut h.borrow_mut(), &shared, &mut p);
+                        publish_sim(
+                            &env.net,
+                            env.net_version.get(),
+                            &mut h.borrow_mut(),
+                            &shared,
+                            &mut p,
+                        );
                     }
                     let dt = env.cfg.borrow().dt_ms;
                     let target_sps = (speed * 1000.0 / dt).max(1.0);
@@ -391,12 +409,24 @@ fn set_busy(shared: &SharedRef, b: bool) {
 
 fn publish_env(env: &Env, shared: &SharedRef, p: &mut Pub) {
     if let Ok(h) = env.sim_handle() {
-        publish_sim(&mut h.borrow_mut(), shared, p);
+        publish_sim(
+            &env.net,
+            env.net_version.get(),
+            &mut h.borrow_mut(),
+            shared,
+            p,
+        );
     }
 }
 
 /// Publish dynamic state read back from `sim` into `shared`.
-fn publish_sim(sim: &mut Sim, shared: &SharedRef, p: &mut Pub) {
+fn publish_sim(
+    net: &sim::script::NetHandle,
+    net_ver: u64,
+    sim: &mut Sim,
+    shared: &SharedRef,
+    p: &mut Pub,
+) {
     let activity = sim.trace();
     // Counts since previous publish: sum the record-ring rows covering the
     // elapsed steps. Intervals longer than the ring depth undercount the
@@ -419,6 +449,20 @@ fn publish_sim(sim: &mut Sim, shared: &SharedRef, p: &mut Pub) {
         watched_v.push((id, Arc::new(hists.get(k).cloned().unwrap_or_default())));
     }
 
+    // Grid-plane traces: (re)apply the watch lists after a rebuild (cheap
+    // no-op when unchanged), then materialize one f32 buffer per grid.
+    if p.grid_ver != net_ver {
+        p.grid_lists = grid_member_lists(&net.borrow());
+        p.grid_ver = net_ver;
+    }
+    sim.set_grid_watches(&p.grid_lists);
+    let grid_traces = sim
+        .grid_traces(PLANE_TAU_MS)
+        .unwrap_or_default()
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+
     if let Ok(mut w) = shared.write() {
         w.snap = Snap {
             seq: w.snap.seq + 1,
@@ -429,6 +473,7 @@ fn publish_sim(sim: &mut Sim, shared: &SharedRef, p: &mut Pub) {
             activity: Arc::new(activity),
             counts: Arc::new(counts),
             watched_v,
+            grid_traces,
             steps_per_sec: p.sps,
         };
         w.sim_built = true;
@@ -475,6 +520,49 @@ fn geo_snap(env: &Env) -> GeoSnap {
     let mut g = geo_from_net(&net, dt);
     g.version = env.net_version.get();
     g
+}
+
+/// Member list of one grid group in texel order (position k = lattice
+/// index k), computed from positions rather than list order so a reordered
+/// `members` vec still maps correctly. `None` when the lattice is broken
+/// (defensive — `invalidate_grids` should have dropped the metadata).
+fn texel_order(gs: &net_format::GridShape, members: &[u32], net: &Network) -> Option<Vec<u32>> {
+    let mut ord = vec![u32::MAX; gs.texels()];
+    for &m in members {
+        let neu = net.neurons.get(m as usize)?;
+        ord[gs.member_index(gs.lattice_at(neu.pos))] = m;
+    }
+    if ord.contains(&u32::MAX) {
+        return None;
+    }
+    Some(ord)
+}
+
+/// All grid groups' texel-ordered member lists, in `GeoSnap::grids` order
+/// (i.e. iterating `net.groups` and keeping those with a valid lattice).
+fn grid_member_lists(net: &Network) -> Vec<Vec<u32>> {
+    grid_snaps(net).into_iter().map(|g| g.members).collect()
+}
+
+/// `GeoSnap::grids` content: every group with a valid lattice, members in
+/// texel order.
+fn grid_snaps(net: &Network) -> Vec<crate::snap::GridSnap> {
+    net.groups
+        .iter()
+        .enumerate()
+        .filter_map(|(gi, g)| {
+            let gs = g.grid?;
+            let members = texel_order(&gs, &g.members, net)?;
+            Some(crate::snap::GridSnap {
+                group: gi,
+                dims: gs.dims,
+                axes: gs.axes,
+                origin: gs.origin,
+                spacing: gs.spacing,
+                members,
+            })
+        })
+        .collect()
 }
 
 /// Geometry snapshot straight from a `Network` (headless screenshot path).
@@ -548,6 +636,7 @@ pub fn geo_from_net(net: &Network, dt: f32) -> GeoSnap {
             .map(|s| (s.name.clone(), s.times.clone(), s.values.clone()))
             .collect(),
         scripts: net.scripts.clone(),
+        grids: grid_snaps(net),
         dt_ms: dt,
     }
 }

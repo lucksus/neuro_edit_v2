@@ -188,11 +188,15 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
                 gpu.write_activity(&act);
                 gpu.write_selection(&sel);
                 gpu.write_pv(&pvs);
+                // Grid planes: per-frame params/hide flags plus trace
+                // uploads when the snap or the display config changed.
+                let planes_on = app.plane_frame(gpu, h_px as f32);
                 let np = gpu.write_parts(&parts) as u32;
                 gpu.draw_params = Some(DrawParams {
                     pv_count: pv_n,
                     part_count: np,
                     show_syn,
+                    planes_on,
                 });
                 gpu.render_offscreen(w_px, h_px);
             });

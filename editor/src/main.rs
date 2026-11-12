@@ -48,6 +48,15 @@ struct Cli {
     /// Screenshot camera pitch in degrees.
     #[arg(long)]
     cam_pitch: Option<f32>,
+    /// Render grid groups as activity planes in the screenshot.
+    #[arg(long)]
+    planes: bool,
+    /// Screenshot background-noise kick rate (Hz).
+    #[arg(long, default_value_t = 0.0)]
+    noise_hz: f32,
+    /// Screenshot background-noise kick amplitude (mV).
+    #[arg(long, default_value_t = 0.0)]
+    noise_kick: f32,
     #[arg(long, default_value_t = 1)]
     seed: u64,
 }
@@ -79,6 +88,10 @@ fn main() -> anyhow::Result<()> {
             cam_dist: cli.cam_dist,
             cam_yaw: cli.cam_yaw,
             cam_pitch: cli.cam_pitch,
+            grid_planes: cli.planes,
+            plane_cfgs: Default::default(),
+            noise_hz: cli.noise_hz,
+            noise_kick: cli.noise_kick,
         };
         return pollster::block_on(editor::shot::render_headless(opts));
     }

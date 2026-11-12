@@ -53,6 +53,34 @@ pub struct Pv {
     pub _pad: f32,
 }
 
+/// Per-plane geometry for `vs_plane` (one entry per grid group, indexed
+/// by `instance_index`). Built by `crate::plane::quad`.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Default)]
+pub struct PlaneParamsGpu {
+    /// World position of the quad corner (the -0.5,-0.5 texel cell edge).
+    pub origin: [f32; 4],
+    /// World step per texel along u.
+    pub du: [f32; 4],
+    /// World step per texel along v.
+    pub dv: [f32; 4],
+    /// x = displayed texels wide, y = displayed texels high.
+    pub wh: [u32; 4],
+}
+
+/// One activity plane: the f32 value texture, the texel->member pick
+/// buffer, and the bind group that puts them together with the shared
+/// params array.
+pub struct PlaneTex {
+    _tex: wgpu::Texture,
+    _view: wgpu::TextureView,
+    pick_buf: wgpu::Buffer,
+    bg: wgpu::BindGroup,
+    /// Displayed image size after the 3D->2D reduction.
+    pub w: u32,
+    pub h: u32,
+}
+
 /// GPU state for one network geometry (rebuilt when geo version changes).
 /// Buffers are held to keep the allocations alive for the bind groups.
 #[allow(dead_code)]
@@ -64,6 +92,16 @@ pub struct Scene {
     sel_buf: wgpu::Buffer,
     pos_buf: wgpu::Buffer,
     pairs_buf: wgpu::Buffer,
+    /// Hide bitfield (sel_bits packing): instance bit set = its group is
+    /// plane-rendered this frame. Shared by the neuron and synapse groups.
+    hide_bits: wgpu::Buffer,
+    /// `entity_of_inst[i]` is a grid-plane member — the plane LOD decides
+    /// per frame which of these land in `hide_bits`.
+    pub plane_member: Vec<bool>,
+    /// Grid groups in `GeoSnap::grids` order.
+    pub grids: Vec<crate::snap::GridSnap>,
+    /// One texture + pick buffer + bind group per grid in `grids`.
+    pub planes: Vec<PlaneTex>,
     /// Synapse vertices drawn this scene (2 per synapse, after truncation).
     pub syn_verts: u32,
     /// Mean nearest-neighbour scale: cbrt(bounds volume / neuron count).
@@ -94,6 +132,10 @@ pub struct Gpu {
     bgl_part: wgpu::BindGroupLayout,
     pip_neur: wgpu::RenderPipeline,
     pip_pick: wgpu::RenderPipeline,
+    pip_plane: wgpu::RenderPipeline,
+    pip_plane_pick: wgpu::RenderPipeline,
+    plane_bgl: wgpu::BindGroupLayout,
+    plane_params: wgpu::Buffer,
     pip_syn: wgpu::RenderPipeline,
     pip_pv: wgpu::RenderPipeline,
     pip_part: wgpu::RenderPipeline,
@@ -130,6 +172,9 @@ pub struct DrawParams {
     pub pv_count: u32,
     pub part_count: u32,
     pub show_syn: bool,
+    /// Per grid index (`scene.planes` order): draw the activity plane.
+    /// `None` draws every plane in the scene.
+    pub planes_on: Option<Vec<bool>>,
 }
 
 struct PickTarget {
@@ -179,6 +224,7 @@ impl Gpu {
                 (1, storage(), wgpu::ShaderStages::VERTEX),
                 (2, storage(), wgpu::ShaderStages::VERTEX_FRAGMENT),
                 (3, storage(), wgpu::ShaderStages::VERTEX),
+                (6, storage(), wgpu::ShaderStages::VERTEX),
             ],
         );
         let bgl_syn = bgl(
@@ -193,8 +239,56 @@ impl Gpu {
                 (2, storage(), wgpu::ShaderStages::VERTEX),
                 (4, storage(), wgpu::ShaderStages::VERTEX),
                 (5, storage(), wgpu::ShaderStages::VERTEX),
+                (6, storage(), wgpu::ShaderStages::VERTEX),
             ],
         );
+        // Plane layout mixes a storage array, a texture and a pick buffer —
+        // write it out instead of going through the buffer-only helper.
+        let plane_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("plane bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: storage(),
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 12,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: storage(),
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
         let bgl_pv = bgl(
             &device,
             "pv",
@@ -277,6 +371,7 @@ impl Gpu {
         let pl_syn = mk_pl(&bgl_syn);
         let pl_pv = mk_pl(&bgl_pv);
         let pl_part = mk_pl(&bgl_part);
+        let pl_plane = mk_pl(&plane_bgl);
 
         let pip_neur = mk(
             "neur",
@@ -309,6 +404,36 @@ impl Gpu {
             wgpu::PrimitiveTopology::LineList,
             None,
         );
+        // Activity planes: one quad per grid group, unculled so the sheet
+        // reads from both sides.
+        let pip_plane = mk(
+            "plane",
+            "vs_plane",
+            "fs_plane",
+            &[Some(col(true))],
+            &pl_plane,
+            wgpu::PrimitiveTopology::TriangleList,
+            None,
+        );
+        let pip_plane_pick = mk(
+            "plane pick",
+            "vs_plane",
+            "fs_plane_pick",
+            &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::R32Uint,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            &pl_plane,
+            wgpu::PrimitiveTopology::TriangleList,
+            None,
+        );
+        let plane_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("plane params"),
+            size: std::mem::size_of::<PlaneParamsGpu>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let pip_part = mk(
             "part",
             "vs_part",
@@ -444,6 +569,10 @@ impl Gpu {
             bgl_part,
             pip_neur,
             pip_pick,
+            pip_plane,
+            pip_plane_pick,
+            plane_bgl,
+            plane_params,
             pip_syn,
             pip_pv,
             pip_part,
@@ -611,6 +740,38 @@ impl Gpu {
                 usage: wgpu::BufferUsages::STORAGE,
             });
 
+        // Hide bitfield: one lane per 32 instances (sel_bits packing).
+        // Uploaded per frame by `write_hide_bits` from the plane LOD.
+        let hide_bits = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("hide"),
+            size: ((inst_total.max(1) / 32 + 1) * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Grid planes: a 1x1 texture now, resized lazily by
+        // `ensure_plane_tex` once the app's reduction decides real dims.
+        let mut plane_member = vec![false; inst_total.max(1)];
+        for g in &geo.grids {
+            for &m in &g.members {
+                if (m as usize) < plane_member.len() {
+                    plane_member[m as usize] = true;
+                }
+            }
+        }
+        if !geo.grids.is_empty() {
+            let need = geo.grids.len() * std::mem::size_of::<PlaneParamsGpu>();
+            if (self.plane_params.size() as usize) < need {
+                self.plane_params = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("plane params"),
+                    size: need as u64,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+        }
+        let planes: Vec<PlaneTex> = geo.grids.iter().map(|_| self.mk_plane_tex(1, 1)).collect();
+
         self.neuron_bg = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("neur bg"),
             layout: &self.bgl_neur,
@@ -619,6 +780,7 @@ impl Gpu {
                 entry(1, inst_buf.as_entire_binding()),
                 entry(2, activity_buf.as_entire_binding()),
                 entry(3, sel_buf.as_entire_binding()),
+                entry(6, hide_bits.as_entire_binding()),
             ],
         }));
         // Chunk the pairs binding under max_storage_buffer_binding_size
@@ -646,6 +808,7 @@ impl Gpu {
                                 size: std::num::NonZero::new((len * 8) as u64),
                             }),
                         ),
+                        entry(6, hide_bits.as_entire_binding()),
                     ],
                 });
                 (bg, (len * 2) as u32)
@@ -686,6 +849,10 @@ impl Gpu {
             sel_buf,
             pos_buf,
             pairs_buf,
+            hide_bits,
+            plane_member,
+            grids: geo.grids.clone(),
+            planes,
             syn_verts: (draw_syns.min(n_syns) * 2) as u32,
             avg_spacing,
             avg_edge_len,
@@ -884,6 +1051,112 @@ impl Gpu {
         }
     }
 
+    /// Upload the per-frame hide bitfield (cube instances whose group is
+    /// plane-rendered). Same u32-lane packing as `write_selection`.
+    pub fn write_hide_bits(&self, bits: &[u32]) {
+        if let Some(sc) = &self.scene {
+            self.queue
+                .write_buffer(&sc.hide_bits, 0, bytemuck::cast_slice(bits));
+        }
+    }
+
+    /// Per-plane params array (one `PlaneParamsGpu` per grid, draw order).
+    pub fn write_plane_params(&mut self, params: &[PlaneParamsGpu]) {
+        let need = (params.len().max(1)) * std::mem::size_of::<PlaneParamsGpu>();
+        if (self.plane_params.size() as usize) < need {
+            self.plane_params = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("plane params"),
+                size: need.next_power_of_two() as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            // Params live in every plane's bind group — rebuild them.
+            if let Some(sc) = &mut self.scene {
+                let (dev, cam, bgl, pp) = (
+                    &self.device,
+                    &self.cam_buf,
+                    &self.plane_bgl,
+                    &self.plane_params,
+                );
+                for i in 0..sc.planes.len() {
+                    let (w, h) = (sc.planes[i].w, sc.planes[i].h);
+                    sc.planes[i] = mk_plane_tex(dev, cam, bgl, pp, w, h);
+                }
+            }
+        }
+        if !params.is_empty() {
+            self.queue
+                .write_buffer(&self.plane_params, 0, bytemuck::cast_slice(params));
+        }
+    }
+
+    /// Allocate one plane texture + pick buffer + bind group at (w,h).
+    fn mk_plane_tex(&self, w: u32, h: u32) -> PlaneTex {
+        mk_plane_tex(
+            &self.device,
+            &self.cam_buf,
+            &self.plane_bgl,
+            &self.plane_params,
+            w,
+            h,
+        )
+    }
+
+    /// Resize plane `i`'s texture/bind group when the reduced dims change.
+    pub fn ensure_plane_tex(&mut self, i: usize, w: u32, h: u32) {
+        let Some(sc) = &mut self.scene else { return };
+        if i >= sc.planes.len() {
+            return;
+        }
+        if sc.planes[i].w == w.max(1) && sc.planes[i].h == h.max(1) {
+            return;
+        }
+        sc.planes[i] = mk_plane_tex(
+            &self.device,
+            &self.cam_buf,
+            &self.plane_bgl,
+            &self.plane_params,
+            w,
+            h,
+        );
+    }
+
+    /// Upload the reduced activity image for plane `i` (w*h f32) and the
+    /// matching texel->member pick map (w*h u32).
+    pub fn write_plane(&self, i: usize, pix: &[f32], pick: &[u32]) {
+        let Some(sc) = &self.scene else { return };
+        let Some(pt) = sc.planes.get(i) else { return };
+        // write_texture needs 256B-aligned rows — pad the staging copy.
+        let row = (pt.w as usize) * 4;
+        let padded = row.div_ceil(256) * 256;
+        let mut data = vec![0u8; padded * pt.h as usize];
+        for r in 0..pt.h as usize {
+            let src = &pix[r * pt.w as usize..(r + 1) * pt.w as usize];
+            data[r * padded..r * padded + row].copy_from_slice(bytemuck::cast_slice(src));
+        }
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &pt._tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded as u32),
+                rows_per_image: Some(pt.h),
+            },
+            wgpu::Extent3d {
+                width: pt.w,
+                height: pt.h,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue
+            .write_buffer(&pt.pick_buf, 0, bytemuck::cast_slice(pick));
+    }
+
     /// Upload overlay lines (grid, boxes, drag helpers) for this frame.
     pub fn write_pv(&mut self, verts: &[Pv]) {
         let need = verts.len().max(1);
@@ -964,6 +1237,21 @@ impl Gpu {
             rpass.set_pipeline(&self.pip_neur);
             rpass.set_bind_group(0, self.neuron_bg.as_ref().unwrap(), &[]);
             rpass.draw(0..36, 0..sc.entity_of_inst.len() as u32);
+        }
+        // Activity planes: one quad per enabled grid group (params index
+        // is the plane's instance_index).
+        let planes_on = self.draw_params.as_ref().and_then(|p| p.planes_on.as_ref());
+        if !sc.planes.is_empty() {
+            rpass.set_pipeline(&self.pip_plane);
+            for (i, pt) in sc.planes.iter().enumerate() {
+                if let Some(on) = planes_on {
+                    if !on.get(i).copied().unwrap_or(true) {
+                        continue;
+                    }
+                }
+                rpass.set_bind_group(0, &pt.bg, &[]);
+                rpass.draw(0..6, i as u32..i as u32 + 1);
+            }
         }
         if pv_count > 0 {
             rpass.set_pipeline(&self.pip_pv);
@@ -1096,6 +1384,19 @@ impl Gpu {
             rpass.set_pipeline(&self.pip_pick);
             rpass.set_bind_group(0, self.neuron_bg.as_ref().unwrap(), &[]);
             rpass.draw(0..36, 0..sc.entity_of_inst.len() as u32);
+            if !sc.planes.is_empty() {
+                let planes_on = self.draw_params.as_ref().and_then(|p| p.planes_on.as_ref());
+                rpass.set_pipeline(&self.pip_plane_pick);
+                for (i, pt) in sc.planes.iter().enumerate() {
+                    if let Some(on) = planes_on {
+                        if !on.get(i).copied().unwrap_or(true) {
+                            continue;
+                        }
+                    }
+                    rpass.set_bind_group(0, &pt.bg, &[]);
+                    rpass.draw(0..6, i as u32..i as u32 + 1);
+                }
+            }
         }
         enc.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -1158,6 +1459,58 @@ impl Gpu {
                 Some((hover, if raw == 0 { None } else { Some(raw - 1) }))
             }
         }
+    }
+}
+
+/// Allocate one plane texture + pick buffer + bind group at (w,h).
+/// Free function so `&mut self.scene` callers can rebuild entries without
+/// tripping the field-level borrow rules.
+fn mk_plane_tex(
+    device: &wgpu::Device,
+    cam_buf: &wgpu::Buffer,
+    plane_bgl: &wgpu::BindGroupLayout,
+    plane_params: &wgpu::Buffer,
+    w: u32,
+    h: u32,
+) -> PlaneTex {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("plane tex"),
+        size: wgpu::Extent3d {
+            width: w.max(1),
+            height: h.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&Default::default());
+    let pick_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("plane pick"),
+        size: (w.max(1) * h.max(1) * 4) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("plane bg"),
+        layout: plane_bgl,
+        entries: &[
+            entry(0, cam_buf.as_entire_binding()),
+            entry(10, plane_params.as_entire_binding()),
+            entry(11, wgpu::BindingResource::TextureView(&view)),
+            entry(12, pick_buf.as_entire_binding()),
+        ],
+    });
+    PlaneTex {
+        _tex: tex,
+        _view: view,
+        pick_buf,
+        bg,
+        w: w.max(1),
+        h: h.max(1),
     }
 }
 

@@ -103,6 +103,43 @@ fn abort_stops_an_infinite_script() {
     });
 }
 
+/// Grid groups publish `geo.grids` metadata plus a per-texel spike trace
+/// in `snap.grid_traces` — the data path the activity-plane renderer uses.
+#[test]
+fn worker_publishes_grid_traces() {
+    let ctl = SimCtl::start(Network::new(), BackendKind::Cpu, 1);
+    ctl.send(Cmd::Eval(
+        r#"
+        net.create_2d_grid("g", 8, 8, 30.0);
+        net.create_connections("g", 0.3, 100.0, 8.0);
+        sim.set_noise(500.0, 20.0);
+        sim.run(80.0);
+        "#
+        .to_string(),
+    ));
+    let (geo, snap) = wait_for(Duration::from_secs(10), || {
+        let s = ctl.shared.read().ok()?;
+        let g = s.geo.clone()?;
+        (s.snap.time_ms >= 79.9 && !s.snap.grid_traces.is_empty()).then_some((g, s.snap.clone()))
+    });
+    assert_eq!(geo.grids.len(), 1);
+    let gs = &geo.grids[0];
+    assert_eq!(gs.dims, [8, 8, 1]);
+    assert_eq!(gs.members.len(), 64);
+    // texel order: member k sits at lattice position k — every member
+    // present exactly once.
+    let mut sorted = gs.members.clone();
+    sorted.sort();
+    assert_eq!(sorted, (0..64).collect::<Vec<u32>>());
+
+    let tr = &snap.grid_traces[0];
+    assert_eq!(tr.len(), 64);
+    assert!(
+        tr.iter().any(|&v| v > 0.0),
+        "500Hz noise should leave live texels"
+    );
+}
+
 /// Same path on the CUDA backend (skipped gracefully if no GPU).
 #[test]
 fn worker_cuda_smoke() {

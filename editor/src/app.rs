@@ -38,6 +38,16 @@ pub struct EditorApp {
     pub hover: Option<u32>,
     pub show_grid: bool,
     pub show_synapses: bool,
+    /// Grid-group render mode (activity plane vs per-neuron cubes).
+    pub grid_view: crate::plane::GridView,
+    /// Per-group 3D display config, keyed by `GeoSnap::grids[].group`.
+    pub plane_cfgs: HashMap<u32, crate::plane::PlaneCfg>,
+    /// Last snap's per-grid spike traces (fed to the plane textures).
+    grid_traces: Vec<std::sync::Arc<Vec<f32>>>,
+    /// Upload caches for `plane_frame` — textures only re-upload on change.
+    plane_snap: u64,
+    plane_geo: u64,
+    plane_cfgs_last: Vec<crate::plane::PlaneCfg>,
 
     console_input: String,
     history: Vec<String>,
@@ -202,6 +212,12 @@ impl EditorApp {
             script_file: "script.rhai".into(),
             show_grid: true,
             show_synapses: true,
+            grid_view: crate::plane::GridView::Auto,
+            plane_cfgs: HashMap::new(),
+            grid_traces: Vec::new(),
+            plane_snap: 0,
+            plane_geo: 0,
+            plane_cfgs_last: Vec::new(),
             speed: 1.0,
             speed_actual: 0.0,
             running: false,
@@ -371,6 +387,7 @@ impl EditorApp {
             self.last_snap_seq = snap.seq;
             self.speed_actual = snap.steps_per_sec;
             self.activity = snap.activity.to_vec();
+            self.grid_traces = snap.grid_traces.clone();
             if let Some(g) = &self.geo {
                 self.particles.feed(g, &snap.counts, snap.time_ms);
             }
@@ -402,6 +419,79 @@ impl EditorApp {
         self.running = running;
         self.sim_built = sim_built;
         self.busy = busy;
+    }
+
+    /// Per-frame grid-plane bookkeeping for the renderer: quad params and
+    /// hide bits (cheap, every call), and the reduced activity textures
+    /// only when the trace data or display config actually changed (a
+    /// 1M-texel plane is a ~4MB padded upload — not per-frame).
+    ///
+    /// Returns the per-plane draw flags for `DrawParams::planes_on`.
+    pub(crate) fn plane_frame(&mut self, gpu: &mut Gpu, vp_h_px: f32) -> Option<Vec<bool>> {
+        let g = self.geo.clone()?;
+        if g.grids.is_empty() {
+            return None;
+        }
+        let eye = self.camera.eye();
+        let mut on = Vec::with_capacity(g.grids.len());
+        let mut params = Vec::with_capacity(g.grids.len());
+        let mut cfgs = Vec::with_capacity(g.grids.len());
+        let mut bits = vec![0u32; g.pos.len() / 32 + 1];
+        for gs in &g.grids {
+            let cfg = self
+                .plane_cfgs
+                .get(&(gs.group as u32))
+                .copied()
+                .unwrap_or_default();
+            cfgs.push(cfg);
+            let dist = (glam::Vec3::from(crate::plane::center(gs)) - eye).length();
+            let show = match self.grid_view {
+                crate::plane::GridView::Planes => true,
+                crate::plane::GridView::Cubes => false,
+                crate::plane::GridView::Auto => {
+                    // A small selection touching this grid flips it back
+                    // to cubes so its neurons stay editable; big selects
+                    // keep the plane. Members are neuron ids == instance
+                    // ids for neurons.
+                    let sel_touches = self.selection.len() <= crate::plane::SEL_CUBE_MAX
+                        && !self.selection.is_empty()
+                        && gs.members.iter().any(|m| self.selection.contains(m));
+                    !sel_touches && crate::plane::texel_px(gs, dist, vp_h_px) < crate::plane::LOD_PX
+                }
+            };
+            on.push(show);
+            let (ua, va) = crate::plane::plane_dims(gs, &cfg);
+            let (origin, du, dv) = crate::plane::quad(gs, &cfg);
+            params.push(crate::gpu::PlaneParamsGpu {
+                origin,
+                du,
+                dv,
+                wh: [gs.dims[ua], gs.dims[va], 0, 0],
+            });
+            if show {
+                for &m in &gs.members {
+                    bits[m as usize >> 5] |= 1 << (m & 31);
+                }
+            }
+        }
+        gpu.write_plane_params(&params);
+        gpu.write_hide_bits(&bits);
+
+        let need_upload = self.plane_snap != self.last_snap_seq
+            || self.plane_geo != self.geo_version
+            || self.plane_cfgs_last != cfgs;
+        if need_upload {
+            for (i, gs) in g.grids.iter().enumerate() {
+                let tr = self.grid_traces.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
+                let (w, h, pix, pick) = crate::plane::reduce(gs, tr, &cfgs[i]);
+                gpu.ensure_plane_tex(i, w, h);
+                gpu.write_plane(i, &pix, &pick);
+            }
+            self.plane_snap = self.last_snap_seq;
+            self.plane_geo = self.geo_version;
+            self.plane_cfgs_last = cfgs;
+        }
+        Some(on)
     }
 
     fn console_lines(&self) -> Vec<String> {
@@ -717,6 +807,31 @@ impl EditorApp {
                 ui.separator();
                 ui.checkbox(&mut self.show_synapses, "synapses");
                 ui.checkbox(&mut self.show_grid, "grid");
+                // Grid-group render mode: the plane LOD keeps big grids
+                // interactive; cubes stay available for editing up close.
+                egui::ComboBox::from_id_salt("grid_view")
+                    .selected_text(match self.grid_view {
+                        crate::plane::GridView::Auto => "auto",
+                        crate::plane::GridView::Cubes => "cubes",
+                        crate::plane::GridView::Planes => "planes",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.grid_view,
+                            crate::plane::GridView::Auto,
+                            "auto",
+                        );
+                        ui.selectable_value(
+                            &mut self.grid_view,
+                            crate::plane::GridView::Cubes,
+                            "cubes",
+                        );
+                        ui.selectable_value(
+                            &mut self.grid_view,
+                            crate::plane::GridView::Planes,
+                            "planes",
+                        );
+                    });
                 ui.separator();
                 ui.checkbox(&mut self.show_console, "console");
                 ui.checkbox(&mut self.show_plots, "plots");
@@ -807,8 +922,53 @@ impl EditorApp {
                 ui.separator();
                 ui.heading("Groups");
                 if let Some(g) = self.geo.clone() {
-                    for (name, members) in &g.groups {
+                    for (gi, (name, members)) in g.groups.iter().enumerate() {
                         ui.label(format!("{name}: {} neurons", members.len()));
+                        // 3D lattices get a slice/projection choice for the
+                        // activity plane (2D grids show their single sheet).
+                        if let Some(gs) = g.grids.iter().find(|x| x.group == gi) {
+                            if gs.dims[2] > 1 {
+                                let cfg = self.plane_cfgs.entry(gi as u32).or_default();
+                                ui.horizontal(|ui| {
+                                    ui.label("  collapse");
+                                    for a in 0..3u8 {
+                                        ui.selectable_value(&mut cfg.axis, a, format!("d{a}"));
+                                    }
+                                    ui.separator();
+                                    let cur = cfg.proj;
+                                    if ui
+                                        .selectable_label(cur == crate::plane::Proj::Max, "max")
+                                        .clicked()
+                                    {
+                                        cfg.proj = crate::plane::Proj::Max;
+                                    }
+                                    if ui
+                                        .selectable_label(cur == crate::plane::Proj::Mean, "mean")
+                                        .clicked()
+                                    {
+                                        cfg.proj = crate::plane::Proj::Mean;
+                                    }
+                                    if ui
+                                        .selectable_label(
+                                            matches!(cur, crate::plane::Proj::Slice(_)),
+                                            "slice",
+                                        )
+                                        .clicked()
+                                    {
+                                        cfg.proj = crate::plane::Proj::Slice(0);
+                                    }
+                                });
+                                if let crate::plane::Proj::Slice(k) = &mut cfg.proj {
+                                    let max = gs.dims[cfg.axis.min(2) as usize] - 1;
+                                    *k = (*k).min(max);
+                                    ui.horizontal(|ui| {
+                                        ui.label("  slice");
+                                        ui.add(egui::DragValue::new(k).range(0..=max).speed(0.1));
+                                        ui.label(format!("/ {max}"));
+                                    });
+                                }
+                            }
+                        }
                     }
                     ui.separator();
                     ui.heading("Inputs");

@@ -24,6 +24,11 @@ struct Inst {
 @group(0) @binding(1) var<storage, read> inst: array<Inst>;
 @group(0) @binding(2) var<storage, read> activity: array<f32>;
 @group(0) @binding(3) var<storage, read> sel_bits: array<u32>;
+// Per-instance hide bitfield (same packing as sel_bits): set for cube
+// instances whose group currently renders as an activity plane, and for
+// synapse-endpoint lookup in vs_syn (shared buffer, binding 6 in both
+// layouts — each pipeline sees only its own layout).
+@group(0) @binding(6) var<storage, read> hide_bits: array<u32>;
 
 // Unit cube, 6 faces x 2 tris, all triangles wound CCW seen from OUTSIDE
 // (back-face culling is on; a face wound inward is invisible from outside).
@@ -75,10 +80,24 @@ fn selected(i: u32) -> bool {
     return ((w >> (i & 31u)) & 1u) != 0u;
 }
 
+fn hidden(i: u32) -> bool {
+    let w = hide_bits[i >> 5u];
+    return ((w >> (i & 31u)) & 1u) != 0u;
+}
+
 @vertex
 fn vs_neuron(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> NeurOut {
     var o: NeurOut;
     let it = inst[ii];
+    if hidden(ii) {
+        // Group renders as a plane: collapse the cube to a degenerate
+        // triangle — zero fragments, still one draw call for all cubes.
+        o.clip = vec4f(2.0, 2.0, 2.0, 1.0);
+        o.nrm = vec3f(0.0);
+        o.id = ii;
+        o.color = vec4f(0.0);
+        return o;
+    }
     // misc.w = pick mode: draw the same cubes 75% bigger for easier clicks.
     let size = it.pos_scale.w * (1.0 + cam.misc.w * 0.75);
     let wp = it.pos_scale.xyz + CUBE[vi] * size;
@@ -138,6 +157,14 @@ fn vs_syn(@builtin(vertex_index) vi: u32) -> LineOut {
     let end = vi & 1u;          // 0 = src, 1 = tgt
     let raw = select(lpairs[si].x, lpairs[si].y, end == 1u);
     let p = raw & 0x7fffffffu;  // neuron index (top bit is the src-kind flag)
+    let q = lpairs[si].y & 0x7fffffffu;
+    if hidden(p) && hidden(q) {
+        // Both endpoints are plane members: the plane surface shows the
+        // group's internal wiring already — cull the member-member edges.
+        o.clip = vec4f(2.0, 2.0, 2.0, 1.0);
+        o.color = vec4f(0.0);
+        return o;
+    }
     o.clip = cam.view_proj * vec4f(lpos[p].xyz, 1.0);
     let act = clamp(activity[p], 0.0, 1.0);
     // Per-synapse colour by source kind travels in lpairs[si].x's top bit:
@@ -216,4 +243,89 @@ fn vs_blit(@builtin(vertex_index) vi: u32) -> BlitOut {
 @fragment
 fn fs_blit(o: BlitOut) -> @location(0) vec4f {
     return textureSample(scene_t, scene_s, o.uv);
+}
+
+// ---------- grid activity planes (one quad per grid group) ----------
+//
+// Each plane is a textured quad: the app reduces the grid's f32 spike
+// trace to a 2D image (slice or max/mean projection for 3D grids) and
+// uploads it to an R32Float texture; a parallel u32 buffer maps each
+// displayed texel back to its member neuron id for picking.
+
+struct PlaneParams {
+    origin: vec4f,  // world pos of the quad corner (texel -0.5,-0.5 cell edge)
+    du: vec4f,      // world step per texel along u
+    dv: vec4f,      // world step per texel along v
+    wh: vec4u,      // x = w texels, y = h texels
+}
+
+@group(0) @binding(10) var<storage, read> pparams: array<PlaneParams>;
+@group(0) @binding(11) var ptex: texture_2d<f32>;
+@group(0) @binding(12) var<storage, read> ppick: array<u32>;
+
+struct PlaneOut {
+    @builtin(position) clip: vec4f,
+    @location(0) uv: vec2f, // texel coordinates 0..w, 0..h
+    @location(1) @interpolate(flat) id: u32,
+}
+
+const QUAD6: array<vec2f, 6> = array<vec2f, 6>(
+    vec2f(0, 0), vec2f(1, 0), vec2f(1, 1),
+    vec2f(0, 0), vec2f(1, 1), vec2f(0, 1),
+);
+
+@vertex
+fn vs_plane(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> PlaneOut {
+    var o: PlaneOut;
+    let p = pparams[ii];
+    let c = QUAD6[vi];
+    let wp = p.origin.xyz + (c.x * f32(p.wh.x)) * p.du.xyz + (c.y * f32(p.wh.y)) * p.dv.xyz;
+    o.clip = cam.view_proj * vec4f(wp, 1.0);
+    o.uv = c * vec2f(f32(p.wh.x), f32(p.wh.y));
+    o.id = ii;
+    return o;
+}
+
+// Perceptually-uniform colormap (viridis stops) on sqrt(v) — the trace is
+// a decaying 0..1 value; the sqrt lift keeps low activity visible.
+fn cmap(v: f32) -> vec3f {
+    let t = clamp(v, 0.0, 1.0);
+    let c0 = vec3f(0.267, 0.005, 0.329);
+    let c1 = vec3f(0.284, 0.141, 0.458);
+    let c2 = vec3f(0.254, 0.265, 0.530);
+    let c3 = vec3f(0.207, 0.372, 0.553);
+    let c4 = vec3f(0.164, 0.471, 0.558);
+    let c5 = vec3f(0.128, 0.567, 0.551);
+    let c6 = vec3f(0.135, 0.659, 0.518);
+    let c7 = vec3f(0.267, 0.749, 0.441);
+    let c8 = vec3f(0.478, 0.821, 0.318);
+    let c9 = vec3f(0.741, 0.873, 0.150);
+    let c10 = vec3f(0.993, 0.906, 0.144);
+    let x = t * 10.0;
+    let i = u32(min(floor(x), 9.0));
+    let f = x - f32(i);
+    var stops: array<vec3f, 11>;
+    stops[0] = c0; stops[1] = c1; stops[2] = c2; stops[3] = c3;
+    stops[4] = c4; stops[5] = c5; stops[6] = c6; stops[7] = c7;
+    stops[8] = c8; stops[9] = c9; stops[10] = c10;
+    return mix(stops[i], stops[i + 1u], f);
+}
+
+@fragment
+fn fs_plane(o: PlaneOut) -> @location(0) vec4f {
+    let p = pparams[o.id];
+    let t = vec2i(clamp(o.uv, vec2f(0.0), vec2f(f32(p.wh.x) - 0.5, f32(p.wh.y) - 0.5)));
+    let v = textureLoad(ptex, t, 0).r;
+    let col = cmap(sqrt(clamp(v, 0.0, 1.0)));
+    // Dim the quiet end instead of going fully black so the lattice still
+    // reads as a surface; active texels pop.
+    return vec4f(col * (0.35 + 0.65 * clamp(v, 0.0, 1.0)), 0.92);
+}
+
+@fragment
+fn fs_plane_pick(o: PlaneOut) -> @location(0) u32 {
+    let p = pparams[o.id];
+    let t = vec2i(clamp(o.uv, vec2f(0.0), vec2f(f32(p.wh.x) - 0.5, f32(p.wh.y) - 0.5)));
+    let tid = u32(t.y) * p.wh.x + u32(t.x);
+    return ppick[tid] + 1u;
 }

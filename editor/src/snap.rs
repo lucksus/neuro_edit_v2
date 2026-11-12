@@ -36,6 +36,10 @@ pub struct GeoSnap {
     pub samples: Vec<(String, Vec<f32>, Vec<f32>)>,
     /// (name, code) — script list saved in the file.
     pub scripts: Vec<(String, String)>,
+    /// Groups whose members form a regular lattice (`Group::grid`), with
+    /// the member list reordered into texel order. The plane view draws
+    /// these instead of the member cubes.
+    pub grids: Vec<GridSnap>,
     pub dt_ms: f32,
 }
 
@@ -44,6 +48,24 @@ pub struct InputSnap {
     pub name: String,
     pub pos: [f32; 3],
     pub targets: Vec<u32>,
+}
+
+/// A grid group turned renderable: lattice metadata plus the member list
+/// re-ordered into texel order (position k = lattice index k).
+#[derive(Clone)]
+pub struct GridSnap {
+    /// Index into `groups`.
+    pub group: usize,
+    /// Texel counts per lattice dim `[w, h, d]` — `d == 1` is a 2D grid.
+    pub dims: [u32; 3],
+    /// World axis (0=x, 1=y, 2=z) each lattice dim runs along.
+    pub axes: [u8; 3],
+    /// World position of lattice texel (0,0,0).
+    pub origin: [f32; 3],
+    /// World distance between neighbouring texels.
+    pub spacing: f32,
+    /// Texel-ordered member list (neuron ids), `len == w*h*d`.
+    pub members: Vec<u32>,
 }
 
 /// Dynamic state published every chunk while the sim runs.
@@ -61,6 +83,9 @@ pub struct Snap {
     pub counts: Arc<Vec<u32>>,
     /// New `v` samples for watched neurons, per id.
     pub watched_v: Vec<(u32, Arc<Vec<f32>>)>,
+    /// Spike-trace value per texel for each `GeoSnap::grids` entry
+    /// (same order; `exp` decay, tau ~20 ms — see `simctl::PLANE_TAU_MS`).
+    pub grid_traces: Vec<Arc<Vec<f32>>>,
     /// Measured wall-time speed (steps/s) while running.
     pub steps_per_sec: f32,
 }
