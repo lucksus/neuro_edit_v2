@@ -1983,6 +1983,9 @@ so the assertion passed whether or not the worker exited. With every
   `script_set_syn_tau_one_rejects_negative_ids`,
   `script_fit_ridge_rejects_short_arrays`,
   `script_file_errors_reach_the_script`.
+  Fallout `3a140a6`: `lsm_readout.rhai` played `src4`/`src5` which never
+  existed (the silent skip was load-bearing — those streams are the
+  pure-noise controls); the replay loop now iterates driven sources.
 - **Q13** `9d91416` — the mouse-reachable quadratic paths, measured
   (release build): `AddToGroup` 50k ids onto a 50k-member group —
   `Vec::contains` per id: **84.6 ms → 1.0 ms** (HashSet dedupe);
