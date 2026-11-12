@@ -25,6 +25,10 @@ pub struct EditorApp {
     /// Frame the camera on the next geometry publish (grid dialogs, load).
     frame_pending: bool,
     last_snap_seq: u64,
+    /// Set this frame when any ServerMsg landed (dirty_seq moved) —
+    /// drives the conditional repaint at the end of `update`.
+    pub net_touched: bool,
+    last_dirty_seq: u64,
     /// Fingerprint contribution of `plane_frame` (params+cfgs+hide bits+
     /// on-flags+trace uploads) for the SceneKey.
     pub plane_key: u64,
@@ -519,6 +523,8 @@ impl EditorApp {
             geo_version: 0,
             frame_pending: false,
             last_snap_seq: 0,
+            net_touched: false,
+            last_dirty_seq: 0,
             plane_key: 0,
             parts_active: false,
             pick_in_flight: false,
@@ -900,6 +906,15 @@ impl EditorApp {
 
     /// Pull fresh shared state (geometry + snapshot) into the UI.
     fn sync_shared(&mut self, gpu: &mut Gpu) {
+        // Any ServerMsg that landed since the last frame bumps dirty_seq —
+        // that's our "repaint on transport" signal for Stage 14 E.
+        {
+            let sh = self.ctl.shared.read().unwrap();
+            if sh.dirty_seq != self.last_dirty_seq {
+                self.net_touched = true;
+                self.last_dirty_seq = sh.dirty_seq;
+            }
+        }
         // One-shot consumables the worker answered for us.
         {
             let mut sh = self.ctl.shared.write().unwrap();
@@ -3626,7 +3641,23 @@ impl eframe::App for EditorApp {
         self.dialog(ctx);
 
         crate::view::viewport(self, ctx, rs);
-        ctx.request_repaint();
+        // Stage 14 E: repaint on demand, not unconditionally — a quiet app
+        // (paused sim, still camera, no drags/picks/uploads) sleeps between
+        // input events. Server traffic flags itself via net_touched.
+        let animating = self.running
+            || self.busy
+            || self.net_touched
+            || self.camera.animating()
+            || self.move_drag.is_some()
+            || self.box_sel.is_some()
+            || self.parts_active
+            || self.pick_click.is_some()
+            || self.pick_in_flight
+            || !self.files.upload_q.is_empty();
+        if animating {
+            ctx.request_repaint();
+        }
+        self.net_touched = false;
     }
 }
 

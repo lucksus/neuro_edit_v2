@@ -256,9 +256,18 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
                 if let Some(mv) = mouse_vp {
                     let px = (mv.x * w_px as f32).min(w_px as f32 - 1.0) as u32;
                     let py = (mv.y * h_px as f32).min(h_px as f32 - 1.0) as u32;
-                    with_gpu(rs, |gpu| {
-                        gpu.request_pick(px, py, w_px, h_px, true);
-                    });
+                    // Only re-pick when the target could differ — a still
+                    // cursor under an unchanged scene needs no new pass.
+                    let want = (px, py, cam_bits(&app.camera, aspect), app.geo_version);
+                    if app.last_hover_pick != Some(want) {
+                        let mut sent = false;
+                        with_gpu(rs, |gpu| {
+                            sent = gpu.request_pick(px, py, w_px, h_px, true);
+                        });
+                        if sent {
+                            app.last_hover_pick = Some(want);
+                        }
+                    }
                 }
             }
 

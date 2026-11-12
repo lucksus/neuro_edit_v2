@@ -163,6 +163,9 @@ pub struct Shared {
     pub job_progress: std::collections::BTreeMap<u64, Vec<Vec<(String, f64)>>>,
     /// `OpenJob` reply, consumed once by the jobs panel.
     pub job_detail: Option<JobDetailSnap>,
+    /// Bumped by `Fold::apply` for every ServerMsg — the app's cheap
+    /// "server traffic arrived" repaint signal (Stage 14 E).
+    pub dirty_seq: u64,
 }
 
 /// Snapshot of an `OpenJob` reply for the jobs panel.
@@ -200,6 +203,7 @@ impl Default for Shared {
             jobs: Vec::new(),
             job_progress: std::collections::BTreeMap::new(),
             job_detail: None,
+            dirty_seq: 0,
         }
     }
 }
@@ -237,6 +241,7 @@ impl Fold {
     /// Apply one `ServerMsg` to `Shared`. `to:` routing is ignored — the
     /// local client is the only subscriber.
     pub fn apply(&mut self, sh: &mut Shared, msg: proto::ServerMsg) {
+        sh.dirty_seq += 1;
         match msg {
             proto::ServerMsg::Hello {
                 proto,

@@ -68,6 +68,11 @@ impl Camera {
         self.anim = Some((p, 0.0));
     }
 
+    /// True while the focus glide is running (keeps repaint alive).
+    pub fn animating(&self) -> bool {
+        self.anim.is_some()
+    }
+
     pub fn tick(&mut self, dt: f32) {
         if let Some((goal, mut t)) = self.anim {
             t += dt * 3.0;
