@@ -696,8 +696,10 @@ fn on_pick(app: &mut EditorApp, res: Option<u32>, ctx: &egui::Context) {
     }
 }
 
-/// Input→target link tint (matches the input marker's warm yellow).
-const INPUT_LINK_COL: [f32; 4] = [0.9, 0.72, 0.22, 0.75];
+/// Input→target links share the input node's gold (Stage 15 D: these are
+/// the gold lines seen when nothing is selected — the selection buffer is
+/// zeroed each frame, so stale selection highlight cannot produce them).
+const INPUT_LINK_COL: [f32; 4] = crate::scene::rgba(crate::scene::INPUT_COL, 0.75);
 
 fn mode_input(
     app: &mut EditorApp,

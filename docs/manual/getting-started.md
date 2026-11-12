@@ -1,11 +1,15 @@
 # Getting started
 
-NeuroEdit is a network editor + simulator. The 3D view shows neurons
-as cubes (blue = excitatory, purple = inhibitory; both flash orange
-when spiking) and synapses as thin lines (salmon = from an excitatory
-source, blue = inhibitory; they turn golden when touching a selected
-neuron). Small dots travel along axons when "spike dots" is on —
-yellow from excitatory cells, light blue from inhibitory.
+NeuroEdit is a network editor + simulator. One colour rule runs
+through the 3D view: warm = excitatory, cool = inhibitory. Neurons
+are cubes (warm amber = excitatory, cool blue = inhibitory; both
+flash orange when spiking) and synapses are thin lines (salmon =
+from an excitatory source, blue = inhibitory; they turn golden when
+touching a selected neuron). Small dots travel along axons when
+"spike dots" is on — yellow from excitatory cells, light blue from
+inhibitory. Inputs are golden cubes, and each draws golden links
+to the neurons it drives — so gold lines can appear with nothing
+selected.
 
 ## The toolbar
 

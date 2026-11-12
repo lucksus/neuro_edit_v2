@@ -9,14 +9,20 @@ use crate::snap::GeoSnap;
 
 /// Scene palette — the manual's colour legend (docs/manual/getting-started.md)
 /// describes these; `palette_matches_shader` pins the wgsl copies to them.
-pub const NEURON_EXC: [f32; 3] = [0.55, 0.8, 1.0]; // light blue
-pub const NEURON_INH: [f32; 3] = [0.85, 0.6, 1.0]; // pale purple
+/// Stage 15 E: one mapping — excitatory is WARM, inhibitory is COOL —
+/// across neurons, synapses and spike dots (neurons used to invert it:
+/// blue excitatory vs salmon synapses).
+pub const NEURON_EXC: [f32; 3] = [1.0, 0.62, 0.35]; // warm amber
+pub const NEURON_INH: [f32; 3] = [0.55, 0.68, 1.0]; // cool blue
 pub const SPIKE_FLASH: [f32; 3] = [1.0, 0.35, 0.1]; // orange flash on spike
 pub const SYN_EXC: [f32; 3] = [1.0, 0.55, 0.45]; // salmon, excitatory source
 pub const SYN_INH: [f32; 3] = [0.5, 0.55, 1.0]; // blue, inhibitory source
 pub const SYN_SELECTED: [f32; 3] = [1.0, 0.85, 0.3]; // golden, touches selection
 pub const DOT_EXC: [f32; 3] = [1.0, 0.9, 0.4]; // spike dot on an exc axon
 pub const DOT_INH: [f32; 3] = [0.6, 0.7, 1.0]; // spike dot on an inh axon
+/// Input-node gold — the wgsl `is_input` literal and the input→target
+/// link lines (view.rs INPUT_LINK_COL) both come from this.
+pub const INPUT_COL: [f32; 3] = [0.95, 0.75, 0.2];
 
 pub const fn rgba(c: [f32; 3], a: f32) -> [f32; 4] {
     [c[0], c[1], c[2], a]
@@ -342,6 +348,7 @@ mod tests {
             ("SYN_EXC", SYN_EXC),
             ("SYN_INH", SYN_INH),
             ("SYN_SELECTED", SYN_SELECTED),
+            ("INPUT_COL", INPUT_COL),
         ] {
             assert!(wgsl.contains(&lit(c)), "{name} {} not in shader", lit(c));
         }
