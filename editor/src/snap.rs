@@ -271,6 +271,7 @@ impl Fold {
                 sh.edits_in_flight = 0;
             }
             proto::ServerMsg::GeoDelta(d) => {
+                let gen = d.gen;
                 if let Some(g) = sh.geo.as_deref().cloned() {
                     let mut g = g;
                     apply_delta(&mut g, &mut self.disp, &mut self.non_grid, *d);
@@ -279,6 +280,9 @@ impl Fold {
                 if let Some(g) = &sh.geo {
                     sh.net_version = g.version;
                 }
+                // Deltas carry the wire gen — a lagging client must still
+                // reset neuron-id-keyed state if a replacement slipped in.
+                sh.net_gen = gen;
                 sh.edits_in_flight = 0;
             }
             proto::ServerMsg::Status {
@@ -704,5 +708,34 @@ mod floor_tests {
     #[test]
     fn empty_net_floors_below_origin() {
         assert_eq!(GeoSnap::default().floor_y(), -20.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn geo_delta_propagates_gen() {
+        let mut fold = Fold::default();
+        let mut sh = Shared::default();
+        let geo = proto::Geo {
+            version: 1,
+            gen: 1,
+            pos: vec![[0.0; 3]; 3],
+            ..Default::default()
+        };
+        fold.apply(&mut sh, proto::ServerMsg::Geo(Box::new(geo)));
+        assert_eq!(sh.net_gen, 1);
+        // A delta crossing a generation boundary must move the client's
+        // generation too — otherwise neuron-id-keyed state (selection,
+        // watches, plots) is not reset.
+        let d = proto::GeoDelta {
+            version: 2,
+            gen: 2,
+            ..Default::default()
+        };
+        fold.apply(&mut sh, proto::ServerMsg::GeoDelta(Box::new(d)));
+        assert_eq!(sh.net_gen, 2);
     }
 }
