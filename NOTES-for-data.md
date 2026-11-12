@@ -1806,3 +1806,49 @@ reason. No changes below `f6581b6`.
 - `cargo check --target wasm32-unknown-unknown -p editor
   --no-default-features --features web` — clean
 - `node editor/web/webgpu-help.test.mjs` — 12/12
+
+## Stage 16B — the strict CSP broke /app
+
+### Proof (before the fix)
+
+`respond()` put `default-src 'self'; style-src 'self' 'unsafe-inline'`
+on every `text/html` response — including `/app`'s `index.html`, whose
+inline `<script type="module">` bootstrap and wasm instantiate both
+violate it. Accounts-mode server on :3519, real login cookie, headful
+Chromium (the stage screenshot setup), `GET /app`:
+
+```
+CSP: default-src 'self'; style-src 'self' 'unsafe-inline'
+[error] Executing inline script violates the following Content
+Security Policy directive 'default-src 'self''. Either the
+'unsafe-inline' keyword, a hash
+('sha256-r1Ul51ihl2MdCj/B+HyQ94ZYGq+zcVX6JW8k3CUTFNg='), or a nonce
+('nonce-...') is required to enable inline execution.
+```
+
+The page sat on the "checking WebGPU…" loading card forever — the
+bootstrap never ran, so the wasm never even fetched.
+
+### Fix
+
+- `editor/web/index.html`: the bootstrap moved verbatim into
+  `editor/web/boot.mjs` (`<script type="module" src="boot.mjs">`),
+  added to `build.sh`'s copy list — the narrowest policy needs no
+  hash and no `'unsafe-inline'`.
+- `respond()` → `respond_csp(...)`: `CSP_STRICT` for the account and
+  admin pages (no scripts at all), `CSP_APP` for `/app` and any html
+  under `--web` (`serve_static`): `default-src 'self'; script-src
+  'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'`.
+  `connect-src` stays inside `default-src 'self'`, which covers the
+  same-origin `ws(s)://` upgrade — confirmed live in the browser run.
+
+Test: `app_csp_allows_wasm_not_inline_scripts` — `/app` and
+`/app/index.html` carry `wasm-unsafe-eval`, their `script-src` clause
+has no `'unsafe-inline'`, nothing has `'unsafe-eval'`; `/`, `/login`,
+`/admin`, `/signup` keep the strict policy (no `script-src` at all).
+
+### After
+
+Same run: `GET /app` → the new CSP, **zero** console errors, editor
+drawn (toolbar, grid, Inspector, Plots, Console) —
+`review/stage16b_app_csp.png`.
