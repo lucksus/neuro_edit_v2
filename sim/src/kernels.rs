@@ -53,7 +53,7 @@ extern "C" __global__ void neuron_kernel(
     int* spk, int* cnt_cur,
     u64* spk_row,
     u64* pn_total,
-    const u32* vwatch, int nwatch, float* vrec, int vrec_d,
+    const u32* vwatch, int nwatch, float* vrec, float* urec, int vrec_d,
     const int* gmap, int n_grids, u32* gls, const u32* goff,
     const u32* xt_ptr, const u32* xt_idx, float* xsyn, const float* xdecay)
 {
@@ -92,9 +92,13 @@ extern "C" __global__ void neuron_kernel(
     uu += dt * a[i] * (b[i]*vv - uu);
   }
   v[i] = vv; u[i] = uu;
-  // per-step v record for watched neurons (editor v(t) plot)
+  // per-step v/u record for watched neurons (v(t) + v–u phase plots)
   for(int w = 0; w < nwatch; ++w){
-    if((u32)i == vwatch[w]) vrec[(u64)(t % (u64)vrec_d) * (u64)nwatch + (u64)w] = vv;
+    if((u32)i == vwatch[w]){
+      u64 slot = (u64)(t % (u64)vrec_d) * (u64)nwatch + (u64)w;
+      vrec[slot] = vv;
+      urec[slot] = uu;
+    }
   }
 
   if(vv >= 30.f){

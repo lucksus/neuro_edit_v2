@@ -155,6 +155,7 @@ pub enum InsertKind {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PlotTab {
     Voltage,
+    Phase,
     Raster,
     Readouts,
     Samples,
@@ -672,6 +673,7 @@ impl EditorApp {
             self.watch_sent = ids.clone();
             self.send(ClientMsg::Watch(ids));
             self.hist.v.retain(|k, _| self.watch_sent.contains(k));
+            self.hist.u.retain(|k, _| self.watch_sent.contains(k));
         }
     }
 
@@ -910,10 +912,20 @@ impl EditorApp {
                 .filter(|(_, c)| **c > 0)
                 .map(|(i, _)| i as u32)
                 .collect();
-            let watched: Vec<(u32, &[f32])> = snap
+            // watched_v/_u are parallel vectors on the wire — pair by id,
+            // u missing ⇒ empty series (older servers).
+            let watched: Vec<(u32, &[f32], &[f32])> = snap
                 .watched_v
                 .iter()
-                .map(|(id, vs)| (*id, vs.as_slice()))
+                .map(|(id, vs)| {
+                    let us = snap
+                        .watched_u
+                        .iter()
+                        .find(|(i, _)| i == id)
+                        .map(|(_, us)| us.as_slice())
+                        .unwrap_or(&[]);
+                    (*id, vs.as_slice(), us)
+                })
                 .collect();
             self.hist
                 .feed(snap.time_ms, fired, &watched, self.dt_ms as f64);
@@ -2499,6 +2511,7 @@ impl EditorApp {
                     if let Some(ic) = &self.icons {
                         let t = &mut self.plot_tab;
                         icons::selectable_value(ui, t, PlotTab::Voltage, &ic.voltage, "v(t)");
+                        icons::selectable_value(ui, t, PlotTab::Phase, &ic.phase, "v–u");
                         icons::selectable_value(ui, t, PlotTab::Raster, &ic.raster, "raster");
                         icons::selectable_value(ui, t, PlotTab::Readouts, &ic.readout, "readouts");
                         icons::selectable_value(ui, t, PlotTab::Samples, &ic.samples, "samples");
@@ -2509,7 +2522,7 @@ impl EditorApp {
                         ui.label(format!("{} job(s)", self.jobs.len()));
                     }
                     ui.separator();
-                    if matches!(self.plot_tab, PlotTab::Voltage | PlotTab::Raster) {
+                    if matches!(self.plot_tab, PlotTab::Voltage | PlotTab::Phase | PlotTab::Raster) {
                         ui.separator();
                         ui.label("window");
                         ui.add(
@@ -2522,11 +2535,11 @@ impl EditorApp {
                                 self.plot_win.follow = true;
                             }
                         }
-                        if self.plot_tab == PlotTab::Voltage {
+                        if matches!(self.plot_tab, PlotTab::Voltage | PlotTab::Phase) {
                             ui.checkbox(&mut self.plot_win.auto_y, "Auto Y");
                         }
                     }
-                    if self.plot_tab == PlotTab::Voltage {
+                    if matches!(self.plot_tab, PlotTab::Voltage | PlotTab::Phase) {
                         ui.label(format!("watching {}", self.watch_sent.len()));
                     }
                     if self.plot_tab == PlotTab::Raster {
@@ -2552,7 +2565,10 @@ impl EditorApp {
                             p = p.auto_bounds(egui::Vec2b::new(false, false));
                         }
                         let pr = p.show(ui, |ui| {
-                            for (&id, h) in &self.hist.v {
+                            // watch_sent order → stable per-neuron colors,
+                            // shared with the phase tab.
+                            for (ci, &id) in self.watch_sent.iter().enumerate() {
+                                let Some(h) = self.hist.v.get(&id) else { continue };
                                 let pts: PlotPoints = match win {
                                     Some((lo, hi)) => h
                                         .iter()
@@ -2561,7 +2577,10 @@ impl EditorApp {
                                         .collect(),
                                     None => h.iter().map(|(t, v)| [*t, *v as f64]).collect(),
                                 };
-                                ui.line(Line::new(format!("n{id}"), pts));
+                                ui.line(
+                                    Line::new(format!("n{id}"), pts)
+                                        .color(crate::plot::watch_color(ci)),
+                                );
                             }
                             if let Some((lo, hi)) = win {
                                 ui.set_plot_bounds_x(lo..=hi);
@@ -2575,6 +2594,43 @@ impl EditorApp {
                             }
                         });
                         self.plot_follow(&pr, win);
+                    }
+                    PlotTab::Phase => {
+                        // v–u phase portrait per watched neuron over the
+                        // same window; the original had a Poincaré canvas
+                        // for 2-D trajectory projections — no nullclines
+                        // there or here (we don't have per-neuron params
+                        // on the wire).
+                        let win = self.plot_win.bounds(self.last_sim_t);
+                        let p = egui_plot::Plot::new("phplot")
+                            .height(140.0)
+                            .x_axis_label("v (mV)")
+                            .y_axis_label("u");
+                        let _ = p.show(ui, |ui| {
+                            for (ci, &id) in self.watch_sent.iter().enumerate() {
+                                let (Some(vs), Some(us)) =
+                                    (self.hist.v.get(&id), self.hist.u.get(&id))
+                                else {
+                                    continue;
+                                };
+                                let col = crate::plot::watch_color(ci);
+                                let (pts, newest) = crate::plot::phase_points(vs, us, win);
+                                if pts.is_empty() {
+                                    continue;
+                                }
+                                ui.line(
+                                    Line::new(format!("n{id}"), PlotPoints::from(pts))
+                                        .color(col),
+                                );
+                                if let Some(p) = newest {
+                                    ui.points(
+                                        egui_plot::Points::new("now", vec![p])
+                                            .radius(4.0_f32)
+                                            .color(col),
+                                    );
+                                }
+                            }
+                        });
                     }
                     PlotTab::Raster => {
                         // Raster strip: x = sim milliseconds. With watches

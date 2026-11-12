@@ -80,6 +80,8 @@ pub struct CudaSim {
     vwatch_dev: CudaSlice<u32>,
     /// device ring VREC_D x W of per-step v for watched neurons
     vrec_dev: CudaSlice<f32>,
+    /// device ring VREC_D x W of per-step u (recovery) — the phase plot
+    urec_dev: CudaSlice<f32>,
     /// device buffers stale after set_v_watch — uploaded lazily in run_steps
     vrec_dirty: bool,
     /// steps recorded into vrec_dev since the last drain
@@ -220,6 +222,7 @@ impl CudaSim {
             v_watch: Vec::new(),
             vwatch_dev: stream.alloc_zeros(1)?,
             vrec_dev: stream.alloc_zeros(1)?,
+            urec_dev: stream.alloc_zeros(1)?,
             vrec_dirty: false,
             vrec_valid: 0,
             grid_watches: Vec::new(),
@@ -365,6 +368,7 @@ impl CudaSim {
                 .arg(&self.vwatch_dev)
                 .arg(&nwatch_i32)
                 .arg(&mut self.vrec_dev)
+                .arg(&mut self.urec_dev)
                 .arg(&vrec_d_i32)
                 .arg(&self.gmap)
                 .arg(&n_grids_i32)
@@ -437,6 +441,7 @@ impl CudaSim {
             v
         })?;
         self.vrec_dev = self.stream.alloc_zeros(VREC_D * w)?;
+        self.urec_dev = self.stream.alloc_zeros(VREC_D * w)?;
         self.vrec_dirty = false;
         self.vrec_valid = 0;
         Ok(())
@@ -565,6 +570,39 @@ impl CudaSim {
             self.stream.memcpy_dtoh(&view, &mut host[first * w..])?;
         }
         self.vrec_valid = 0;
+        let mut out = vec![Vec::with_capacity(k); w];
+        for r in 0..k {
+            for (c, o) in out.iter_mut().enumerate() {
+                o.push(host[r * w + c]);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Drain per-step u samples — same rows/cadence as `drain_v` — for
+    /// the editor's v–u phase plot. NOTE: shares `vrec_valid`'s
+    /// bookkeeping (both rings record in the same loop), so this must
+    /// be called BEFORE `drain_v` at each publish or it reports empty
+    /// after the counter resets. Callers: `Sim::drain_vu`.
+    pub fn drain_u(&mut self) -> Result<Vec<Vec<f32>>> {
+        let w = self.v_watch.len();
+        if w == 0 || self.vrec_valid == 0 || self.vrec_dirty {
+            return Ok(vec![Vec::new(); w]);
+        }
+        self.stream.synchronize()?;
+        let k = (self.vrec_valid as usize).min(VREC_D);
+        let r0 = (self.t as usize).wrapping_sub(k) % VREC_D;
+        let mut host = vec![0.0f32; k * w];
+        if r0 + k <= VREC_D {
+            let view = self.urec_dev.slice(r0 * w..(r0 + k) * w);
+            self.stream.memcpy_dtoh(&view, &mut host)?;
+        } else {
+            let first = VREC_D - r0;
+            let view = self.urec_dev.slice(r0 * w..VREC_D * w);
+            self.stream.memcpy_dtoh(&view, &mut host[..first * w])?;
+            let view = self.urec_dev.slice(0..(k - first) * w);
+            self.stream.memcpy_dtoh(&view, &mut host[first * w..])?;
+        }
         let mut out = vec![Vec::with_capacity(k); w];
         for r in 0..k {
             for (c, o) in out.iter_mut().enumerate() {

@@ -1018,10 +1018,12 @@ fn publish_sim(net: &NetHandle, net_ver: u64, sim: &mut Sim, p: &mut Pub, emit: 
     // recorded since the last publish — the plot gets every step, not one
     // point per chunk.
     sim.set_v_watch(&p.watch);
-    let hists = sim.drain_v().unwrap_or_default();
+    let (hists, uhists) = sim.drain_vu().unwrap_or_default();
     let mut watched_v = Vec::new();
+    let mut watched_u = Vec::new();
     for (k, &id) in p.watch.iter().enumerate() {
         watched_v.push((id, hists.get(k).cloned().unwrap_or_default()));
+        watched_u.push((id, uhists.get(k).cloned().unwrap_or_default()));
     }
 
     // Grid-plane traces: (re)apply the watch lists after a rebuild, then
@@ -1066,6 +1068,7 @@ fn publish_sim(net: &NetHandle, net_ver: u64, sim: &mut Sim, p: &mut Pub, emit: 
             steps_per_sec: p.sps,
             spike_bits: bits,
             watched_v,
+            watched_u,
             input_values: sim.input_values(),
         })),
     );

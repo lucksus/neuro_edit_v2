@@ -458,6 +458,9 @@ pub struct Activity {
     pub spike_bits: Vec<u8>,
     /// New v samples for watched neurons, per id.
     pub watched_v: Vec<(u32, Vec<f32>)>,
+    /// New u (recovery) samples for watched neurons — same ids and
+    /// lengths as `watched_v`, feeding the editor's v–u phase plot.
+    pub watched_u: Vec<(u32, Vec<f32>)>,
     /// Live constant drive per input (same order as `Geo.inputs`).
     pub input_values: Vec<f32>,
 }
@@ -907,6 +910,7 @@ mod tests {
                 steps_per_sec: 1234.0,
                 spike_bits: vec![0b101],
                 watched_v: vec![(3, vec![-70.0, -55.0])],
+                watched_u: vec![(3, vec![-14.0, -13.0])],
                 input_values: vec![0.7],
             })),
             ServerMsg::GridTraces {

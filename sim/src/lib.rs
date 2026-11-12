@@ -236,6 +236,21 @@ impl Sim {
         }
     }
 
+    /// Drain per-step v AND u samples for watched neurons — one call so
+    /// the CUDA backend can read both rings before it resets the shared
+    /// sample counter (u first).
+    pub fn drain_vu(&mut self) -> anyhow::Result<(Vec<Vec<f32>>, Vec<Vec<f32>>)> {
+        match self {
+            Sim::Cpu(s) => Ok((s.drain_v(), s.drain_u())),
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => {
+                let u = s.drain_u()?;
+                let v = s.drain_v()?;
+                Ok((v, u))
+            }
+        }
+    }
+
     /// Set the grid-group member lists (texel order) whose spike traces the
     /// editor's plane view wants. No-op when unchanged; safe to call every
     /// publish.

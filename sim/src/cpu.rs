@@ -59,10 +59,12 @@ pub struct CpuSim {
     pub pn_total: Vec<u64>,
     pub words: usize,
 
-    /// watched neuron ids whose v is recorded every step (editor v(t) plot)
+    /// watched neuron ids whose v (and u) are recorded every step
+    /// (editor v(t) plot + v–u phase plot)
     pub v_watch: Vec<u32>,
-    /// per-watched-neuron per-step v history, capped at `V_HIST_CAP`
+    /// per-watched-neuron per-step v/u history, capped at `V_HIST_CAP`
     pub v_hist: Vec<std::collections::VecDeque<f32>>,
+    pub u_hist: Vec<std::collections::VecDeque<f32>>,
 
     /// per-grid-group spike-trace bookkeeping (editor plane view)
     pub grid_watches: Vec<GridWatch>,
@@ -149,6 +151,7 @@ impl CpuSim {
             words,
             v_watch: Vec::new(),
             v_hist: Vec::new(),
+            u_hist: Vec::new(),
             grid_watches: Vec::new(),
             t: 0,
             spikes_total: 0,
@@ -180,6 +183,9 @@ impl CpuSim {
         self.t = 0;
         self.spikes_total = 0;
         for d in &mut self.v_hist {
+            d.clear();
+        }
+        for d in &mut self.u_hist {
             d.clear();
         }
         for w in &mut self.grid_watches {
@@ -312,11 +318,16 @@ impl CpuSim {
             self.step();
             if !self.v_watch.is_empty() {
                 for (k, &id) in self.v_watch.iter().enumerate() {
-                    let val = self.v.get(id as usize).copied().unwrap_or(0.0);
-                    let r = &mut self.v_hist[k];
-                    r.push_back(val);
-                    if r.len() > V_HIST_CAP {
-                        r.pop_front();
+                    let i = id as usize;
+                    let rv = &mut self.v_hist[k];
+                    rv.push_back(self.v.get(i).copied().unwrap_or(0.0));
+                    if rv.len() > V_HIST_CAP {
+                        rv.pop_front();
+                    }
+                    let ru = &mut self.u_hist[k];
+                    ru.push_back(self.u.get(i).copied().unwrap_or(0.0));
+                    if ru.len() > V_HIST_CAP {
+                        ru.pop_front();
                     }
                 }
             }
@@ -332,12 +343,22 @@ impl CpuSim {
         }
         self.v_watch = ids.to_vec();
         self.v_hist = vec![std::collections::VecDeque::with_capacity(256); ids.len()];
+        self.u_hist = vec![std::collections::VecDeque::with_capacity(256); ids.len()];
     }
 
     /// Drain per-step v samples recorded since the last drain, one Vec per
     /// watched neuron (oldest first).
     pub fn drain_v(&mut self) -> Vec<Vec<f32>> {
         self.v_hist
+            .iter_mut()
+            .map(|d| d.drain(..).collect())
+            .collect()
+    }
+
+    /// Drain per-step u samples — same cadence/lengths as `drain_v`, for
+    /// the editor's v–u phase plot.
+    pub fn drain_u(&mut self) -> Vec<Vec<f32>> {
+        self.u_hist
             .iter_mut()
             .map(|d| d.drain(..).collect())
             .collect()

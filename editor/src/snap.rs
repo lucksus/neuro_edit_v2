@@ -97,6 +97,9 @@ pub struct Snap {
     pub counts: Arc<Vec<u32>>,
     /// New `v` samples for watched neurons, per id.
     pub watched_v: Vec<(u32, Arc<Vec<f32>>)>,
+    /// New `u` samples for watched neurons — same ids/lengths as
+    /// `watched_v`, feeding the v–u phase plot.
+    pub watched_u: Vec<(u32, Arc<Vec<f32>>)>,
     /// Spike-trace value per texel for each `GeoSnap::grids` entry
     /// (same order; `exp` decay, tau ~20 ms — see `simctl::PLANE_TAU_MS`).
     pub grid_traces: Vec<Arc<Vec<f32>>>,
@@ -486,6 +489,11 @@ impl Fold {
             counts: Arc::new(counts),
             watched_v: a
                 .watched_v
+                .into_iter()
+                .map(|(id, v)| (id, Arc::new(v)))
+                .collect(),
+            watched_u: a
+                .watched_u
                 .into_iter()
                 .map(|(id, v)| (id, Arc::new(v)))
                 .collect(),

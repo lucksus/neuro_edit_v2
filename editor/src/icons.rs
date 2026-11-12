@@ -78,7 +78,7 @@ icons! {
     console = "console", plots = "plots", inspector = "inspector", script = "script",
     // plot tabs
     voltage = "voltage", raster = "raster", readout = "readout", samples = "samples",
-    jobs = "jobs",
+    phase = "phase", jobs = "jobs",
     // File / Help menus
     new = "new", open = "open", recent = "recent", save = "save", save_as = "save_as",
     quit = "quit", about = "about",
