@@ -2163,7 +2163,12 @@ impl EditorApp {
                     .open(&mut open)
                     .show(ctx, |ui| {
                         if let Some(i) = &self.icons {
-                            ui.image(&i.about);
+                            // 740×246 art, drawn at half size so it stays
+                            // sharp on 2x screens
+                            ui.add(
+                                egui::Image::new(&i.about)
+                                    .fit_to_exact_size(egui::vec2(370.0, 123.0)),
+                            );
                         }
                         ui.heading("neuro_edit v2");
                         ui.label("Izhikevich spiking-network simulator and 3D editor.");
