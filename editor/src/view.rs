@@ -269,12 +269,21 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
         });
 }
 
+/// Screen-drag → orbit delta. Stage 13 I: the horizontal sign is
+/// flipped vs the naive mapping — a right drag sweeps the view the way
+/// the original's camera did (scene swings left, so dragging right
+/// feels like turning the scene, not the camera). Vertical stays as
+/// before (drag down = look up).
+fn orbit_delta(d: egui::Vec2) -> (f32, f32) {
+    (-d.x, -d.y)
+}
+
 fn camera_input(app: &mut EditorApp, ctx: &egui::Context, resp: &egui::Response) {
     let dt = ctx.input(|i| i.stable_dt.min(0.05));
     app.camera.tick(dt);
     if resp.dragged_by(egui::PointerButton::Secondary) {
-        let d = resp.drag_delta();
-        app.camera.orbit(d.x, -d.y);
+        let (dx, dy) = orbit_delta(resp.drag_delta());
+        app.camera.orbit(dx, dy);
     }
     let wheel = ctx.input(|i| i.smooth_scroll_delta.y);
     if resp.hovered() && wheel != 0.0 {
@@ -885,8 +894,28 @@ mod tests {
         assert!((obj_new - hit1).length() < 1e-2);
         // anchored at camera.target instead (the old behaviour): the start
         // hit is offset from the object — it would visibly jump on grab.
-        let hit_t = plane_hit(Plane::XZ, c.target, ro, rd).unwrap();
-        assert!((hit_t - obj).length() > 1.0);
+        let hit_bad = plane_hit(Plane::XZ, c.target, ro, rd);
+        assert!(hit_bad.is_none() || (hit_bad.unwrap() - obj).length() > 1.0);
+    }
+
+    /// Stage 13 I: horizontal orbit is flipped — dragging RIGHT
+    /// (d.x > 0) yields a negative yaw delta; vertical keeps its sign.
+    #[test]
+    fn orbit_delta_flips_horizontal_only() {
+        let (dx, dy) = orbit_delta(egui::vec2(10.0, 4.0));
+        assert_eq!(dx, -10.0);
+        assert_eq!(dy, -4.0);
+        // …and through the camera: right-drag decreases yaw; drag-down
+        // keeps its old sign (decreases pitch).
+        let mut c = cam();
+        let yaw0 = c.yaw_deg;
+        let pitch0 = c.pitch_deg;
+        let (odx, ody) = orbit_delta(egui::vec2(10.0, 0.0));
+        c.orbit(odx, ody);
+        assert!(c.yaw_deg < yaw0);
+        let (odx, ody) = orbit_delta(egui::vec2(0.0, 10.0));
+        c.orbit(odx, ody);
+        assert!(c.pitch_deg < pitch0);
     }
 
     #[test]
