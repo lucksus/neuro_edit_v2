@@ -362,7 +362,10 @@ impl Multi {
                         let used = sim::serve::dir_size(
                             &self.opts.data_root.join("users").join(u.id.to_string()),
                         );
-                        (Some(u.clone()), Some(c.clone()), used)
+                        // render the effective quota (0 on the row = default)
+                        let mut u = u.clone();
+                        u.quota_bytes = self.quota_of(&u);
+                        (Some(u), Some(c.clone()), used)
                     }
                     None => (None, None, 0),
                 };
@@ -431,12 +434,17 @@ impl Multi {
             }
             ("GET", "/admin") => match &sess {
                 Some((u, csrf)) if u.is_admin => {
-                    let body = pages::admin(
-                        &self.accounts.list(),
-                        &self.runs.live(),
-                        csrf,
-                        req.query("did").as_deref(),
-                    );
+                    let users: Vec<User> = self
+                        .accounts
+                        .list()
+                        .into_iter()
+                        .map(|mut u| {
+                            u.quota_bytes = self.quota_of(&u);
+                            u
+                        })
+                        .collect();
+                    let body =
+                        pages::admin(&users, &self.runs.live(), csrf, req.query("did").as_deref());
                     respond(
                         stream,
                         "200 OK",
@@ -449,7 +457,21 @@ impl Multi {
             },
             ("POST", p) if p.starts_with("/admin/") => self.admin_post(stream, &req, sess, p),
             ("GET", "/app") | ("GET", "/app/") => match &sess {
-                Some(_) => serve_static(stream, &self.opts.web_dir, "index.html"),
+                Some(_) => {
+                    // Rebase the editor shell under /app/ so its relative
+                    // imports (editor.js, editor_bg.wasm, webgpu-help.mjs,
+                    // icons, manifest) hit the session-gated /app/* route.
+                    let html = std::fs::read_to_string(self.opts.web_dir.join("index.html"))
+                        .unwrap_or_default()
+                        .replacen("<head>", "<head><base href=\"/app/\">", 1);
+                    respond(
+                        stream,
+                        "200 OK",
+                        "text/html; charset=utf-8",
+                        html.as_bytes(),
+                        "",
+                    )
+                }
                 None => redirect(stream, "/", ""),
             },
             ("GET", p) if p.starts_with("/app/") => match &sess {
