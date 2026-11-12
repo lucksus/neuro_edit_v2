@@ -1013,3 +1013,108 @@ WebGPU adapter: google swiftshader", editor boots. Screenshots:
 Open: the x-y plane icon is a plain square and can read as an
 unchecked checkbox. At 1x the toolbar is ~1160 px wide (window default
 1440). Direction A or C would need the set redrawn.
+
+## Stage 11 — UI review fixes (commits 7553b22..9e9eb73)
+
+All 12 items from review/STAGE11.md (section 5 numbers), one commit
+per tight group, on top of the Stage 10 artwork.
+
+1. **Dark theme (1.6)** — `ctx.set_theme(egui::Theme::Dark)` in both
+   native and wasm entries. `set_visuals` alone loses to eframe
+   applying the OS light scheme after the app creator.
+2. **Selection brackets (1.2)** — `screen_box_rect` projects the
+   picked cube's 8 corners (centre ± inst_half·1.15) to screen and
+   takes the bounding rect; >24 selected → ONE union bracket plus a
+   "N selected" count label instead of 64 corner ticks.
+3. **Move (1.3, 3)** — `MoveDrag.anchor` anchors the drag plane at
+   the GRABBED object's position so it stays under the cursor;
+   `CamU.preview` offsets selected cubes + their synapse endpoints in
+   the shader at 50 % alpha for a live preview; Esc drops the drag
+   (positions snap back) — commit only happens on release.
+4. **Floor (1.1)** — `GeoSnap::floor_y() = min neuron y − 20`;
+   `floor_grid` and `Camera.floor_y` clamp (`eye.y ≥ floor_y + 2`)
+   follow it. `shot.rs` sets floor before framing/clamp.
+5. **Cursors + hover (3)** — hover pick every frame rides `lod.z`;
+   hovered cube brightens 1.4× in the shader; cursor icons: pointer
+   over selectable, grab over selected, grabbing during move,
+   crosshair in Insert/Connect.
+6. **Gestures (3)** — `primary_drag_action`: Navigate drag on object
+   (selected or not) → Move; empty → box select; click selects;
+   Move mode = always move; click in Move mode selects the hit
+   neuron first (shot 11). Matches glscene.cpp:93-123 mapping.
+7. **Floating windows (option A)** — Inspector, Plots, Console,
+   Script editor, Inputs are `egui::Window`s (movable, resizable,
+   closable); View menu toggles each + "Reset layout"
+   (`memory.reset_areas()`); visibility persisted via
+   `Persisted.windows` (eframe storage, `#[serde(default)]` for
+   older blobs). Ctrl+1..5 toggles. Verified: windows float over
+   panels on native and browser.
+8. **Shader grid (1.1)** — `vs_grid/fs_grid` on a
+   camera-following 4000-unit quad at floor_y: fwidth-AA lines,
+   brighter majors every 5, distance fade, no moiré at grazing
+   angles, no hard tile edge (replaces the 1 px line grid).
+9. **Connect from inputs (1.4)** — `NetEdit::AddInputTarget`
+   (proto + serve arm appends, never replaces targets); Connect
+   mode accepts an input as source; input→target links drawn as
+   dashed yellow lines; input context menu gains "Connect from
+   here". ws test `ws_connect_from_input_adds_target`.
+11. **Toolbar wraps** — see bug note below; BOTH toolbar rows are
+    now `horizontal_wrapped`.
+12. **`?` overlay** — Shortcuts window (centered, non-resizable):
+    modes, camera, mouse gestures, edit, window keys.
+13. **Status + glyphs** — mode change clears mode-scoped status;
+    ASCII "up/down" replaces missing ↑↓ glyphs in the console hint.
+
+Real bug found while verifying #11: making only the MODE row
+`horizontal_wrapped` was not enough — a sibling plain-`horizontal`
+row that overflows grows the panel's `max_rect`
+(`Placer::expand_to_include_x`) past the window edge, so the wrapped
+row's wrap boundary sat off-screen and it still clipped. Both
+toolbar rows are now `horizontal_wrapped`. Verified on Xvfb at
+480 px: controls reflow onto 5 rows, nothing clipped
+(`review/stage11_narrow_toolbar.png`).
+
+Tests (all in `cargo test -p editor --lib`, 23 green):
+`screen_box_rect` far/near bracket shrinks with distance;
+`primary_drag_action` gesture→action mapping incl. hover-not-
+selected → Move; `MoveDrag` plane through grabbed anchor keeps the
+object under the cursor; `snap::floor_y` = min y − 20; proto
+`NetEdit::AddInputTarget` round-trip; ws test for the edit path.
+Each new test fails without its change (checked while writing).
+
+Verification:
+- `cargo fmt --all -- --check` clean.
+- `cargo test --workspace`: 30 targets green (cuda features),
+  `cargo test -p sim --no-default-features`: 15 green.
+- `cargo test --workspace --release`: 30 targets green.
+- wasm `cargo check --target wasm32-unknown-unknown
+  --no-default-features --features web` clean; `editor/web/build.sh`
+  rebuilt `dist-web`. No web JS touched → node tests unchanged
+  (still 12/12 from Stage 10 run).
+
+Screenshots (`review/stage11_*.png`, headful Chromium on Xvfb +
+drive.js, server on :3197, OS light scheme):
+- `stage11_dark_theme` / `stage11_floor_lsm`: lsm.ne2, OS light →
+  UI dark; floor grid renders BELOW the 512-neuron liquid.
+- `stage11_bracket_near`: single neuron, bracket hugs projected box.
+- `stage11_bracket_big`: 57 objects → one union bracket + "57
+  selected".
+- `stage11_move_preview`: mid-drag — ghost cube 50 % alpha at the
+  cursor, bracket left at origin, status "move d(-9,0,32)".
+- `stage11_connect_input`: status "input stim -> 18", new yellow
+  link drawn input→target (3rd link on the input).
+- `stage11_shortcuts`: `?` overlay listing all keys/gestures.
+- `stage11_view_menu`: View menu with Inspector/Plots/Console
+  checked, Script editor/Inputs unchecked, Reset layout.
+- `stage11_floating_windows`: native — Inspector/Plots/Console
+  floating over the viewport.
+- `stage11_narrow_toolbar`: native Xvfb at 480 px (browser DPR2
+  equivalent) — toolbar wraps to 5 rows, nothing clipped. Browser
+  at 800 CSS px was unusable for this shot because floating windows
+  cover the whole viewport there — noted as a follow-up (window
+  defaults could dodge the top-left at small sizes).
+
+Skipped/deferred (per spec): 10 synapse look, 14 vertical-move
+modifier, 15 docking — all waiting on Nico. The 3090 port server
+belongs to Nico — untouched; all shots on 3197, all test
+server/editor processes stopped after capture.
