@@ -24,7 +24,8 @@ pub struct EditorApp {
     last_snap_seq: u64,
     pub activity: Vec<f32>,
     pub particles: Particles,
-    raster: VecDeque<Vec<u32>>,
+    /// (time_ms, fired-ids) per publish — x axis is real sim milliseconds.
+    raster: VecDeque<(f64, Vec<u32>)>,
     v_hist: HashMap<u32, VecDeque<(f64, f32)>>,
 
     pub selection: HashSet<u32>, // instance ids
@@ -61,6 +62,8 @@ pub struct EditorApp {
     show_inspector: bool,
     show_script: bool,
     plot_tab: PlotTab,
+    /// Raster strip height in px — draggable in the plots header.
+    raster_h: f32,
     /// Readout index shown in the weights tab.
     ro_sel: usize,
     /// Script editor buffer + the name it is saved under in the file.
@@ -212,6 +215,7 @@ impl EditorApp {
             show_inspector: true,
             show_script: false,
             plot_tab: PlotTab::Voltage,
+            raster_h: 100.0,
             ro_sel: 0,
             script_text: String::new(),
             script_name: "main".into(),
@@ -412,7 +416,7 @@ impl EditorApp {
                 .filter(|(_, c)| **c > 0)
                 .map(|(i, _)| i as u32)
                 .collect();
-            self.raster.push_back(fired);
+            self.raster.push_back((snap.time_ms, fired));
             if self.raster.len() > 600 {
                 self.raster.pop_front();
             }
@@ -1334,6 +1338,14 @@ impl EditorApp {
                             self.watch_sent.len()
                         ));
                     }
+                    if self.plot_tab == PlotTab::Raster {
+                        ui.label("height");
+                        ui.add(
+                            egui::DragValue::new(&mut self.raster_h)
+                                .range(40.0..=600.0)
+                                .suffix("px"),
+                        );
+                    }
                 });
                 match self.plot_tab {
                     PlotTab::Voltage => {
@@ -1346,23 +1358,62 @@ impl EditorApp {
                         });
                     }
                     PlotTab::Raster => {
-                        // raster strip: x = recent snaps, y = neuron (sampled)
-                        egui_plot::Plot::new("raster").height(100.0).show(ui, |ui| {
-                            let mut pts = Vec::new();
-                            for (x, fired) in self.raster.iter().enumerate() {
-                                let stride = (fired.len() / 200).max(1);
-                                for (k, &id) in fired.iter().enumerate() {
-                                    if k % stride == 0 {
-                                        pts.push([x as f64, id as f64]);
+                        // Raster strip: x = sim milliseconds. With watches
+                        // set, each row is a watched neuron (labeled);
+                        // without, y is raw neuron id (sampled).
+                        let watches = self.watch_sent.clone();
+                        let n_neurons =
+                            self.geo.as_ref().map(|g| g.pos.len() as f64).unwrap_or(1.0);
+                        // Always pin y: toggling the flag between watch and
+                        // scatter modes stranded stale bounds in PlotMemory
+                        // and hid the dots.
+                        let y_hi = if watches.is_empty() {
+                            n_neurons - 0.5
+                        } else {
+                            watches.len() as f64 - 0.5
+                        };
+                        let plot = egui_plot::Plot::new("raster")
+                            .height(self.raster_h.max(40.0))
+                            .auto_bounds(egui::Vec2b::new(true, false))
+                            .include_y(-0.5)
+                            .include_y(y_hi);
+                        plot.x_axis_formatter(|x, _| format!("{:.0}ms", x.value))
+                            .y_axis_formatter(move |y, _| {
+                                let k = y.value.round() as usize;
+                                if watches.is_empty() {
+                                    format!("{}", k)
+                                } else {
+                                    watches
+                                        .get(k)
+                                        .map(|id| format!("n{id}"))
+                                        .unwrap_or_default()
+                                }
+                            })
+                            .show(ui, |ui| {
+                                let mut pts = Vec::new();
+                                let watches = &self.watch_sent;
+                                for &(t, ref fired) in &self.raster {
+                                    if watches.is_empty() {
+                                        let stride = (fired.len() / 200).max(1);
+                                        for (k, &id) in fired.iter().enumerate() {
+                                            if k % stride == 0 {
+                                                pts.push([t, id as f64]);
+                                            }
+                                        }
+                                    } else {
+                                        for (k, &id) in watches.iter().enumerate() {
+                                            if fired.contains(&id) {
+                                                pts.push([t, k as f64]);
+                                            }
+                                        }
                                     }
                                 }
-                            }
-                            ui.points(
-                                egui_plot::Points::new("spikes", PlotPoints::from(pts))
-                                    .radius(1.0_f32)
-                                    .color(egui::Color32::LIGHT_BLUE),
-                            );
-                        });
+                                ui.points(
+                                    egui_plot::Points::new("spikes", PlotPoints::from(pts))
+                                        .radius(1.0_f32)
+                                        .color(egui::Color32::LIGHT_BLUE),
+                                );
+                            });
                     }
                     PlotTab::Readouts => self.plot_readouts(ui),
                     PlotTab::Samples => self.plot_samples(ui),
