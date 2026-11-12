@@ -1270,3 +1270,131 @@ playwright `drive.js`, seeded users: `nico@neuro.dev` (admin, active),
 - `UploadChunk` sends the whole remaining tail at once (bounded by
   `--max-upload-mb`); a progress UI during slow links is a nice-to-have.
 - Nico's stage-10/14/15 items still wait on him, as before.
+
+## Stage 13 — plots, spike dots, help, manual, examples (commits 7824c1f..7d01c45)
+
+Nico's 15:08 browser feedback: plots don't restart on Reset, no time
+window, no v–u plot, spike dots invisible, watching is hidden, no help,
+no manual, no examples. Items A–K plus L (admin effective quota).
+
+### What each finding turned out to be
+
+1. **Reset really didn't clear plots** — `v_hist`/`raster` only cleared
+   on `net_gen` bump (new/load/`net.clear()`); `ClientMsg::Reset` and
+   `sim.reset()` both send the sim clock backwards but kept the old
+   trace. Fixed inside `PlotHist.feed`: any backwards step in `t` clears
+   all series first. Test: `plot_hist_resets_on_time_reversal`.
+
+2. **No sliding window** — `egui_plot` default auto-bounds over the full
+   4096-sample history; drag/zoom kills auto-bounds permanently so new
+   data ran off the edge. Now: sliding window (default 200 ms, editable
+   chip), Follow mode on by default and re-armed by the "Follow" button
+   or double-click, Y fixed at −90..+40 mV for Izhikevich with an
+   "Auto Y" toggle.
+
+3. **Spike dots were indeed invisible** — `Particles::feed` keyed flights
+   to `snap.time_ms`; a 1 ms flight vs ≥16 ms between frames meant every
+   flight expired before one frame drew it. Rewrote `Particles` on
+   `wall_ms`: each spike launches at sight-time and flies for
+   `max(150 ms, delay*dt*20)` of wall clock, capped at 400 live dots, View
+   toggle "Spike dots". Test in `scene.rs`.
+
+4. **Watching was invisible** — inspector "Plot v(t)" button, in-plot
+   empty hint, legend rows now show `Neuron_3`-style names (not raw ids),
+   context-menu entry unchanged ("Watch v(t)").
+
+5. **`help` was one flat string** — typing `help` (no parens) errored.
+   Now `help` / `help()` / `help("topic")` all work, topics:
+   net/grid/syn/input/sim/readout/io/streams/misc/examples, unknown
+   topic lists them. `sim/tests/help.rs` covers every form.
+
+6. **v–u plot added** — `PlotTab::Phase`, per-watch trajectory over the
+   same window, newest point marked, shares the v(t) palette. Server
+   side: `Snap.watched_u` + CUDA `urec_dev` ring mirroring `vrec_dev`,
+   `Sim::drain_vu` drains u before v (before the counter reset).
+
+7. **Examples** — `editor/src/examples.rs`, Help → Examples ▶ + an
+   "Examples ▾" button in the Script editor. Three bundled scripts:
+   first_spikes (5-neuron chain, watch 0-4), grid_wave (20×20 sheet),
+   lsm_readout (216-cell reservoir + delta readout, prints accuracy).
+   `sim/tests/examples.rs`: all eval headless; #3 prints 0.65 vs 0.35
+   raw-stream baseline.
+
+### Real bugs found by the browser verification
+
+- **Auto-watch fired against the pre-run net** — the lsm.ne2 session
+  already had ≥5 neurons, so `example_watch` applied to stale geometry,
+  retired, then the eval's `net.clear` gen bump wiped the selection.
+  Fix: `example_geo_covers(base_ver, geo, ids)` — only a Geo newer than
+  the Run-time version counts, plus a 45 s deadline.
+
+- **Stale click picks clobbered state** — a queued `pick_click` that
+  starved behind hover picks resolved seconds later and cleared the
+  just-applied watch. `pick_click` is now `(Vec2, wall_ms)` and expires
+  after 800 ms.
+
+- **`GeoDelta.gen` dropped by the fold** — deltas carry the wire gen but
+  `snap.rs` never wrote it to `Shared.net_gen`; a delta crossing a
+  generation boundary wouldn't reset id-keyed state. One-line fix + a
+  fold test (was red before it).
+
+- **HashSet churn resent Watch every frame** — rebuilding `selection`
+  each frame re-shuffled the id order so `ids != watch_sent` kept
+  flapping. Now rebuilt only when membership differs; `watch_sent`
+  compared as a set.
+
+- **Drag hint overlapped the mode hints** — both `painter.text` calls
+  drew at `left_bottom+8,-8`; moved the drag hint up one line.
+
+- **`default_pos` missing on Script editor** — its position varied run
+  to run (that's why my synthetic Run clicks kept missing).
+
+### Tests (all red-then-green per item)
+
+`PlotHist` reversal, `plot_follow` bounds, phase points, particles
+wall-clock, help topics (`sim/tests/help.rs`), orbit sign
+(`camera.rs`), `MoveInputs` e2e + proto round-trip + save/load (`sim`),
+`drag_plane`/`axis_hit`/re-anchor (`view.rs`), example evals
+(`sim/tests/examples.rs`), `example_geo_covers` + `geo_delta_propagates_gen`
+(`editor`), admin `(default)` quota marker (`sim`).
+
+`cargo test --workspace --release` all green; `sim --no-default-features`
+green; `webgpu-help.test.mjs` 12/12; `cargo fmt --check` clean.
+
+### Screenshots (`review/stage13_*.png`, on disk)
+
+Own port **:3513**, headful Chromium on Xvfb :99, shared `lsm.ne2` server
+(each session sees whatever net the last eval left — that's why several
+shots show the example nets rather than the lsm wall):
+
+- `stage13_empty_hint` — "no watched neurons — click a neuron to watch
+  it, or right-click 'Watch v(t)' / inspector 'Plot v(t)'".
+- `stage13_console_help` — `help` output: API index +
+  net/grid/syn topic lines.
+- `stage13_manual` — floating Manual window, page list + "Getting
+  started".
+- `stage13_examples_menu` — Help → Manual/Shortcuts/Examples▶/About.
+- `stage13_example_first_spikes` — 5-neuron chain + "watching 5",
+  v(t) traces at t≈10 s, AutoRun on.
+- `stage13_example_grid` — 20×20 sheet, 400 neurons, "spike dots" chip
+  on, spikes=1600+.
+- `stage13_example_lsm` — reservoir cubes, console tail shows
+  "readout accuracy on reservoir trace: 0.65 · raw-stream baseline
+  (expect ~0.5): 0.35".
+- `stage13_plot_follow` — sliding 200 ms window at t≈6.2 s.
+- `stage13_reset_follow` — after Reset + re-Run, fresh window t≈750 ms
+  proves history restarted (item A+B).
+- `stage13_phase` — v–u trajectory loops (v mV axis), per-watch colors.
+- `stage13_spike_dots` — dots mid-flight along edges (grid_wave, yellow
+  specks on the wire lines between cubes).
+- `stage13_move_drag` — mid-drag: "move d(15,0,-17)" in status, plane
+  grid through anchor, hint strip "plane: x-z · Shift: vertical ·
+  X/Y/Z: axis lock · Esc: cancel" above the mode hints.
+
+### Open
+
+- Console input is a plain egui `TextEdit`; synthetic clicks need two
+  presses (activate → focus) before `keyboard.type` lands. Not a product
+  bug.
+- `pick_click` TTL is 800 ms — a compromise between starving picks and
+  responsiveness; watch for long-frame hitches on weak GPUs.
