@@ -3,7 +3,7 @@
 //! `max_storage_buffer_binding_size` and the per-synapse payload is 8B.
 
 use editor::{
-    gpu::{DrawParams, Gpu, PlaneParamsGpu},
+    gpu::{DrawParams, Gpu, PlaneParamsGpu, SceneKey},
     plane::{self, PlaneCfg},
     snap::{GeoSnap, GridSnap},
 };
@@ -64,7 +64,7 @@ fn ten_million_synapses_build_and_draw() {
     assert_eq!(sc.syn_verts, 20_000_000);
     // A frame draw: wgpu validation failures panic here if the chunked
     // bindings were wrong.
-    gpu.render_offscreen(64, 64);
+    gpu.render_offscreen(64, 64, &SceneKey::default());
     gpu.device.poll(wgpu::PollType::Wait).unwrap();
 }
 
@@ -134,7 +134,7 @@ fn million_neuron_grid_plane_draws() {
         show_grid: true,
         planes_on: None,
     });
-    gpu.render_offscreen(1280, 800);
+    gpu.render_offscreen(1280, 800, &SceneKey::default());
     gpu.device.poll(wgpu::PollType::Wait).unwrap();
     let draw_s = t2.elapsed().as_secs_f64();
 

@@ -53,6 +53,24 @@ pub fn plane_hit(plane: Plane, anchor: Vec3, ro: Vec3, rd: Vec3) -> Option<Vec3>
     plane_hit_n(nrm, nrm * off, ro, rd)
 }
 
+/// Fingerprint the camera for the SceneKey (Stage 14 B): the view-proj
+/// matrix plus the floor height — everything `write_cam` bakes in.
+fn cam_bits(cam: &Camera, aspect: f32) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    use std::hash::Hasher;
+    h.write(bytemuck::cast_slice(&cam.view_proj(aspect).to_cols_array()));
+    h.write_u32(cam.floor_y.to_bits());
+    h.finish()
+}
+
+/// Hash a Pod slice — the SceneKey contribution of a GPU-side data block.
+fn hash_pod<T: bytemuck::NoUninit>(s: &[T]) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    h.write(bytemuck::cast_slice(s));
+    h.finish()
+}
+
 /// Ray ↔ plane (normal, a point on it).
 pub fn plane_hit_n(nrm: Vec3, pt: Vec3, ro: Vec3, rd: Vec3) -> Option<Vec3> {
     let d = rd.dot(nrm);
@@ -339,6 +357,13 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
                 // uploads when the snap or the display config changed.
                 let planes_on = app.plane_frame(gpu, h_px as f32);
                 let np = gpu.write_parts(&parts) as u32;
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                use std::hash::{Hash, Hasher};
+                pv_n.hash(&mut h);
+                np.hash(&mut h);
+                show_syn.hash(&mut h);
+                app.show_grid.hash(&mut h);
+                planes_on.hash(&mut h);
                 gpu.draw_params = Some(DrawParams {
                     pv_count: pv_n,
                     part_count: np,
@@ -346,8 +371,26 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
                     show_grid: app.show_grid,
                     planes_on,
                 });
-                gpu.render_offscreen(w_px, h_px);
+                let key = crate::gpu::SceneKey {
+                    w_px,
+                    h_px,
+                    cam: cam_bits(&app.camera, aspect),
+                    preview: app.preview_delta.map_or(0, |d| hash_pod(&[d])),
+                    hover: app.hover.map_or(0, |i| i as u64 + 1),
+                    sel: hash_pod(&sel),
+                    act: hash_pod(&act),
+                    pvs: hash_pod(&pvs),
+                    parts: hash_pod(&parts),
+                    planes: app.plane_key,
+                    params: h.finish(),
+                    geo: app.geo_version,
+                };
+                gpu.render_offscreen(w_px, h_px, &key);
+                // Unfinished pick readbacks and in-flight particles keep the
+                // repaint alive even when the sim is paused (Stage 14 E).
+                app.pick_in_flight = gpu.pick_in_flight();
             });
+            app.parts_active = !parts.is_empty();
 
             ui.painter()
                 .add(egui_wgpu::Callback::new_paint_callback(rect, BlitScene));

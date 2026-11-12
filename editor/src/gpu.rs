@@ -172,6 +172,45 @@ pub struct Gpu {
     pv_bg: wgpu::BindGroup,
     /// Draw counts for this frame, set by the UI before rendering.
     pub draw_params: Option<DrawParams>,
+    /// Fingerprint of the last scene actually drawn — a `None`-equal key
+    /// lets `render_offscreen` skip the pass and reuse `scene_tex`.
+    last_scene_key: Option<SceneKey>,
+}
+
+/// Per-frame fingerprint of everything that feeds `render_offscreen`.
+/// Compare with [`scene_needs_render`]; if two consecutive keys are
+/// equal, the cached `scene_tex` is still correct and the draw is
+/// skipped (the blit callback keeps showing it).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SceneKey {
+    /// Viewport pixel size (scene texture dimensions).
+    pub w_px: u32,
+    pub h_px: u32,
+    /// Hash of camera state + aspect + vp height (syn LOD inputs).
+    pub cam: u64,
+    /// Hash of the live move-preview delta.
+    pub preview: u64,
+    /// Hash of the hovered instance id.
+    pub hover: u64,
+    /// Hash of selected instance ids.
+    pub sel: u64,
+    /// Hash of the activity buffer (changes every frame while sim runs).
+    pub act: u64,
+    /// Hash of polyline verts (work plane, connect line, group boxes).
+    pub pvs: u64,
+    /// Hash of spike-dot particles.
+    pub parts: u64,
+    /// Hash of grid-plane params/cfgs/hide-bits/on-flags + trace uploads.
+    pub planes: u64,
+    /// Hash of DrawParams contents (pv/part counts, toggles).
+    pub params: u64,
+    /// Geo version — instance buffers only change with it.
+    pub geo: u64,
+}
+
+/// Redraw the scene iff any input to it changed since the last key.
+pub fn scene_needs_render(prev: Option<&SceneKey>, cur: &SceneKey) -> bool {
+    prev != Some(cur)
 }
 
 /// What to draw this frame (set per frame by the app).
@@ -618,11 +657,13 @@ impl Gpu {
             cam_u: CamU::zeroed(),
             pv_bg,
             draw_params: None,
+            last_scene_key: None,
         }
     }
 
     /// Rebuild all static geometry buffers from a new GeoSnap.
     pub fn set_scene(&mut self, geo: &GeoSnap) {
+        self.last_scene_key = None; // instance buffers changed → force redraw
         let n = geo.pos.len();
 
         // Scene bounds up front: the synapse LOD stats below reuse them,
@@ -1374,9 +1415,16 @@ impl Gpu {
         self.depth.as_ref().unwrap().0.clone()
     }
 
-    /// Render the scene into the internal viewport texture (own encoder).
-    pub fn render_offscreen(&mut self, w_px: u32, h_px: u32) {
+    /// Draw the scene into `scene_tex` — but ONLY if `key` differs from
+    /// the last rendered frame. An unchanged frame (paused sim, still
+    /// camera, only an egui window moving) reuses the cached texture via
+    /// the blit callback; the whole raster load is skipped.
+    pub fn render_offscreen(&mut self, w_px: u32, h_px: u32, key: &SceneKey) {
         if self.scene.is_none() {
+            self.last_scene_key = None;
+            return;
+        }
+        if !scene_needs_render(self.last_scene_key.as_ref(), key) {
             return;
         }
         self.ensure_targets(w_px.max(1), h_px.max(1));
@@ -1422,6 +1470,12 @@ impl Gpu {
             self.render(&mut rpass, pv, parts, syn);
         }
         self.queue.submit([enc.finish()]);
+        self.last_scene_key = Some(key.clone());
+    }
+
+    /// A pick readback is queued but not yet resolved.
+    pub fn pick_in_flight(&self) -> bool {
+        self.pick_pending.is_some()
     }
 
     /// Blit the scene texture into egui's pass at `viewport_px` (x,y,w,h).
@@ -1655,5 +1709,58 @@ fn entry(i: u32, b: wgpu::BindingResource<'_>) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding: i,
         resource: b,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key() -> SceneKey {
+        SceneKey {
+            w_px: 800,
+            h_px: 600,
+            cam: 1,
+            preview: 2,
+            hover: 3,
+            sel: 4,
+            act: 5,
+            pvs: 6,
+            parts: 7,
+            planes: 8,
+            params: 9,
+            geo: 10,
+        }
+    }
+
+    /// Stage 14 B: redraw when any scene input changed, reuse the cached
+    /// texture when none did. Fails if the check is stubbed either way.
+    #[test]
+    fn scene_dirty_only_on_real_change() {
+        let base = key();
+        // First frame after set_scene: nothing cached — always render.
+        assert!(scene_needs_render(None, &base));
+        // Identical inputs -> skip the offscreen pass.
+        assert!(!scene_needs_render(Some(&base), &key()));
+        // Every required input must invalidate on its own.
+        let bumps: [fn(&mut SceneKey); 12] = [
+            |k| k.w_px += 1,
+            |k| k.h_px += 1,
+            |k| k.cam += 1,
+            |k| k.preview += 1,
+            |k| k.hover += 1,
+            |k| k.sel += 1,
+            |k| k.act += 1,
+            |k| k.pvs += 1,
+            |k| k.parts += 1,
+            |k| k.planes += 1,
+            |k| k.params += 1,
+            |k| k.geo += 1,
+        ];
+        for f in bumps {
+            let mut k2 = key();
+            f(&mut k2);
+            assert!(scene_needs_render(Some(&base), &k2));
+        }
     }
 }

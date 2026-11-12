@@ -20,10 +20,24 @@ pub struct EditorApp {
     pub ctl: SimCtl,
     pub camera: Camera,
     pub geo: Option<Arc<GeoSnap>>,
-    geo_version: u64,
+    /// Bumped on every geo assign — SceneKey input (view.rs reads it).
+    pub(crate) geo_version: u64,
     /// Frame the camera on the next geometry publish (grid dialogs, load).
     frame_pending: bool,
     last_snap_seq: u64,
+    /// Fingerprint contribution of `plane_frame` (params+cfgs+hide bits+
+    /// on-flags+trace uploads) for the SceneKey.
+    pub plane_key: u64,
+    /// Set by viewport each frame: spike-dot particles exist → keep
+    /// repainting until they finish their wall-clock flight.
+    pub parts_active: bool,
+    /// A pick readback is queued on the GPU — one more frame must run to
+    /// consume it even if nothing else animates.
+    pub pick_in_flight: bool,
+    /// Last hover-pick target (pixel + camera + geometry): a new pick is
+    /// only queued when this changes — otherwise pick_in_flight would
+    /// keep the app repainting forever under a still cursor.
+    pub last_hover_pick: Option<(u32, u32, u64, u64)>,
     pub activity: Vec<f32>,
     pub particles: Particles,
     /// v(t) histories + raster, cleared when fed sim time goes backwards.
@@ -505,6 +519,10 @@ impl EditorApp {
             geo_version: 0,
             frame_pending: false,
             last_snap_seq: 0,
+            plane_key: 0,
+            parts_active: false,
+            pick_in_flight: false,
+            last_hover_pick: None,
             activity: Vec::new(),
             particles: Particles::new(),
             hist: crate::plot::PlotHist::default(),
@@ -1085,6 +1103,7 @@ impl EditorApp {
     pub(crate) fn plane_frame(&mut self, gpu: &mut Gpu, vp_h_px: f32) -> Option<Vec<bool>> {
         let g = self.geo.clone()?;
         if g.grids.is_empty() {
+            self.plane_key = 0;
             return None;
         }
         let eye = self.camera.eye();
@@ -1144,8 +1163,19 @@ impl EditorApp {
             }
             self.plane_snap = self.last_snap_seq;
             self.plane_geo = self.geo_version;
-            self.plane_cfgs_last = cfgs;
+            self.plane_cfgs_last = cfgs.clone();
         }
+        // SceneKey contribution: everything this call fed the GPU.
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher};
+        h.write(bytemuck::cast_slice(&params));
+        for c in &cfgs {
+            format!("{c:?}").hash(&mut h);
+        }
+        h.write(bytemuck::cast_slice(&bits));
+        on.hash(&mut h);
+        need_upload.hash(&mut h);
+        self.plane_key = h.finish();
         Some(on)
     }
 
