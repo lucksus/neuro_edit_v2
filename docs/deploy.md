@@ -77,6 +77,10 @@ never lands in argv, `ps`, or shell history.
 same `--accounts` flag for ops from cron/ssh. Day-to-day activation is
 meant to happen in `/admin` instead.
 
+Create the first admin **before** exposing the service: new signups sit
+in `pending` until an admin activates them, so without one nobody can
+ever log in.
+
 ## systemd unit (on miguel)
 
 `/etc/systemd/system/neuroedit.service`:
@@ -97,6 +101,10 @@ ExecStart=/opt/neuroedit/server \
     --trust-proxy 10.0.0.10
 Restart=on-failure
 RestartSec=3
+# Hard ceiling for the whole service (host sims + rhai + job outputs).
+# Server-side flags (--max-neurons/--max-synapses/--max-ring-mb) keep a
+# single user far below this; MemoryMax is the last line of defence.
+MemoryMax=12G
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=/var/lib/neuroedit
