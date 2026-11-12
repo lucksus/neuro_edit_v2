@@ -899,3 +899,23 @@ tau made the +100 ms window readable but not strong — a larger liquid
 or structured input mixing could push the horizon past 100 ms; the
 detector's cooc baseline should also get the delay sweep directly
 (here it rides along as a table row, not a sweep).
+
+## Stage 8 — small server polish
+
+Opening the wire port in a browser used to log `WebSocket protocol
+error: No "Connection: upgrade" header` and show nothing. Now every
+accepted connection's request head is classified the same way `--web`
+mode already did: `Upgrade: websocket` is the wire protocol; a plain
+GET on a WS-only port gets `426 Upgrade Required` + a text/plain hint
+(build with `editor/web/build.sh`, serve with `server --web
+editor/dist-web`, or attach with `editor --connect host:port`), and the
+server log says the same in one line. `--web <dir>` without an
+`index.html` fails at startup naming `editor/web/build.sh`; startup
+prints `browser editor: open http://<bind>/` with `--web` or
+`editor --connect <bind>` without. README gained a *Run in the browser*
+section with the exact toolchain commands (wasm32 target,
+`wasm-bindgen-cli` pinned to the Cargo.lock version). Tests:
+`ws_plain_http_gets_hint_without_web` (426 + hint body, wire still
+works after), `web_dir_without_index_fails_startup_check`. Verified
+live: curl → 426 + hint, `--web /tmp/empty_web` → startup error,
+`--web editor/dist-web` → the open-URL line.
