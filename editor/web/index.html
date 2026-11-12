@@ -28,13 +28,6 @@
   <img src="loading-logo.svg" alt="neuro_edit">
   <span id="loading-status">checking WebGPU…</span>
 </div>
-<script type="module">
-  // Check WebGPU BEFORE the wasm bundle loads: without it the editor
-  // can't start anyway, and a clear how-to page beats a dead canvas.
-  // webgpu-help.mjs is a plain ES module — no build step.
-  import { boot } from './webgpu-help.mjs';
-  import init from './editor.js';
-  boot(() => init());
-</script>
+<script type="module" src="boot.mjs"></script>
 </body>
 </html>

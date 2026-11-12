@@ -1078,3 +1078,75 @@ fn conn_cap_answers_503() {
     let head = String::from_utf8_lossy(&buf);
     assert!(head.starts_with("HTTP/1.1 503"), "{head}");
 }
+
+/// Stage 16B: /app's editor shell needs wasm + its own (file-based)
+/// scripts — a narrow CSP that still has no 'unsafe-inline' scripts;
+/// the account/admin pages keep the strict no-script policy.
+#[test]
+fn app_csp_allows_wasm_not_inline_scripts() {
+    let fx = start("csp", |_| {});
+    let _u = mkuser(&fx, "c@x.dev", "Cee");
+    let tok = token_of(&fx, "c@x.dev");
+    let cookie = format!("ne_session={tok}");
+
+    // a real index.html under --web
+    std::fs::write(
+        fx.root.join("web").join("index.html"),
+        "<html><head></head><body><script type=\"module\" src=\"boot.mjs\"></script></body></html>",
+    )
+    .unwrap();
+
+    fn script_src(csp: &str) -> String {
+        csp.split(';')
+            .map(str::trim)
+            .find(|d| d.starts_with("script-src"))
+            .unwrap_or("")
+            .to_string()
+    }
+
+    let r = http(&fx.addr, "GET", "/app", &[("cookie", &cookie)], "");
+    assert_eq!(200, r.status);
+    let csp = r.header("content-security-policy").unwrap().to_string();
+    assert!(
+        csp.contains("wasm-unsafe-eval"),
+        "app CSP must allow wasm: {csp}"
+    );
+    assert!(
+        !script_src(&csp).contains("unsafe-inline"),
+        "app script-src must not allow inline scripts: {csp}"
+    );
+    assert!(
+        !csp.contains("unsafe-eval\"") && !csp.contains("'unsafe-eval'"),
+        "no unsafe-eval anywhere: {csp}"
+    );
+
+    // /app/index.html via serve_static gets the same app policy
+    let r = http(
+        &fx.addr,
+        "GET",
+        "/app/index.html",
+        &[("cookie", &cookie)],
+        "",
+    );
+    assert_eq!(200, r.status);
+    assert!(r
+        .header("content-security-policy")
+        .unwrap()
+        .contains("wasm-unsafe-eval"));
+
+    // the account pages keep the strict policy — no script-src, no wasm
+    for path in ["/", "/login", "/admin", "/signup"] {
+        let r = http(&fx.addr, "GET", path, &[("cookie", &cookie)], "");
+        let csp = r
+            .header("content-security-policy")
+            .unwrap_or("")
+            .to_string();
+        if r.status == 200 {
+            assert!(
+                csp.contains("default-src 'self'") && !csp.contains("wasm-unsafe-eval"),
+                "{path} must keep the strict policy: {csp}"
+            );
+            assert_eq!("", script_src(&csp), "{path} must not allow scripts");
+        }
+    }
+}

@@ -230,6 +230,14 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
+/// Strict policy for the server-rendered pages: no scripts at all,
+/// inline style allowed (the pages use style attributes).
+const CSP_STRICT: &str = "default-src 'self'; style-src 'self' 'unsafe-inline'";
+/// `/app`'s editor shell: the wasm-bindgen glue needs WebAssembly, the
+/// bootstrap lives in boot.mjs (no inline scripts, no eval).
+const CSP_APP: &str =
+    "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'";
+
 fn respond(
     stream: &mut TcpStream,
     status: &str,
@@ -237,15 +245,28 @@ fn respond(
     body: &[u8],
     extra: &str,
 ) -> anyhow::Result<()> {
+    respond_csp(stream, status, content_type, body, extra, CSP_STRICT)
+}
+
+fn respond_csp(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+    extra: &str,
+    csp: &str,
+) -> anyhow::Result<()> {
     // Baseline headers on everything; HTML responses (which include
     // the authenticated pages) additionally refuse framing and forbid
     // caching so a back-button can't replay a dead session's view.
     let security = if content_type.contains("text/html") {
-        "X-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\n\
-         Referrer-Policy: no-referrer\r\nCache-Control: no-store\r\n\
-         Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'\r\n"
+        format!(
+            "X-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\n\
+             Referrer-Policy: no-referrer\r\nCache-Control: no-store\r\n\
+             Content-Security-Policy: {csp}\r\n"
+        )
     } else {
-        "X-Content-Type-Options: nosniff\r\n"
+        "X-Content-Type-Options: nosniff\r\n".to_string()
     };
     let head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
@@ -580,12 +601,13 @@ impl Multi {
                     let html = std::fs::read_to_string(self.opts.web_dir.join("index.html"))
                         .unwrap_or_default()
                         .replacen("<head>", "<head><base href=\"/app/\">", 1);
-                    respond(
+                    respond_csp(
                         stream,
                         "200 OK",
                         "text/html; charset=utf-8",
                         html.as_bytes(),
                         "",
+                        CSP_APP,
                     )
                 }
                 None => redirect(stream, "/", ""),
@@ -920,8 +942,15 @@ fn serve_static(stream: &mut TcpStream, web_dir: &Path, rel: &str) -> anyhow::Re
         Some("ico") => "image/x-icon",
         _ => "application/octet-stream",
     };
+    // The only html under web_dir is the editor shell — it needs the
+    // /app policy (wasm), not the strict page policy.
+    let csp = if mime.contains("text/html") {
+        CSP_APP
+    } else {
+        CSP_STRICT
+    };
     match if bad { None } else { std::fs::read(&path).ok() } {
-        Some(b) => respond(stream, "200 OK", mime, &b, ""),
+        Some(b) => respond_csp(stream, "200 OK", mime, &b, "", csp),
         None => not_found(stream),
     }
 }
