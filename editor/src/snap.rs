@@ -130,6 +130,24 @@ pub struct Shared {
     pub file_data: Option<(String, String)>,
     /// `WriteFile` ack for status display.
     pub file_written: Option<String>,
+    /// Server job list (`ListJobs` refreshed, JobStarted appended,
+    /// JobDone re-stamps status).
+    pub jobs: Vec<proto::JobInfo>,
+    /// Accumulated `JobProgress` rows per job id — feeds the panel's
+    /// progress plot.
+    pub job_progress: std::collections::BTreeMap<u64, Vec<Vec<(String, f64)>>>,
+    /// `OpenJob` reply, consumed once by the jobs panel.
+    pub job_detail: Option<JobDetailSnap>,
+}
+
+/// Snapshot of an `OpenJob` reply for the jobs panel.
+pub struct JobDetailSnap {
+    pub id: u64,
+    pub name: String,
+    pub status: String,
+    pub script: String,
+    pub result_json: Option<String>,
+    pub progress: Vec<Vec<(String, f64)>>,
 }
 
 impl Default for Shared {
@@ -151,6 +169,9 @@ impl Default for Shared {
             files: None,
             file_data: None,
             file_written: None,
+            jobs: Vec::new(),
+            job_progress: std::collections::BTreeMap::new(),
+            job_detail: None,
         }
     }
 }
@@ -263,6 +284,57 @@ impl Fold {
             proto::ServerMsg::FileWritten { path } => {
                 sh.file_written = Some(path.clone());
                 sh.log(format!("wrote {path}"));
+            }
+            proto::ServerMsg::JobStarted { id, name } => {
+                sh.jobs.push(proto::JobInfo {
+                    id,
+                    name: name.clone(),
+                    status: "running".into(),
+                    started_ms: 0,
+                });
+                sh.job_progress.insert(id, Vec::new());
+                sh.log(format!("job {id} started: {name}"));
+            }
+            proto::ServerMsg::JobProgress { id, fields } => {
+                sh.job_progress.entry(id).or_default().push(fields);
+            }
+            proto::ServerMsg::JobDone { id, status, error } => {
+                match sh.jobs.iter_mut().find(|j| j.id == id) {
+                    Some(j) => j.status = status.clone(),
+                    None => sh.jobs.push(proto::JobInfo {
+                        id,
+                        name: format!("job{id}"),
+                        status: status.clone(),
+                        started_ms: 0,
+                    }),
+                }
+                match error {
+                    Some(e) => sh.log(format!("job {id} {status}: {e}")),
+                    None => sh.log(format!("job {id} {status}")),
+                }
+            }
+            proto::ServerMsg::JobList { jobs } => {
+                sh.jobs = jobs;
+                for j in &sh.jobs {
+                    sh.job_progress.entry(j.id).or_default();
+                }
+            }
+            proto::ServerMsg::JobDetail {
+                id,
+                name,
+                status,
+                script,
+                result_json,
+                progress,
+            } => {
+                sh.job_detail = Some(JobDetailSnap {
+                    id,
+                    name,
+                    status,
+                    script,
+                    result_json,
+                    progress,
+                });
             }
             proto::ServerMsg::Error(e) => sh.log(format!("! {e}")),
         }
