@@ -60,6 +60,16 @@ net.create_connections("group", scaling, lambda, weight);
 //     (a Gaussian in distance, as in Maass 2002 — not an exponential)
 net.set_synapse_weights("group", mean, sd);      // gaussian on existing synapses
 net.set_exc_inh("group", frac);                  // frac → inhibitory kind
+
+// per-synapse current-trace time constants (ms). 0 = default merged
+// path (each synapse's current folded into the target's single decay,
+// global synapse_tau). >0 gives that synapse its own exponential trace.
+net.set_syn_tau("src_g", "tgt_g", tau);          // every src→tgt edge
+net.set_syn_tau_dist("src_g", "tgt_g", mean, sd);// gaussian per edge
+net.set_syn_tau_inh("g", tau);                   // inhibitory-source edges
+net.set_syn_tau_one(src, tgt, tau);              // one edge
+net.set_syn_tau_idx(i, tau);                     // by synapse index
+net.syn_tau(src, tgt)                            // → ms (0 = merged)
 ```
 
 Grid builders record persistent lattice metadata on the group (member

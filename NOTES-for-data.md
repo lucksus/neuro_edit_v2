@@ -792,11 +792,110 @@ datasets / more windows would smooth it.
   (job keeps running + persists after the starter disconnects),
   `ws_job_cancel` (`job.status` → `cancelled`, run dir stamped).
 
+## Stage 7 — per-synapse `tau_syn` + a memory curve that survives scrutiny
+
+### Per-synapse synaptic time constants
+
+Each `Synapse` carries `tau_ms`. `0.0` = the historical behaviour
+*unchanged*: the synapse's current is folded into its target's single
+merged current `s[i]` decaying at the global `synapse_tau` (2 ms).
+`> 0` gives that synapse its own exponential current trace with its own
+time constant — an independent `ds/dt = −s/τ + Σw·δ(t_arrive)` per
+synapse, summed per target neuron.
+
+- **Default bit-exact**: all-zero `tau_ms` bypasses the new path
+  entirely. `cpu_ref.rs::default_tau_is_bitexact` pins the pre-change
+  spike train fingerprint on a fixed seed; all stage ≤ 6 tests pass
+  unmodified.
+- **CPU + CUDA**: both carry per-synapse trace state;
+  `gpu_matches_cpu_with_custom_tau` agrees within the existing
+  tolerance (exact spike-count match on a deterministic net).
+- **`.ne2` v3**: format version 2→3; v1/v2 files lift to `tau_ms=0.0`
+  (old nets are byte-identical in behaviour). Round-trip + lift tests
+  in `net-format/src/io.rs`.
+- **Rhai**: `net.set_syn_tau{,_dist,_one,_idx}`, `net.set_syn_tau_inh`
+  (slow-inhibition variant), `net.syn_tau(src,tgt)`. Editor: *Group →
+  Set synapse tau…* dialog (uniform or Gaussian per edge).
+- **Memory/bandwidth cost** (allocated only when any `tau > 0`; the
+  merged path allocates nothing): ~12 B/synapse — `tau_ms` (4 B in the
+  CSR), `xtrace` current value (4 B), one `xring` arrival-list slot
+  entry (~4 B) — plus ~8 B/neuron for the `xrow` row ranges. Bandwidth:
+  the neuron pass now also walks each neuron's custom-arriving
+  synapses; cost scales with spike volume × trace count, not steps.
+
+### Memory curve, tightened (memory_window.rhai v2)
+
+300 s `mem_corr2` dataset (503 corr events), **249+249 train /
+254+254 test windows** (≥ 200 ✓), **5 liquid seeds** (5/7/11/19/42),
+mean ± sd per cell, and a **label-permutation null per delay**
+(200 draws on seed-5 test labels — null mean 0.499 ± 0.025, so the
+pass line is null + 2sd ≈ 0.549). One replay per window serves every
+delay via `sim.spike_counts` checkpoints (exact per-window counts).
+
+AUC (mean ± sd over seeds), readout window = 20 ms at `delay` after onset:
+
+| setting | +0 | +5 | +10 | +20 | +50 | +100 | +200 ms | horizon |
+|---|---|---|---|---|---|---|---|---|
+| merged (τ=2ms)   | .741±.003 | .719±.009 | .637±.007 | .618±.012 | .574±.019 | .518±.021 | .517±.005 | **50** |
+| rec τ=5ms        | .741±.005 | .737±.006 | .707±.012 | .679±.008 | .584±.021 | .517±.013 | .512±.014 | 50 |
+| **rec τ=20ms**   | .724±.016 | .717±.020 | .707±.019 | .707±.011 | .645±.006 | **.570±.012** | .526±.015 | **100** |
+| rec τ=50ms       | .656±.018 | .622±.038 | .622±.030 | .595±.025 | .551±.028 | .519±.031 | .521±.025 | 50 |
+| rec τ=100ms      | .622±.028 | .593±.032 | .591±.021 | .557±.029 | .535±.041 | .529±.020 | .514±.028 | 20 |
+| rec τ=50, w_rec×2| .600±.059 | .572±.047 | .529±.029 | .502±.021 | .502±.019 | .492±.026 | .499±.027 | 5 |
+| **slow-inh (20/50)** | .715±.022 | .699±.023 | .697±.025 | .701±.025 | .638±.016 | **.608±.011** | .531±.013 | **100** |
+| raw counts       | .747 | .666 | .551 | .516 | .513 | .527 | .481 | ~10 |
+
+(Horizon = last delay with mean AUC ≥ null + 2sd.)
+
+**What the sweep shows**: per-synapse tau on the recurrent edges is the
+single change that extends the horizon — τ=20 ms roughly doubles it
+(50 → 100 ms) while *costing* ~0.02 AUC at delay 0. Longer taus trade
+immediate detectability for a flatter mid-range slope (τ=50/100 never
+beat the +50 ms cell of τ=20). Doubling recurrent weight hurt
+everywhere. Slow inhibition (τ_rec=20, τ_inh=50) matches τ=20's curve
+and is best at +100 ms (0.608 vs 0.570) — the inhibitory tail keeps
+event structure readable later. Nothing holds at +200 ms; by then the
+membrane state has decayed past readout resolution — the limit is the
+~50–100 ms envelope of the traces themselves, not the readout.
+
+### Detector at the best memory setting (detector.rhai, delay sweep)
+
+`slow-inh` liquid (τ_rec=20, τ_inh=50) on the `det_corr` task; raw and
+coincidence baselines use the *same* delayed window.
+
+| delay | liquid | raw | cooc | null | pooled p |
+|---|---|---|---|---|---|
+| **0 ms**   | 0.668 ± 0.018 | 0.710 | 0.819 | 0.500 ± 0.098 | 0.049 |
+| **100 ms** | 0.634 ± 0.047 | **0.489** | 0.614 | 0.495 ± 0.077 | **0.038** |
+
+**Honest read**: this is the result stage 6 promised. At delay 0 the
+coincidence baseline still wins (the event is *in* the window — no
+memory needed) and per-synapse traces cost the liquid ~0.07 AUC vs the
+merged net (0.668 vs 0.739). At delay 100 ms the stream's raw counts
+are pure chance (0.489) and even the coincidence feature has decayed to
+0.614 — but the liquid holds 0.634 ± 0.047, beating raw outright and
+matching cooc with 3× its sd. That's the liquid's temporal memory
+paying off exactly where memory is required. The margin over cooc at
++100 ms is thin (0.634 vs 0.614 — within noise on 3 seeds), so the
+claim is "the liquid retains what the stream has lost", not "beats the
+best baseline by a wide margin".
+
+### Remaining honest caveats
+
+- AUCs at +100 ms are modest (~0.57–0.61) — real but not strong; the
+  useful horizon is 50–100 ms, not the hundreds some LSM papers imply.
+- The null is tight (sd ≈ 0.025 on 254-sample cells), so ±2sd is a
+  fair bar; smaller datasets couldn't have drawn these lines at all.
+- GPU/CPU agree on custom taus, but all numbers above are CPU runs
+  (CUDA used only for speed checks).
+- `dataset_gen` caches by canonical spec; `mem_corr2` is regenerable
+  from `examples/memory_window.rhai`'s parameter block.
+
 ### Next steps
 
 Auth for `server` (any connected client can run jobs), job
-queueing/limits (one job at a time per server is enforced only by
-caller discipline), `wasm-opt` for the 9.9 MB bundle, and the honest
-science follow-ups the numbers suggest: more events per split for
-tighter AUC CIs, and a delay sweep on `detector.rhai` where the
-liquid's temporal memory should pay off vs. the coincidence baseline.
+queueing/limits, `wasm-opt` for the 9.9 MB bundle. Science: per-synapse
+tau made the +100 ms window readable but not strong — a larger liquid
+or structured input mixing could push the horizon past 100 ms; the
+detector's cooc baseline should also get the delay sweep directly
+(here it rides along as a table row, not a sweep).
