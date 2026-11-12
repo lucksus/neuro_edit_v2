@@ -150,8 +150,10 @@ impl Sim {
         }
     }
 
-    /// Per-neuron spike counts over the last `rows` recorded steps.
-    pub fn spike_counts(&self, rows: usize) -> Vec<u32> {
+    /// Per-neuron spike counts over the last `rows` steps. Exact for
+    /// `rows <= record ring depth` and for `rows >= t` (lifetime totals);
+    /// errors for windows in between (the ring already wrapped).
+    pub fn spike_counts(&self, rows: usize) -> Result<Vec<u32>, String> {
         match self {
             Sim::Cpu(s) => s.spike_counts(rows),
             #[cfg(feature = "cuda")]

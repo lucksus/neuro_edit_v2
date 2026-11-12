@@ -688,29 +688,34 @@ pub fn register_api(
     });
     engine.register_fn(
         "spike_counts",
-        |s: &mut SimSlot, rows: rhai::INT| -> rhai::Array {
-            s.borrow()
-                .as_ref()
-                .map(|h| {
-                    h.borrow()
-                        .spike_counts(rows as usize)
-                        .into_iter()
-                        .map(|f| dyn_f64(f as f64))
-                        .collect()
-                })
-                .unwrap_or_default()
+        |s: &mut SimSlot, rows: rhai::INT| -> Result<rhai::Array, Box<rhai::EvalAltResult>> {
+            let Some(h) = s.borrow().as_ref().cloned() else {
+                return Ok(Vec::new());
+            };
+            let c = h
+                .borrow()
+                .spike_counts(rows.max(0) as usize)
+                .map_err(|e| -> Box<rhai::EvalAltResult> { e.into() })?;
+            Ok(c.into_iter().map(|f| dyn_f64(f as f64)).collect())
         },
     );
     engine.register_fn(
         "spike_counts_of",
-        |s: &mut SimSlot, rows: rhai::INT, ids: rhai::Array| -> rhai::Array {
+        |s: &mut SimSlot,
+         rows: rhai::INT,
+         ids: rhai::Array|
+         -> Result<rhai::Array, Box<rhai::EvalAltResult>> {
             let Some(h) = s.borrow().as_ref().cloned() else {
-                return Vec::new();
+                return Ok(Vec::new());
             };
-            let c = h.borrow().spike_counts(rows as usize);
-            ids.iter()
+            let c = h
+                .borrow()
+                .spike_counts(rows.max(0) as usize)
+                .map_err(|e| -> Box<rhai::EvalAltResult> { e.into() })?;
+            Ok(ids
+                .iter()
                 .map(|d| dyn_f64(c[d_i64(d) as usize] as f64))
-                .collect()
+                .collect())
         },
     );
     engine.register_fn("vs", |s: &mut SimSlot| -> rhai::Array {

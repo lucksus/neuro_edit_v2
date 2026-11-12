@@ -97,6 +97,7 @@ fn play_window(sim: &mut CpuSim, net: &Network, m: &[Vec<f32>]) -> Vec<f32> {
     }
     sim.run_steps(WIN_MS * SPB);
     sim.spike_counts(WIN_MS * SPB)
+        .unwrap()
         .iter()
         .map(|&c| c as f32 / WIN_MS as f32)
         .collect()

@@ -358,7 +358,7 @@ fn publish_sim(sim: &Sim, shared: &SharedRef, p: &mut Pub) {
         .step_count()
         .saturating_sub(p.prev_step)
         .min(COUNTS_WINDOW as u64) as usize;
-    let counts = sim.spike_counts(back);
+    let counts = sim.spike_counts(back).unwrap_or_default();
     p.prev_step = sim.step_count();
 
     let mut watched_v = Vec::new();

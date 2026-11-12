@@ -126,7 +126,7 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
 
     // particles from the last 300 steps of the run
     let mut parts = scene::Particles::new();
-    let counts = sim.spike_counts((300.0 / dt) as usize);
+    let counts = sim.spike_counts((300.0 / dt) as usize).unwrap_or_default();
     let now_ms = sim.time_ms();
     parts.feed(&geo, &counts, now_ms);
     let pinst = parts.instances(now_ms + 1.0);

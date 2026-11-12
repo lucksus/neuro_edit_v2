@@ -45,7 +45,8 @@ extern "C" __global__ void neuron_kernel(
     u64 seed,
     int model,
     int* spk, int* cnt_cur,
-    u64* spk_row)
+    u64* spk_row,
+    u64* pn_total)
 {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if(i >= N) return;
@@ -80,6 +81,7 @@ extern "C" __global__ void neuron_kernel(
     int k = atomicAdd(cnt_cur, 1);
     spk[k] = i;
     trace[i] = 1.f;
+    atomicAdd(pn_total + i, (u64)1);
     if(spk_row != 0){
       atomicOr(spk_row + (i >> 6), (u64)1 << (i & 63));
     }

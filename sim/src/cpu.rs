@@ -40,6 +40,8 @@ pub struct CpuSim {
     /// spike recording: bits per step in a rolling window
     pub spike_bits: Vec<u64>,
     pub spike_counts: Vec<u32>,
+    /// per-neuron lifetime spike totals (answers windows >= t exactly)
+    pub pn_total: Vec<u64>,
     pub words: usize,
 
     pub t: u64,
@@ -53,8 +55,9 @@ impl CpuSim {
         let d = ring_depth(&csr, cfg.dt_ms);
         let params = NeuronParams::from_network(net);
         let words = n.div_ceil(64);
+        // >= 2 keeps the wrap-clear semantics uniform with the CUDA backend
         let spike_record_steps = if cfg.record_spikes {
-            cfg.spike_record_steps
+            cfg.spike_record_steps.max(2)
         } else {
             0
         };
@@ -73,6 +76,7 @@ impl CpuSim {
             ext: vec![0.0; n],
             spike_bits: vec![0; spike_record_steps * words],
             spike_counts: vec![0; spike_record_steps],
+            pn_total: vec![0; n],
             words,
             t: 0,
             spikes_total: 0,
@@ -96,6 +100,7 @@ impl CpuSim {
         self.ring.fill(0.0);
         self.spike_bits.fill(0);
         self.spike_counts.fill(0);
+        self.pn_total.fill(0);
         self.t = 0;
         self.spikes_total = 0;
     }
@@ -176,9 +181,15 @@ impl CpuSim {
         if record {
             let row = (t as usize) % self.spike_counts.len().max(1);
             self.spike_counts[row] = spiked.len() as u32;
+            // the row is reused every `record_steps` steps — clear stale
+            // bits from the previous wrap before OR-ing this step's spikes
+            self.spike_bits[row * self.words..(row + 1) * self.words].fill(0);
             for &i in &spiked {
                 self.spike_bits[row * self.words + (i as usize) / 64] |= 1 << (i % 64);
             }
+        }
+        for &i in &spiked {
+            self.pn_total[i as usize] += 1;
         }
         self.spikes_total += spiked.len() as u64;
         self.t += 1;
@@ -211,7 +222,11 @@ impl CpuSim {
 
     /// Spike bitmap for a step in the recorded window (`back` steps ago).
     pub fn spike_row(&self, back: usize) -> Option<&[u64]> {
-        if !self.cfg.record_spikes || self.t == 0 {
+        if !self.cfg.record_spikes
+            || self.t == 0
+            || back >= self.t as usize
+            || back >= self.spike_counts.len()
+        {
             return None;
         }
         let t = self.t as usize - 1 - back;
@@ -224,13 +239,28 @@ impl CpuSim {
         units.iter().map(|&i| self.trace[i as usize]).collect()
     }
 
-    /// Per-neuron spike counts over the last `rows` recorded steps.
-    pub fn spike_counts(&self, rows: usize) -> Vec<u32> {
+    /// Per-neuron spike counts over the last `rows` steps.
+    ///
+    /// `rows >= t`: exact lifetime totals. `rows <= record ring depth`: exact
+    /// sliding-window count. Anything in between cannot be answered (the ring
+    /// already wrapped) and returns an error rather than silently capping.
+    pub fn spike_counts(&self, rows: usize) -> Result<Vec<u32>, String> {
         let mut counts = vec![0u32; self.n];
         if !self.cfg.record_spikes || self.t == 0 {
-            return counts;
+            return Ok(counts);
         }
-        let rows = rows.min(self.spike_counts.len()).min(self.t as usize);
+        if rows >= self.t as usize {
+            for (c, &tot) in counts.iter_mut().zip(self.pn_total.iter()) {
+                *c = tot.min(u32::MAX as u64) as u32;
+            }
+            return Ok(counts);
+        }
+        if rows > self.spike_counts.len() {
+            return Err(format!(
+                "spike_counts window {rows} exceeds the recorded {} steps",
+                self.spike_counts.len()
+            ));
+        }
         for back in 0..rows {
             let Some(row) = self.spike_row(back) else {
                 break;
@@ -247,7 +277,7 @@ impl CpuSim {
                 }
             }
         }
-        counts
+        Ok(counts)
     }
 
     pub fn set_input_constant(&mut self, input: usize, value: f32) {

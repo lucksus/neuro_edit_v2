@@ -56,6 +56,8 @@ pub struct CudaSim {
     cnt: [CudaSlice<i32>; 2], // ping-pong by step parity
     total: CudaSlice<u64>,
     spk_bits: CudaSlice<u64>,
+    /// per-neuron lifetime spike totals (exact answer for windows >= t)
+    pn_total: CudaSlice<u64>,
 
     // host-side mirrors
     pub n: usize,
@@ -101,8 +103,10 @@ impl CudaSim {
         let init_v = params.init_v;
         let init_u = params.init_u.clone();
         let words = n.div_ceil(64);
+        // >= 2 rows: prop_kernel clears the row the NEXT step will record
+        // into; a depth-1 ring would clear the row just written
         let record_rows = if cfg.record_spikes {
-            cfg.spike_record_steps
+            cfg.spike_record_steps.max(2)
         } else {
             0
         };
@@ -132,6 +136,7 @@ impl CudaSim {
             cnt: [stream.alloc_zeros(1)?, stream.alloc_zeros(1)?],
             total: stream.alloc_zeros(1)?,
             spk_bits: stream.alloc_zeros((record_rows * words).max(1))?,
+            pn_total: stream.alloc_zeros(n.max(1))?,
             n,
             cfg,
             params,
@@ -241,7 +246,21 @@ impl CudaSim {
                     b.arg(&0u64); // NULL spk_row
                 }
             }
+            b.arg(&mut self.pn_total);
             b.launch(cfg_launch)?;
+        }
+
+        // Clear the NEXT record row so stale bits from the previous wrap
+        // never reach spike_row/spike_counts (the row is reused every
+        // record_rows steps and neuron_kernel only OR-s into it). Ordered on
+        // the stream, so it lands after this step's reads and before the
+        // next step's writes.
+        if record {
+            let next_row = (t as usize + 1) % self.record_rows;
+            let mut next_view = self
+                .spk_bits
+                .slice_mut(next_row * self.words..(next_row + 1) * self.words);
+            self.stream.memset_zeros(&mut next_view)?;
         }
 
         unsafe {
@@ -305,6 +324,7 @@ impl CudaSim {
         self.stream.memset_zeros(&mut self.cnt[1]).unwrap();
         self.stream.memset_zeros(&mut self.total).unwrap();
         self.stream.memset_zeros(&mut self.spk_bits).unwrap();
+        self.stream.memset_zeros(&mut self.pn_total).unwrap();
         self.t = 0;
     }
 
@@ -334,7 +354,12 @@ impl CudaSim {
     }
 
     pub fn spike_row(&self, back: usize) -> Option<Vec<u64>> {
-        if !self.cfg.record_spikes || self.t == 0 || self.record_rows == 0 {
+        if !self.cfg.record_spikes
+            || self.t == 0
+            || self.record_rows == 0
+            || back >= self.t as usize
+            || back >= self.record_rows
+        {
             return None;
         }
         let t = self.t as usize - 1 - back;
@@ -364,14 +389,30 @@ impl CudaSim {
         out
     }
 
-    /// Per-neuron spike counts over the last `rows` recorded steps; one dtoh
-    /// copy of the record ring, then a host-side popcount.
-    pub fn spike_counts(&self, rows: usize) -> Vec<u32> {
+    /// Per-neuron spike counts over the last `rows` steps.
+    ///
+    /// `rows >= t`: exact lifetime totals (`pn_total`). `rows <= record ring
+    /// depth`: exact sliding-window count. Anything in between cannot be
+    /// answered (the ring already wrapped) and returns an error rather than
+    /// silently capping.
+    pub fn spike_counts(&self, rows: usize) -> Result<Vec<u32>, String> {
         let mut counts = vec![0u32; self.n];
         if !self.cfg.record_spikes || self.t == 0 || self.record_rows == 0 {
-            return counts;
+            return Ok(counts);
         }
-        let rows = rows.min(self.record_rows).min(self.t as usize);
+        if rows >= self.t as usize {
+            let tot = self.stream.clone_dtoh(&self.pn_total).unwrap();
+            for (c, &t) in counts.iter_mut().zip(tot.iter()) {
+                *c = t.min(u32::MAX as u64) as u32;
+            }
+            return Ok(counts);
+        }
+        if rows > self.record_rows {
+            return Err(format!(
+                "spike_counts window {rows} exceeds the recorded {} steps",
+                self.record_rows
+            ));
+        }
         let all = self.stream.clone_dtoh(&self.spk_bits).unwrap();
         for k in 0..rows {
             let t = self.t as usize - 1 - k;
@@ -391,7 +432,7 @@ impl CudaSim {
                 }
             }
         }
-        counts
+        Ok(counts)
     }
 
     pub fn set_input_constant(&mut self, input: usize, value: f32) {
