@@ -271,6 +271,12 @@ pub enum NetEdit {
         name: String,
         units: Vec<u32>,
     },
+    /// Set absolute positions for inputs (post-drag). pos [0,0,0] means
+    /// "auto-place above the targets" — a drop stores wherever it
+    /// landed, so it doesn't snap back.
+    MoveInputs {
+        items: Vec<(u32, [f32; 3])>,
+    },
     /// Add ids to a group, creating the group when missing.
     AddToGroup {
         name: String,
@@ -819,6 +825,9 @@ mod tests {
                 name: "i".into(),
                 target: 4,
                 w: 6.0,
+            },
+            NetEdit::MoveInputs {
+                items: vec![(0, [9.0, 8.0, 7.0]), (2, [0.0; 3])],
             },
         ] {
             round_trip(&e);

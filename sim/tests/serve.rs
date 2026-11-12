@@ -233,6 +233,89 @@ fn stale_base_refused_and_resynced() {
     rig.stop();
 }
 
+/// Stage 13 J: MoveInputs stores the dropped position on the input,
+/// emits an `inputs` delta, persists through save/load, and an inverse
+/// edit restores the original spot (version-checked "undo").
+#[test]
+fn move_inputs_moves_persists_and_undoes() {
+    let mut net = Network::new();
+    net.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
+    net.add_neuron([10.0; 3], net_format::NeuronKind::Excitatory);
+    net.add_input("stim", vec![(0, 1.0)], [0.0; 3]); // auto-placed
+    let rig = start(net, None);
+    rig.send(ClientMsg::Subscribe);
+    let evs = rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+    let base = first_geo(&evs).version;
+
+    // Drag the input somewhere.
+    rig.send(ClientMsg::Edit {
+        base,
+        edit: NetEdit::MoveInputs {
+            items: vec![(0, [40.0, 30.0, -12.0])],
+        },
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::GeoDelta(_)));
+    let d = evs
+        .iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::GeoDelta(d) => Some(&**d),
+            _ => None,
+        })
+        .expect("inputs delta");
+    let inputs = d.inputs.as_ref().expect("inputs replacement in delta");
+    assert_eq!(inputs[0].pos, [40.0, 30.0, -12.0]);
+    let base2 = d.version;
+
+    // "Undo" = the inverse version-checked edit puts it back.
+    rig.send(ClientMsg::Edit {
+        base: base2,
+        edit: NetEdit::MoveInputs {
+            items: vec![(0, [0.0; 3])],
+        },
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::GeoDelta(_)));
+    let d = evs
+        .iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::GeoDelta(d) => Some(&**d),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(d.inputs.as_ref().unwrap()[0].pos, [0.0; 3]);
+
+    // Out-of-range input index is an error, not a panic.
+    rig.send(ClientMsg::Edit {
+        base: d.version,
+        edit: NetEdit::MoveInputs {
+            items: vec![(9, [1.0; 3])],
+        },
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Error(_)));
+    assert!(evs
+        .iter()
+        .any(|e| matches!(&e.msg, ServerMsg::Error(s) if s.contains("no input"))));
+    rig.stop();
+}
+
+/// The position MoveInputs writes is part of `net.inputs` — which the
+/// .ne2 bincode already serializes — so a moved input survives a
+/// save/load round-trip.
+#[test]
+fn moved_input_pos_survives_save_load() {
+    let mut net = Network::new();
+    net.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
+    net.add_input("stim", vec![(0, 1.0)], [0.0; 3]);
+    // What the server writes on MoveInputs:
+    net.inputs[0].pos = [7.5, -3.0, 21.0];
+    let dir = std::env::temp_dir().join(format!("ne13_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("in.ne2");
+    net_format::io::save(&net, &p).unwrap();
+    let back = net_format::io::load(&p).unwrap();
+    assert_eq!(back.inputs[0].pos, [7.5, -3.0, 21.0]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn self_synapse_refused() {
     let mut net = Network::new();

@@ -1288,15 +1288,7 @@ pub fn geo_from_net(net: &Network, dt: f32) -> Geo {
             .iter()
             .map(|g| (g.name.clone(), g.members.clone()))
             .collect(),
-        inputs: net
-            .inputs
-            .iter()
-            .map(|i| Input {
-                name: i.name.clone(),
-                pos: i.pos,
-                targets: i.targets.iter().map(|t| t.0).collect(),
-            })
-            .collect(),
+        inputs: inputs_proto(net),
         readouts: net
             .readouts
             .iter()
@@ -1546,16 +1538,7 @@ fn apply_edit(net: &mut Network, dt: f32, e: &NetEdit) -> Result<Applied, String
         }
         NetEdit::AddInput { name, targets, pos } => {
             net.add_input(name, targets.clone(), *pos);
-            d.inputs = Some(
-                net.inputs
-                    .iter()
-                    .map(|i| Input {
-                        name: i.name.clone(),
-                        pos: i.pos,
-                        targets: i.targets.iter().map(|t| t.0).collect(),
-                    })
-                    .collect(),
-            );
+            d.inputs = Some(inputs_proto(net));
         }
         NetEdit::AddInputTarget { name, target, w } => {
             check_ids(net, &[*target])?;
@@ -1565,16 +1548,19 @@ fn apply_edit(net: &mut Network, dt: f32, e: &NetEdit) -> Result<Applied, String
                 .position(|i| &i.name == name)
                 .ok_or_else(|| format!("no input named {name}"))?;
             net.inputs[k].targets.push((*target, *w));
-            d.inputs = Some(
-                net.inputs
-                    .iter()
-                    .map(|i| Input {
-                        name: i.name.clone(),
-                        pos: i.pos,
-                        targets: i.targets.iter().map(|t| t.0).collect(),
-                    })
-                    .collect(),
-            );
+            d.inputs = Some(inputs_proto(net));
+        }
+        NetEdit::MoveInputs { items } => {
+            for (k, pos) in items {
+                let inp = net
+                    .inputs
+                    .get_mut(*k as usize)
+                    .ok_or_else(|| format!("no input #{k}"))?;
+                inp.pos = *pos;
+            }
+            if !items.is_empty() {
+                d.inputs = Some(inputs_proto(net));
+            }
         }
         NetEdit::AddSamples { name } => {
             net.samples_mut(name);
@@ -1617,6 +1603,18 @@ fn apply_edit(net: &mut Network, dt: f32, e: &NetEdit) -> Result<Applied, String
         }
     }
     Ok(Applied::Delta(d))
+}
+
+/// `net.inputs` → wire rows (delta `inputs` replacements + full Geo).
+fn inputs_proto(net: &Network) -> Vec<Input> {
+    net.inputs
+        .iter()
+        .map(|i| Input {
+            name: i.name.clone(),
+            pos: i.pos,
+            targets: i.targets.iter().map(|t| t.0).collect(),
+        })
+        .collect()
 }
 
 fn check_ids(net: &Network, ids: &[u32]) -> Result<(), String> {

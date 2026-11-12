@@ -753,16 +753,26 @@ impl EditorApp {
 
     /// Apply a finished move drag (delta on the work plane).
     pub fn apply_move(&mut self, md: &MoveDrag, delta: glam::Vec3) {
-        let moves: Vec<(u32, [f32; 3])> = md
-            .ids
-            .iter()
-            .zip(md.start_pos.iter())
-            .filter_map(|(&inst, &p)| match self.entity(inst) {
-                Some(Entity::Neuron(n)) => Some((n, (p + delta).into())),
-                _ => None,
-            })
-            .collect();
-        self.edit_net(NetEdit::MoveNeurons { items: moves });
+        let mut neurons = Vec::new();
+        let mut inputs = Vec::new();
+        // Readouts have no stored position (they auto-float above their
+        // units) — they can't move; inputs and neurons can.
+        for (&inst, &p) in md.ids.iter().zip(md.start_pos.iter()) {
+            match self.entity(inst) {
+                Some(Entity::Neuron(n)) => neurons.push((n, (p + delta).into())),
+                Some(Entity::Input(k)) => inputs.push((k, (p + delta).into())),
+                _ => {}
+            }
+        }
+        // Two edits back-to-back: send_edit bases them v+1, v+2 so both
+        // apply in order. An input dragged somewhere stores its dropped
+        // pos (non-zero → no auto-place snap-back).
+        if !neurons.is_empty() {
+            self.edit_net(NetEdit::MoveNeurons { items: neurons });
+        }
+        if !inputs.is_empty() {
+            self.edit_net(NetEdit::MoveInputs { items: inputs });
+        }
     }
 
     /// True when the published net has edits since the last save.
