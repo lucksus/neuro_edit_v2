@@ -409,3 +409,79 @@ Three commits: `bf25aac` (net-format), `0cd0bfd` (sim), editor+docs below.
 
 Checks: `cargo fmt` clean; `cargo test --workspace` 22 targets pass with
 cuda, `cargo test -p sim --no-default-features` 14 targets pass without.
+
+## Stage 3b — UX review fixes (review/STAGE3B.md, this run)
+
+Ten small commits `c7d95ba`..`7a78bb6`, one per review item, in the
+file's order. All verified live on Xvfb :99 unless noted.
+
+- **Item 0 — plane pick click-test** (no commit): clicking a grid
+  rendered as an activity plane selected the *correct* neuron — #1057,
+  inspector pos `0,-12,24` matches the lattice math exactly. The test
+  surfaced a real bug instead: a click landing while a hover pick was
+  in flight got dropped by `request_pick`'s early return — fixed under
+  #9.
+- **`c7d95ba` #1 tutorial vs reality**: synapse count 2256 (seed 1,
+  measured), Gaussian `scaling*exp(-(d/lambda)^2)` formula, added the
+  missing `sim.set_input` step, noise `(60,18)` actually spikes (was
+  `(25,0.5)` → 0 spikes), 8-watch cap documented, lsm.ne2 description
+  fixed (the script writes it). Then ran the tutorial end-to-end in
+  the GUI: `= 2256`, 0.7 input value, 3261 spikes, cap at 8 watches.
+- **`eba1b05` #2 Inputs panel**: `Snap.input_values` publishes the
+  worker's real constants — panel shows 0.7 where it used to show a
+  placeholder; the New-input dialog asks for the value.
+- **`df00cae` #3 Stop**: label is "Stop" (pause was a lie — busy
+  scripts can't resume); abort surfaces as `stopped by user at line N`;
+  `create_2d_grid`/`create_3d_grid`/`create_connections` poll
+  `Env::cancel` (wired to the worker's abort flag) so a huge build
+  stops mid-rows instead of running to completion.
+- **`3adf697` #5 auto-frame**: empty→non-empty transitions and both
+  grid dialogs re-frame the camera; `F` key + a real toolbar "Frame"
+  button (was right-click-menu-only). Verified: console-built grid on
+  a blank canvas appears centered; F re-frames after zooming away.
+- **`3d20576` #7 group combos**: Connections/Weights/ExcInh dialogs
+  list live groups in a combo; unknown group names in scripts return
+  `Runtime error: unknown group "x"` (was silent no-op).
+- **`9f50389` #8 raster**: x axis labels in real ms, y rows = the 8
+  watched neurons (was raw-id scatter), explicit `height` drag field
+  in the header (the panel-edge resize was too finicky to hit);
+  no-watch state falls back to the raw-id scatter with auto y bounds.
+  Debug print proved all 8 rows populated (`w=[...] pts=160`).
+- **`4eba759` #9 picks+synapses**: click picks queue in
+  `app.pick_click` behind an in-flight hover pick (`request_pick ->
+  bool`) — first click on a plane now selects every time; self-synapse
+  refused in both `Network::connect` callers (editor message + Rhai
+  error); synapse lines brighter (alpha 0.4) with a source→target
+  brightness gradient; synapses touching a selected neuron blend gold.
+  Found while testing: cube half-size was a fixed 4.0 vs ~3-unit grid
+  spacing → cubes merged into a solid mass hiding the synapses — now
+  adaptive (0.4·nearest-neighbour distance, clamped [0.3, 4.0]). Same
+  commit because the synapse fix was invisible without it.
+- **`b633211` #11 net-replacement reset**: `net_gen` counter bumped
+  by `net.clear()`/`net.load()`/New; on change the app drops
+  selection, pending connect, move/box state, hover+queued picks,
+  watches, v-history, raster, particles, activity, grid traces, input
+  values, plane cfgs and requests a re-frame; the worker publishes a
+  clean Snap (t/spikes zeroed, `sim_built=false`). New/Load/recent/
+  Quit/OS-close are all guarded by a discard-unsaved dialog
+  (`saved_version` vs published geo version). Verified: `net.clear()`
+  → "nothing selected", watching 0, zeroed stats; dirty New → prompt
+  → Discard resets.
+- **`1257e63` #13 toolbar truth**: worker mirrors `env.cfg` +
+  `env.backend` into `Shared` each loop (cheap change-check) so
+  script-side `sim.set_dt`/`sim.set_noise` show up in the toolbar
+  (verified: `dt 0.05`, `noise Hz 60` after script calls). One speed
+  readout: `x1.0 realtime (max x9)` — requested factor + the best the
+  machine reached; the old `sim speed = N steps/s` status line is gone.
+- **`7a78bb6` #15 polish**: `→`/`Δ`/`⦿` glyphs → ASCII (`->`, `d(`,
+  plain label — egui's bundled fonts render `·`/`—`/`…`/`×` but not
+  those); Help menu moved after Group; console default 240px with the
+  scroll area filling it (was a fixed 90px cap); console lines >400
+  chars end `… (N chars truncated)` — a 3600-element `neurons_of` no
+  longer floods; empty scene shows a centered "empty network" hint
+  with the two ways to get content.
+
+Still open by design (the [Nico]/[split] tags): real pause/resume for
+scripts, raster density heat map, density-aware synapse alpha tuning,
+backend fallback notice (the field exists but is never set — cuda
+failure currently just errors the eval that built the sim).
