@@ -352,3 +352,59 @@ Checks: `cargo fmt` clean; `cargo test --workspace` all binaries pass
 with and without `sim/cuda` (21 test targets, 0 failures on the final
 head). Each of the four optional commits compiles standalone (worktree-
 verified). Not pushed; no remote configured.
+
+## Stage 3a — grid activity planes (Nico's plane view)
+
+Regular lattices (`create_2d_grid` / `create_3d_grid`, Rhai or Insert
+dialog) now render as ONE textured quad when zoomed out — each texel a
+member neuron's fading spike trace — instead of millions of cubes.
+Three commits: `bf25aac` (net-format), `0cd0bfd` (sim), editor+docs below.
+
+- **Metadata** (`bf25aac`): `Group::grid: Option<GridShape>` = dims
+  `[w,h,d]` + origin + spacing + world-axis map; member order = lattice
+  order `(i2·dims0 + i0)·dims1 + i1`. `.ne2` is now version 2 (v1 files
+  load with `grid: None`; JSON defaults it). `Network::invalidate_grids`
+  drops the metadata whenever the lattice is structurally broken —
+  `delete_neurons`, `subnet`/`insert_subnet` (partial paste survives on
+  full copies only), `add_to_group`, every move path (`apply_move`,
+  inspector pos edit, `net.set_pos`, `net.connect`). A broken grid falls
+  back to cubes — never draws a wrong sheet.
+- **Traces** (`0cd0bfd`): per-grid f32 spike-trace buffers,
+  `set_grid_watches` + `grid_traces(tau)` on both backends. CPU accumulates
+  host-side per step; CUDA writes device buffers in `neuron_kernel`
+  (spike → 1.0, else × exp(−dt/τ)) and materializes on demand. Same decay
+  semantics either side; `sim/tests/grid_traces.rs` checks the math and
+  CPU≈CUDA.
+- **Editor**: `editor/src/plane.rs` (renderer-free): `GridView`
+  Auto/Cubes/Planes, `PlaneCfg` (collapse axis + slice/max/mean), lattice↔
+  raster mapping, `quad`, `texel_px`. `GeoSnap::grids` publishes
+  position-derived texel-ordered member lists; `Snap::grid_traces` carries
+  the per-grid f32 buffers. `Gpu` gains plane textures (R32Float,
+  256B-padded rows), a per-texel member-id pick map (R32Uint pick pass →
+  click a texel = select that neuron), `PlaneParamsGpu` quads, and a
+  shared hide-bit buffer that collapses member cubes to degenerates and
+  culls member–member synapses (external synapses stay). Toolbar combo
+  `auto|cubes|planes` (default auto → plane below ~4 px/texel); in auto a
+  selection ≤256 touching the grid flips it back to cubes so editing
+  keeps working. 3D grids get per-group collapse/slice/proj controls in
+  the inspector. `--planes`/`--noise-hz`/`--noise-kick` flags on
+  `--screenshot` exercise the same path headlessly.
+- **Tests**: `plane::tests` (raster ordering, slice/max/mean, argmax pick,
+  quad placement); `worker_publishes_grid_traces` (net → publish →
+  `snap.grid_traces` + `geo.grids`); `million_neuron_grid_plane_draws` —
+  a 1000×1000 grid builds/uploads/draws in <1 s offscreen (the cube path
+  is 36 M instanced verts); net-format round-trip + v1-compat + metadata-
+  invalidation tests.
+- **Verified visually (Xvfb :99)**: 1600-neuron 40×40 grid with live
+  noise — cubes at ~15 px/texel, zoom out → continuous viridis sheet
+  (LOD flip), zoom back in → cubes return. Console eval, run, spike
+  counts all live. Screenshots in `docs/screenshots/`: `lsm_plane.png`
+  (the LSM liquid 8³ max-projected mid-noise), `grid_plane.png` (40×40),
+  `grid_plane_3d.png` (3D projection). Plane *picking* is code-verified
+  (`fs_plane_pick` writes member ids, shared pick path) but was not
+  click-tested in the GUI.
+- Docs: `docs/features.md` (view modes, LOD/selection rules, 3D controls,
+  pick, format v2), `docs/scripting.md` (metadata + invalidation).
+
+Checks: `cargo fmt` clean; `cargo test --workspace` 22 targets pass with
+cuda, `cargo test -p sim --no-default-features` 14 targets pass without.
