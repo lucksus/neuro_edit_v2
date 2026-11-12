@@ -1008,6 +1008,51 @@ pub fn register_api(
                 .to_string())
             },
         );
+        // M2: conduction speed and per-edge delays are script-tunable;
+        // both invalidate so the next build re-derives delay steps.
+        let (s, v) = (sim.clone(), net_version.clone());
+        engine.register_fn(
+            "set_conduction_speed",
+            move |n: &mut NetHandle, speed: f64| -> Result<(), Box<rhai::EvalAltResult>> {
+                if !(speed.is_finite() && speed > 0.0) {
+                    return Err(s_err("conduction speed must be > 0"));
+                }
+                invalidate(&s, &v);
+                let mut g = n.borrow_mut();
+                g.meta.conduction_speed = speed as f32;
+                g.refresh_delays();
+                Ok(())
+            },
+        );
+        let (s, v) = (sim.clone(), net_version.clone());
+        engine.register_fn(
+            "set_delay",
+            move |n: &mut NetHandle,
+                  src: rhai::INT,
+                  tgt: rhai::INT,
+                  ms: f64|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                if !(ms.is_finite() && ms >= 0.0) {
+                    return Err(s_err("delay must be a finite ms >= 0"));
+                }
+                let mut g = n.borrow_mut();
+                let src = nid(src, g.neurons.len())?;
+                let tgt = nid(tgt, g.neurons.len())?;
+                let mut found = false;
+                for sy in g.synapses.iter_mut() {
+                    if sy.src == src && sy.tgt == tgt {
+                        sy.delay_ms = ms as f32;
+                        found = true;
+                    }
+                }
+                drop(g);
+                if !found {
+                    return Err(s_err(format!("no synapse {src} -> {tgt}")));
+                }
+                invalidate(&s, &v);
+                Ok(())
+            },
+        );
     }
     {
         let (s, v) = (sim.clone(), net_version.clone());

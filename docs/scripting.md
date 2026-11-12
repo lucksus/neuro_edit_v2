@@ -69,6 +69,9 @@ net.set_syn_tau_dist("src_g", "tgt_g", mean, sd);// gaussian per edge
 net.set_syn_tau_inh("g", tau);                   // inhibitory-source edges
 net.set_syn_tau_one(src, tgt, tau);              // one edge
 net.set_syn_tau_idx(i, tau);                     // by synapse index
+net.set_delay(src, tgt, ms);                     // per-edge delay (ms)
+net.set_conduction_speed(v);                     // units/ms; recomputes
+                                                 // all delays from distance
 net.syn_tau(src, tgt)                            // -> ms (0 = merged)
 ```
 

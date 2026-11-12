@@ -407,3 +407,22 @@ fn set_kind_reweights_and_defaults() {
     net.set_kind(a, NeuronKind::Inhibitory);
     assert_eq!(net.neuron(a).model.params()[0], 0.03);
 }
+
+/// M2: the tutorial liquid must get real delay structure — with the
+/// default conduction speed (100 u/ms, spacing 60) neighbours sit at
+/// several different step counts instead of one flat step.
+#[test]
+fn tutorial_liquid_has_multiple_delay_steps() {
+    use net_format::{builders, Rng};
+    let mut net = Network::new();
+    let mut rng = Rng::new(1);
+    builders::create_3d_grid(&mut net, "liquid", 6, 6, 6, 60.0, [0.0; 3]);
+    builders::create_connections(&mut net, "liquid", 0.4, 400.0, 5.0, &mut rng);
+    let csr = net.synapse_csr(0.1);
+    let steps: std::collections::BTreeSet<u16> = csr.delay_steps.iter().copied().collect();
+    assert!(
+        steps.len() > 1,
+        "expected several distinct delay steps, got {steps:?}"
+    );
+    assert!(steps.iter().max() > Some(&1));
+}

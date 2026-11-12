@@ -27,8 +27,12 @@ pub const DEFAULT_SYNAPSE_TAU_MS: f32 = 2.0;
 /// Default readout filtered-trace time constant (ms); same rate law.
 pub const DEFAULT_READOUT_TAU_MS: f32 = 2.0;
 
-/// Default conduction speed in um/ms (the original's 5 mm/ms).
-pub const DEFAULT_CONDUCTION_SPEED: f32 = 5000.0;
+/// Default conduction speed in world units per ms. 100 puts a
+/// neighbour at grid spacing 60 six steps (0.6 ms) out at dt 0.1 —
+/// real delay structure instead of the old 5 mm/ms, which flattened
+/// every synapse to one step on any sane grid. Files store their own
+/// speed in `Meta`, so this only affects new networks.
+pub const DEFAULT_CONDUCTION_SPEED: f32 = 100.0;
 
 /// Default simulation step (ms), as in the original.
 pub const DEFAULT_DT_MS: f32 = 0.1;

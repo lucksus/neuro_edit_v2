@@ -1665,6 +1665,17 @@ impl EditorApp {
                 ui.label(format!("rate = {rate:.1} Hz"));
                 ui.separator();
                 ui.label(format!("spikes = {spikes}"));
+                if let Some(g) = &self.geo {
+                    let (mut lo, mut hi) = (u16::MAX, 0u16);
+                    for &d in &g.syn_delay_steps {
+                        lo = lo.min(d);
+                        hi = hi.max(d);
+                    }
+                    if hi > 0 {
+                        ui.separator();
+                        ui.label(format!("delays {lo}..{hi} steps"));
+                    }
+                }
                 if let (Some(g), Some(inst)) = (&self.geo, self.hover) {
                     ui.separator();
                     let label = match crate::view::entity_of(g, inst) {
