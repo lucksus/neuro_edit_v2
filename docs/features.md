@@ -39,10 +39,13 @@ editor                                   # empty network, CUDA backend
 editor --net file.ne2 [--cpu] [--script x.rhai]
 editor --screenshot out.png [--net f.ne2] [--script x.rhai]
       [--after-ms 500] [--width 1280] [--height 800] [--no-synapses]
+      [--planes] [--noise-hz 30 --noise-kick 20]
 ```
 
 `--screenshot` renders one frame headlessly (no X needed — surfaceless
-wgpu) and exits; `--after-ms` simulates first.
+wgpu) and exits; `--after-ms` simulates first. `--planes` renders grid
+groups as activity planes (below); `--noise-hz`/`--noise-kick` drive the
+background Poisson kicks so the shot isn't dark.
 
 ## Editor UI
 
@@ -67,6 +70,8 @@ Run/Pause (play/pause icons), Step 10ms, Step 100ms, Reset, speed slider
 - Modes: **Navigate**, **Insert** (neuron icon), **Connect** (icon), **Move**.
 - `plane x-z / x-y / y-z`: the grid plane + movement plane for drag ops.
 - Checkboxes: `synapses`, `grid`, `console`, `plots`, `inspector`, `script`.
+- Grid render combo `auto|cubes|planes`: how groups with lattice metadata
+  draw (see *Grid activity planes*).
 
 ### Viewport
 
@@ -86,6 +91,36 @@ Run/Pause (play/pause icons), Step 10ms, Step 100ms, Reset, speed slider
 - Synapses render as lines with density-aware alpha; below ~3 px neuron
   spacing a deterministic keep-every-Nth LOD thins them (screen-space, so
   zooming in restores detail). Sparse networks are unaffected.
+
+#### Grid activity planes
+
+Groups created by `create_2d_grid`/`create_3d_grid` carry persistent
+lattice metadata (`Group::grid`). Such a group can render as **one
+textured quad** instead of one cube per neuron:
+
+- Each texel shows the member neuron's spike trace (1.0 on spike, exp
+  decay τ ≈ 20 ms) in a viridis colormap — one draw call per group.
+- The toolbar combo picks `cubes` (always instanced cubes), `planes`
+  (always the sheet), or `auto`: per-grid zoom LOD that switches to the
+  plane once texels shrink below ~4 px on screen. Zooming back in returns
+  the cubes for editing — and so does a small selection (≤256) touching
+  the grid's members, so selected neurons stay directly editable in
+  auto mode.
+- While a group is plane-rendered its member cubes and member–member
+  synapses are culled in the vertex shader (the sheet already shows that
+  wiring); synapses to outside neurons stay.
+- Picking still lands on individual neurons: the plane's pick pass writes
+  the member id of the clicked texel, so selection/inspect/move work on
+  the neuron, not the sheet.
+- 3D lattices get a per-group *collapse* setting in the inspector (Groups
+  section): which lattice dim collapses and whether the plane shows a
+  `slice` (with index), the `max` or the `mean` projection along it.
+- Moving/deleting/copying part of a lattice drops the metadata — the
+  group falls back to cubes instead of drawing a wrong sheet.
+
+A 1,000,000-neuron `1000×1000` grid is a regression test
+(`editor/tests/big_scene.rs`): build + upload + draw complete in well
+under a second; the cube path would not fit comfortably.
 
 #### Context menus (right-click)
 
@@ -121,8 +156,12 @@ mode hints and connect-mode progress.
 exc/inh kind, name), synapses (src, tgt, weight, delay — distance-based),
 groups, inputs (named stimulus → weighted target list), samples (named
 (t,value) series), readouts (name, unit ids, trained weights), and embedded
-scripts. `.ne2` = `NE2\0` magic + u32 version + bincode payload;
-`.json` is the same model through serde — both readable by either binary.
+scripts. Groups may additionally carry `grid` lattice metadata
+(`dims`, `origin`, `spacing`, `axes`) written by the grid builders — the
+fuel for the activity-plane renderer.
+`.ne2` = `NE2\0` magic + u32 version + bincode payload; version 2 adds
+the grid field, version-1 files still load (grids come out empty) and
+JSON simply defaults the absent field — both readable by either binary.
 
 ## Simulation semantics
 
@@ -142,8 +181,11 @@ One `Network` is shared by everything. In the editor a **worker thread**
 owns `Network` + `Sim` + Rhai env; the UI thread sends `Cmd` messages
 (`EditNet`, `Eval`, `RunMs`, `AutoRun`, `SetBackend`, `SetDtMs`,
 `SetNoise`, `Reset`, `Abort`, …) over a channel and reads immutable
-snapshots (geometry, v, activity, spikes, readouts) published under an
-`RwLock`. Long `sim.run` calls chunk every ~200 steps so pause/abort stays
+snapshots (geometry, v, activity, spikes, readouts, per-grid-group spike
+traces) published under an `RwLock`. Long `sim.run` calls chunk every
+~200 steps so pause/abort stays
 responsive. Rendering: one instanced draw for all neuron cubes, pull-based
-line draws for synapses/overlays, a full-resolution ID pass for picking.
+line draws for synapses/overlays, a full-resolution ID pass for picking,
+and one textured-quad draw per grid group (the CPU publishes the f32
+trace buffer; the 3D→2D slice/projection happens host-side on upload).
 Measured 97,336 neurons + 1.1 M synapses ≈ 4.4 ms/frame on an RTX 3090.

@@ -61,6 +61,13 @@ net.set_synapse_weights("group", mean, sd);      // gaussian on existing synapse
 net.set_exc_inh("group", frac);                  // frac → inhibitory kind
 ```
 
+Grid builders record persistent lattice metadata on the group (member
+order = lattice order: `(i2·dims0 + i0)·dims1 + i1`). The editor uses it
+for the activity-plane view — the sheet only exists while the member set
+still matches the lattice, so `set_pos`, `delete_neuron(s)`,
+`add_to_group` or a partial subnet paste on a grid member transparently
+drops the metadata and the group draws as cubes again.
+
 ### Neuron properties
 
 ```rhai

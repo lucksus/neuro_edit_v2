@@ -3,3 +3,6 @@
 docs/screenshots/*.png
 !docs/screenshots/editor_lsm.png
 !docs/screenshots/liquid_97k.png
+!docs/screenshots/grid_plane.png
+!docs/screenshots/grid_plane_3d.png
+!docs/screenshots/lsm_plane.png
