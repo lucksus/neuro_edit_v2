@@ -2357,6 +2357,12 @@ impl EditorApp {
             .default_size([640.0, 520.0])
             .default_pos([90.0, 60.0])
             .show(ctx, |ui| {
+                // horizontal children get an unbounded max_rect in x, so the
+                // body column must be ALLOCATED an explicit rect — otherwise
+                // ScrollArea grabs the infinite row width, the window grows
+                // every frame, and wrapped labels still never wrap.
+                let body_w = (ui.clip_rect().width() - 110.0 - 40.0).clamp(80.0, 480.0);
+                let body_h = ui.available_height().max(60.0);
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.set_width(110.0);
@@ -2365,10 +2371,16 @@ impl EditorApp {
                         }
                     });
                     ui.separator();
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        let page = self.manual_page.min(crate::manual::PAGES.len() - 1);
-                        crate::manual::render(ui, crate::manual::PAGES[page].md);
-                    });
+                    // allocate_ui_with_layout (not allocate_ui): plain
+                    // allocate_ui inherits this row's horizontal layout and
+                    // the scroll column would lay its widgets out sideways.
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(body_w, body_h),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            crate::manual::body_scroll(ui, body_w, self.manual_page);
+                        },
+                    );
                 });
             });
         self.show_manual = open;

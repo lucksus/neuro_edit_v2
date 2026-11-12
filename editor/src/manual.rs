@@ -10,6 +10,18 @@ pub struct Page {
     pub md: &'static str,
 }
 
+/// The manual's right-hand body column: a bounded-width scroll area. Without
+/// `set_max_width` the parent `ui.horizontal` hands down an infinite x bound
+/// and prose never wraps (runs off the window's right edge).
+pub fn body_scroll(ui: &mut egui::Ui, width: f32, page: usize) {
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.set_max_width(width.max(80.0));
+            render(ui, PAGES[page.min(PAGES.len() - 1)].md);
+        });
+}
+
 pub const PAGES: &[Page] = &[
     Page {
         title: "Getting started",
@@ -54,61 +66,69 @@ pub fn render(ui: &mut egui::Ui, md: &str) {
             _ => (0, line),
         };
         let bullet = rest.strip_prefix("- ").or_else(|| rest.strip_prefix("* "));
-        ui.horizontal_wrapped(|ui| {
-            if bullet.is_some() {
-                ui.label("• ");
+        let text = bullet.unwrap_or(rest);
+        match h {
+            1 => {
+                ui.add(egui::Label::new(egui::RichText::new(text).heading()).wrap());
             }
-            let text = bullet.unwrap_or(rest);
-            match h {
-                1 => {
-                    ui.add(egui::Label::new(egui::RichText::new(text).heading()).wrap());
-                }
-                2 | 3 => {
-                    ui.add(egui::Label::new(egui::RichText::new(text).strong()).wrap());
-                }
-                _ => {
-                    rich_line(ui, text);
-                }
+            2 | 3 => {
+                ui.add(egui::Label::new(egui::RichText::new(text).strong()).wrap());
             }
-        });
+            _ => {
+                rich_line(ui, text, bullet.is_some());
+            }
+        }
     }
 }
 
-/// Split `**bold**` / `` `code` `` spans into RichText fragments.
-/// Each fragment label wraps, so a long paragraph can't run off the
-/// window edge (`horizontal_wrapped` gives a wrapped label the rest
-/// of the row and it breaks there).
-fn rich_line(ui: &mut egui::Ui, s: &str) {
+/// Split `**bold**` / `` `code` `` spans into ONE wrapped LayoutJob.
+/// A single job wraps as a whole paragraph; multiple wrapping Labels
+/// inside `horizontal_wrapped` get squeezed into the row's leftover
+/// sliver and wrap into word-per-line columns instead.
+fn rich_line(ui: &mut egui::Ui, s: &str, bullet: bool) {
+    let mut job = egui::text::LayoutJob::default();
+    let body =
+        egui::TextFormat::simple(egui::FontId::proportional(14.0), ui.visuals().text_color());
+    let mut bold_f = body.clone();
+    bold_f.color = ui.visuals().strong_text_color();
+    let mut code_f = body.clone();
+    code_f.font_id = egui::FontId::monospace(13.0);
+    code_f.background = ui.visuals().code_bg_color;
+    if bullet {
+        job.append("\u{2022} ", 0.0, body.clone());
+    }
     let mut buf = String::new();
     let mut bold = false;
     let mut code = false;
-    let flush = |ui: &mut egui::Ui, buf: &mut String, bold: bool, code: bool| {
-        if buf.is_empty() {
-            return;
-        }
-        let mut t = egui::RichText::new(std::mem::take(buf));
-        if bold {
-            t = t.strong();
-        }
-        if code {
-            t = t.monospace();
-        }
-        ui.add(egui::Label::new(t).wrap());
-    };
     let mut chars = s.chars().peekable();
+    macro_rules! flush {
+        () => {
+            if !buf.is_empty() {
+                let f = if code {
+                    code_f.clone()
+                } else if bold {
+                    bold_f.clone()
+                } else {
+                    body.clone()
+                };
+                job.append(&std::mem::take(&mut buf), 0.0, f);
+            }
+        };
+    }
     while let Some(c) = chars.next() {
         if c == '*' && chars.peek() == Some(&'*') {
             chars.next();
-            flush(ui, &mut buf, bold, code);
+            flush!();
             bold = !bold;
         } else if c == '`' {
-            flush(ui, &mut buf, bold, code);
+            flush!();
             code = !code;
         } else {
             buf.push(c);
         }
     }
-    flush(ui, &mut buf, bold, code);
+    flush!();
+    ui.add(egui::Label::new(job).wrap());
 }
 
 #[cfg(test)]
@@ -151,25 +171,47 @@ mod layout_tests {
             )),
             ..Default::default()
         };
-        let md = "One deliberately long body sentence that cannot possibly fit on a single row at this narrow window width, so wrapping is the only correct outcome for the renderer to choose.";
-        let mut out = ctx.run(input.clone(), |ctx| {
-            egui::Window::new("Manual").show(ctx, |ui| render(ui, md));
-        });
-        // a second frame so the window has laid out and painted content
-        out = ctx.run(input, |ctx| {
-            egui::Window::new("Manual").show(ctx, |ui| render(ui, md));
-        });
-        let mut widest = 0.0f32;
-        for shape in &out.shapes {
-            if let egui::epaint::Shape::Text(t) = &shape.shape {
-                widest = widest.max(t.galley.size().x);
+        // Mirror app::manual_window: a `ui.horizontal` (unbounded child x!)
+        // around the shared `body_scroll` column, inside a Window.
+        let frame = |page: usize| {
+            ctx.run(input.clone(), |ctx| {
+                egui::Window::new("Manual").show(ctx, |ui| {
+                    let w = (ui.clip_rect().width() - 110.0 - 40.0).max(80.0);
+                    let h = ui.available_height().max(60.0);
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width(110.0);
+                        });
+                        ui.separator();
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(w, h),
+                            egui::Layout::top_down(egui::Align::LEFT),
+                            |ui| body_scroll(ui, w, page),
+                        );
+                    });
+                });
+            })
+        };
+        for page in 0..PAGES.len() {
+            let _ = frame(page); // first frame: layout pass
+            let out = frame(page); // second frame: painted content
+            let mut widest = 0.0f32;
+            for shape in &out.shapes {
+                if let egui::epaint::Shape::Text(t) = &shape.shape {
+                    widest = widest.max(t.galley.size().x);
+                }
             }
+            assert!(
+                widest > 0.0,
+                "no text was painted for {}",
+                PAGES[page].title
+            );
+            assert!(
+                widest <= 340.0,
+                "{}: a line painted {widest}px wide in a 360px window — text is not wrapping",
+                PAGES[page].title
+            );
         }
-        assert!(widest > 0.0, "no text was painted at all");
-        assert!(
-            widest <= 340.0,
-            "a body line painted {widest}px wide in a 360px window — text is not wrapping"
-        );
     }
     /// Any non-ASCII char in a user-visible string must exist in the bundled
     /// fonts, or egui paints a tofu box. Manual prose renders proportional,
@@ -229,4 +271,55 @@ mod layout_tests {
         );
     }
 
+    #[test]
+    fn probe_window_widths() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1440.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        for i in 0..3 {
+            let out = ctx.run(input.clone(), |ctx| {
+                egui::Window::new("Manual")
+                    .default_size([640.0, 520.0])
+                    .default_pos([90.0, 60.0])
+                    .show(ctx, |ui| {
+                        let body_w = (ui.clip_rect().width() - 150.0).clamp(80.0, 480.0);
+                        let body_h = ui.available_height().max(60.0);
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.set_width(110.0);
+                                for p in PAGES {
+                                    ui.selectable_label(false, p.title);
+                                }
+                            });
+                            ui.separator();
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(body_w, body_h),
+                                egui::Layout::top_down(egui::Align::LEFT),
+                                |ui| body_scroll(ui, body_w, 0),
+                            );
+                        });
+                    });
+            });
+            let mut widest = 0.0f32;
+            for shape in &out.shapes {
+                if let egui::epaint::Shape::Text(t) = &shape.shape {
+                    widest = widest.max(t.galley.size().x);
+                }
+            }
+            let mut clipr = None;
+            for shape in &out.shapes {
+                if let egui::epaint::Shape::Text(t) = &shape.shape {
+                    if t.galley.size().x >= widest {
+                        clipr = Some(shape.clip_rect);
+                    }
+                }
+            }
+            eprintln!("frame{i}: widest_text={widest:.0} clip={clipr:?}");
+        }
+    }
 }
