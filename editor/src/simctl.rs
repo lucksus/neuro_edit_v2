@@ -29,6 +29,8 @@ pub struct SimCtl {
     pub abort: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     pump: Option<JoinHandle<()>>,
+    /// Remote only: kills the socket so the pump's `recv` unblocks.
+    remote_shutdown: Option<std::net::TcpStream>,
 }
 
 impl SimCtl {
@@ -83,6 +85,7 @@ impl SimCtl {
             abort,
             worker: Some(worker),
             pump: Some(pump),
+            remote_shutdown: None,
         };
         // hydrate (the worker also broadcasts an initial Geo, but a
         // targeted Hello/Status keeps the handshake uniform with remote)
@@ -101,6 +104,7 @@ impl SimCtl {
         let conn = server::ClientConn::connect(addr)
             .map_err(|e| anyhow::anyhow!("connect ws://{addr}: {e}"))?;
         let (mut wsend, mut wrecv) = conn.into_split()?;
+        let remote_shutdown = wrecv.shutdown_stream().ok();
 
         let (tx, rx) = mpsc::channel::<(u64, ClientMsg)>();
         let writer = std::thread::Builder::new()
@@ -134,6 +138,7 @@ impl SimCtl {
             abort,
             worker: Some(writer),
             pump: Some(reader),
+            remote_shutdown,
         };
         ctl.send(ClientMsg::Hello {
             proto: proto::PROTO_VERSION,
@@ -172,6 +177,11 @@ impl Drop for SimCtl {
         let _ = self.tx.send((0, ClientMsg::Bye));
         if let Some(h) = self.worker.take() {
             let _ = h.join();
+        }
+        // remote: the server never closes our socket — kill it so the
+        // reader's blocking recv returns an error and exits
+        if let Some(s) = &self.remote_shutdown {
+            let _ = s.shutdown(std::net::Shutdown::Both);
         }
         // worker gone → event channel closed → pump exits
         if let Some(h) = self.pump.take() {

@@ -134,6 +134,36 @@ fn ws_second_client_sees_edits() {
     w.srv.shutdown();
 }
 
+/// A client saying Bye (editor quit) must not kill the shared worker —
+/// the server swallows it; only `Server::shutdown` injects Bye into the
+/// command channel.
+#[test]
+fn ws_bye_does_not_kill_other_clients() {
+    let mut net = Network::new();
+    net.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
+    let w = start(net, None, 1);
+    let mut c1 = w.client();
+    let mut c2 = w.client();
+    hydrate(&mut c1);
+    hydrate(&mut c2);
+
+    c1.send(&ClientMsg::Bye).unwrap();
+    drop(c1); // socket close = the real leave signal
+    std::thread::sleep(Duration::from_millis(200));
+
+    // client 2's eval still runs on the live worker
+    c2.send(&ClientMsg::Eval {
+        code: "print(\"still alive\")".into(),
+    })
+    .unwrap();
+    let msgs = until(
+        &mut c2,
+        |m| matches!(m, ServerMsg::Console(s) if s.contains("still alive")),
+    );
+    assert!(!msgs.is_empty());
+    w.srv.shutdown();
+}
+
 #[test]
 fn ws_stale_edit_refused() {
     let mut net = Network::new();

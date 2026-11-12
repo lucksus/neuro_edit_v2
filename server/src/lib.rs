@@ -164,11 +164,15 @@ fn handle_client(
         }
     });
 
-    // inbound: bincode frames → the worker
+    // inbound: bincode frames → the worker. `Bye` is swallowed: a
+    // client leaving must not stop the shared worker — `Server::shutdown`
+    // injects Bye straight into cmd_tx, and the socket close cleans this
+    // client up either way.
     let r = (|| -> anyhow::Result<()> {
         loop {
             match w_read.read() {
                 Ok(tungstenite::Message::Binary(b)) => match proto::decode::<ClientMsg>(&b) {
+                    Ok(ClientMsg::Bye) => {}
                     Ok(m) => {
                         if cmd_tx.send((id, m)).is_err() {
                             return Ok(()); // worker gone
@@ -266,6 +270,15 @@ impl WsWriter {
 }
 
 impl WsReader {
+    /// A second handle to the socket for `shutdown()` — lets an owner
+    /// unblock a `recv()` parked on another thread (drop/shutdown paths).
+    pub fn shutdown_stream(&self) -> std::io::Result<std::net::TcpStream> {
+        use tungstenite::stream::MaybeTlsStream;
+        match self.0.get_ref() {
+            MaybeTlsStream::Plain(s) => s.try_clone(),
+            _ => Err(std::io::Error::other("non-TCP websocket")),
+        }
+    }
     /// Blocking read; `Err` once the server drops the connection.
     pub fn recv(&mut self) -> anyhow::Result<ServerMsg> {
         loop {
