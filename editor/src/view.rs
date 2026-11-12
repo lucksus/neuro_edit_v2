@@ -186,9 +186,6 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
             let now_ms = app.ctl.shared.read().unwrap().snap.time_ms;
             let sel: Vec<u32> = app.selection.iter().copied().collect();
             let mut pvs = Vec::new();
-            if app.show_grid {
-                scene::floor_grid(app.camera.target, app.camera.floor_y, &mut pvs);
-            }
             if app.mode == Mode::Move || app.mode == Mode::Insert {
                 scene::work_plane(app.camera.target, app.plane, &mut pvs);
             }
@@ -228,6 +225,7 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
                     pv_count: pv_n,
                     part_count: np,
                     show_syn,
+                    show_grid: app.show_grid,
                     planes_on,
                 });
                 gpu.render_offscreen(w_px, h_px);

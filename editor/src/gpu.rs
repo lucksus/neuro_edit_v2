@@ -140,6 +140,7 @@ pub struct Gpu {
     pip_pick: wgpu::RenderPipeline,
     pip_plane: wgpu::RenderPipeline,
     pip_plane_pick: wgpu::RenderPipeline,
+    pip_grid: wgpu::RenderPipeline,
     plane_bgl: wgpu::BindGroupLayout,
     plane_params: wgpu::Buffer,
     pip_syn: wgpu::RenderPipeline,
@@ -178,6 +179,7 @@ pub struct DrawParams {
     pub pv_count: u32,
     pub part_count: u32,
     pub show_syn: bool,
+    pub show_grid: bool,
     /// Per grid index (`scene.planes` order): draw the activity plane.
     /// `None` draws every plane in the scene.
     pub planes_on: Option<Vec<bool>>,
@@ -302,7 +304,8 @@ impl Gpu {
             &[(
                 0,
                 wgpu::BufferBindingType::Uniform,
-                wgpu::ShaderStages::VERTEX,
+                // FRAGMENT too: the grid shader reads cam_pos for its fade.
+                wgpu::ShaderStages::VERTEX_FRAGMENT,
             )],
         );
         let bgl_part = bgl(
@@ -432,6 +435,17 @@ impl Gpu {
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             &pl_plane,
+            wgpu::PrimitiveTopology::TriangleList,
+            None,
+        );
+        // Shader floor grid: one camera-following quad, lines drawn
+        // analytically in fs_grid (fwidth AA + distance fade).
+        let pip_grid = mk(
+            "grid",
+            "vs_grid",
+            "fs_grid",
+            &[Some(col(true))],
+            &pl_pv,
             wgpu::PrimitiveTopology::TriangleList,
             None,
         );
@@ -578,6 +592,7 @@ impl Gpu {
             pip_pick,
             pip_plane,
             pip_plane_pick,
+            pip_grid,
             plane_bgl,
             plane_params,
             pip_syn,
@@ -1053,7 +1068,7 @@ impl Gpu {
                 alpha_mul,
                 keep as f32,
                 hover.map(|h| h + 1).unwrap_or(0) as f32,
-                0.0,
+                cam.floor_y,
             ],
             preview: [pd[0], pd[1], pd[2], pa],
         };
@@ -1303,6 +1318,16 @@ impl Gpu {
         draw_syn: bool,
     ) {
         let Some(sc) = &self.scene else { return };
+        let show_grid = self
+            .draw_params
+            .as_ref()
+            .map(|p| p.show_grid)
+            .unwrap_or(true);
+        if show_grid {
+            rpass.set_pipeline(&self.pip_grid);
+            rpass.set_bind_group(0, &self.pv_bg, &[]);
+            rpass.draw(0..6, 0..1);
+        }
         if draw_syn && sc.syn_verts > 0 {
             rpass.set_pipeline(&self.pip_syn);
             for (bg, verts) in &self.syn_bgs {

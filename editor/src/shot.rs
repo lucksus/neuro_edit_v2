@@ -172,9 +172,8 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
     cam.clamp_above_floor();
     gpu.write_cam(&cam, w as f32 / h as f32, h as f32, 0.0, None, None);
 
-    // overlay: floor grid + group boxes
+    // overlay: group boxes (the floor grid is the shader-drawn quad)
     let mut pvs = Vec::new();
-    scene::floor_grid(cam.target, cam.floor_y, &mut pvs);
     scene::group_boxes(&geo, &mut pvs);
     gpu.write_pv(&pvs);
     let pv_count = pvs.len() as u32;
@@ -190,6 +189,7 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
         pv_count,
         part_count,
         show_syn: o.show_syn,
+        show_grid: true,
         planes_on,
     });
 

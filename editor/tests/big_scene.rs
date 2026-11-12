@@ -131,6 +131,7 @@ fn million_neuron_grid_plane_draws() {
         pv_count: 0,
         part_count: 0,
         show_syn: false,
+        show_grid: true,
         planes_on: None,
     });
     gpu.render_offscreen(1280, 800);

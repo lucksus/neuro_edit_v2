@@ -7,7 +7,6 @@ use glam::Vec3;
 use crate::gpu::{Part, Pv};
 use crate::snap::GeoSnap;
 
-const GRID_COL: [f32; 4] = [0.28, 0.32, 0.38, 0.8];
 const PLANE_COL: [f32; 4] = [0.35, 0.5, 0.6, 0.5];
 const GROUP_COL: [f32; 4] = [0.9, 0.8, 0.3, 0.6];
 const CONN_COL: [f32; 4] = [1.0, 0.9, 0.2, 1.0];
@@ -23,28 +22,6 @@ pub fn pv(pos: [f32; 3], color: [f32; 4]) -> Pv {
 fn line(out: &mut Vec<Pv>, a: Vec3, b: Vec3, c: [f32; 4]) {
     out.push(pv(a.into(), c));
     out.push(pv(b.into(), c));
-}
-
-/// Floor grid on x-z (original: step 20, ±1000) centred under the camera
-/// target so it stays useful at any zoom; `y` is the net's floor
-/// (`GeoSnap::floor_y`), not always 0.
-pub fn floor_grid(center: Vec3, y: f32, out: &mut Vec<Pv>) {
-    let step = 20.0f32;
-    let ext = 1000.0f32;
-    let x0 = (center.x / step).round() * step - ext;
-    let z0 = (center.z / step).round() * step - ext;
-    let x1 = (center.x / step).round() * step + ext;
-    let z1 = (center.z / step).round() * step + ext;
-    let mut x = x0;
-    while x <= x1 {
-        line(out, Vec3::new(x, y, z0), Vec3::new(x, y, z1), GRID_COL);
-        x += step;
-    }
-    let mut z = z0;
-    while z <= z1 {
-        line(out, Vec3::new(x0, y, z), Vec3::new(x1, y, z), GRID_COL);
-        z += step;
-    }
 }
 
 /// Work-plane grid near the target (move/insert reference plane).

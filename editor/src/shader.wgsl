@@ -275,6 +275,56 @@ fn fs_blit(o: BlitOut) -> @location(0) vec4f {
     return textureSample(scene_t, scene_s, o.uv);
 }
 
+// ---------- anti-aliased floor grid ----------
+//
+// One camera-following quad at y = cam.lod.w; the fragment shader draws
+// minor (20u) and major (200u) lines analytically with fwidth-based AA,
+// fading out with distance — no 1px aliasing, no moiré, no hard tile edge.
+
+struct GridOut {
+    @builtin(position) clip: vec4f,
+    @location(0) wp: vec3f,
+}
+
+const GRID_EXT: f32 = 3000.0;
+const GRID_QUAD: array<vec2f, 6> = array<vec2f, 6>(
+    vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0),
+    vec2f(-1.0, -1.0), vec2f(1.0, 1.0), vec2f(-1.0, 1.0),
+);
+
+@vertex
+fn vs_grid(@builtin(vertex_index) vi: u32) -> GridOut {
+    var o: GridOut;
+    let c = GRID_QUAD[vi] * GRID_EXT;
+    // The quad follows the camera in x/z (lines come from world coords,
+    // so the pattern doesn't swim).
+    let wp = vec3f(cam.cam_pos.x + c.x, cam.lod.w, cam.cam_pos.z + c.y);
+    o.clip = cam.view_proj * vec4f(wp, 1.0);
+    o.wp = wp;
+    return o;
+}
+
+fn grid_line(coord: vec2f) -> f32 {
+    // AA line intensity in [0,1] — fwidth widens the line to a screen pixel
+    // so far cells dissolve into a smooth glow instead of moiré.
+    let g = abs(fract(coord - vec2f(0.5)) - vec2f(0.5)) / fwidth(coord);
+    return 1.0 - min(min(g.x, g.y), 1.0);
+}
+
+@fragment
+fn fs_grid(o: GridOut) -> @location(0) vec4f {
+    let minor = grid_line(o.wp.xz / 20.0);
+    let major = grid_line(o.wp.xz / 200.0);
+    let dist = distance(o.wp.xz, cam.cam_pos.xz);
+    let fade = 1.0 - smoothstep(GRID_EXT * 0.55, GRID_EXT * 0.95, dist);
+    let col = mix(vec3f(0.24, 0.27, 0.32), vec3f(0.42, 0.46, 0.55), major);
+    let alpha = (minor * 0.45 + major * 0.4) * fade;
+    if alpha < 0.004 {
+        discard;
+    }
+    return vec4f(col, alpha);
+}
+
 // ---------- grid activity planes (one quad per grid group) ----------
 //
 // Each plane is a textured quad: the app reduces the grid's f32 spike
