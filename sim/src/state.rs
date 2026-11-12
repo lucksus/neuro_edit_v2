@@ -3,7 +3,7 @@
 
 use net_format::{Network, SynCsr};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SimConfig {
     /// Integration step, ms. Original default: 0.1.
     pub dt_ms: f32,

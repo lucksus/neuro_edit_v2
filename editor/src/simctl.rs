@@ -232,6 +232,23 @@ fn worker(
             published_geo_version = gv;
         }
 
+        // ---- cfg + backend mirror: the toolbar reads the worker's live
+        // values so `sim.set_dt`/`sim.set_noise` script calls show up ----
+        {
+            let cfg_now = env.cfg.borrow().clone();
+            let bk_now = env.backend.get();
+            if shared
+                .read()
+                .map(|w| w.cfg != cfg_now || w.backend != bk_now)
+                .unwrap_or(false)
+            {
+                if let Ok(mut w) = shared.write() {
+                    w.cfg = cfg_now;
+                    w.backend = bk_now;
+                }
+            }
+        }
+
         // ---- commands ----
         let cmd = if running {
             rx.try_recv().ok()

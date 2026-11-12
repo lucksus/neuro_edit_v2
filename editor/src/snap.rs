@@ -107,6 +107,11 @@ pub struct Shared {
     pub busy: bool,
     /// Console output lines (print + results + errors + log).
     pub console: VecDeque<String>,
+    /// Live sim configuration — the toolbar reads these so script calls
+    /// (`sim.set_dt`, `sim.set_noise`) show up instead of stale values.
+    pub cfg: sim::SimConfig,
+    /// Live backend choice on the worker.
+    pub backend: sim::BackendKind,
     /// Worker noticed the backend failed and fell back.
     pub notice: Option<String>,
     /// JSON subnet staged by a copy/cut command for the UI to put on the
@@ -124,6 +129,8 @@ impl Default for Shared {
             sim_built: false,
             busy: false,
             console: VecDeque::with_capacity(512),
+            cfg: sim::SimConfig::default(),
+            backend: sim::BackendKind::Cpu,
             notice: None,
             clipboard: None,
         }

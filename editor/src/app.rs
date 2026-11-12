@@ -77,7 +77,11 @@ pub struct EditorApp {
     pub recent: VecDeque<String>,
 
     speed: f32,
-    speed_actual: f32,
+    /// Best steps/s the machine has reached — shown as `(max xN)` next to
+    /// the requested speed so "how fast can this go" is one display.
+    speed_peak: f32,
+    /// Backend the worker reports (request combo selected text).
+    backend: sim::BackendKind,
     running: bool,
     sim_built: bool,
     busy: bool,
@@ -251,7 +255,8 @@ impl EditorApp {
             plane_geo: 0,
             plane_cfgs_last: Vec::new(),
             speed: 1.0,
-            speed_actual: 0.0,
+            speed_peak: 0.0,
+            backend: sim::BackendKind::Cpu,
             running: false,
             sim_built: false,
             busy: false,
@@ -455,7 +460,7 @@ impl EditorApp {
 
     /// Pull fresh shared state (geometry + snapshot) into the UI.
     fn sync_shared(&mut self, gpu: &mut Gpu) {
-        let (geo_new, snap, running, sim_built, busy, net_gen) = {
+        let (geo_new, snap, running, sim_built, busy, net_gen, cfg, backend) = {
             let sh = self.ctl.shared.read().unwrap();
             (
                 sh.geo.clone(),
@@ -464,8 +469,16 @@ impl EditorApp {
                 sh.sim_built,
                 sh.busy,
                 sh.net_gen,
+                sh.cfg.clone(),
+                sh.backend,
             )
         };
+        // Toolbar widgets read the worker's live cfg so script-side
+        // `sim.set_dt`/`sim.set_noise`/`sim.set_backend` calls show up.
+        self.dt_ms = cfg.dt_ms;
+        self.noise_hz = cfg.noise_rate_hz;
+        self.noise_kick = cfg.noise_kick_mv;
+        self.backend = backend;
         if net_gen != self.last_net_gen {
             self.last_net_gen = net_gen;
             self.reset_net_state();
@@ -488,7 +501,7 @@ impl EditorApp {
         }
         if snap.seq != self.last_snap_seq {
             self.last_snap_seq = snap.seq;
-            self.speed_actual = snap.steps_per_sec;
+            self.speed_peak = self.speed_peak.max(snap.steps_per_sec);
             self.activity = snap.activity.to_vec();
             self.grid_traces = snap.grid_traces.clone();
             self.input_values = snap.input_values.clone();
@@ -849,17 +862,27 @@ impl EditorApp {
                     self.raster.clear();
                     self.v_hist.clear();
                 }
-                ui.label("speed");
                 if ui
                     .add(egui::Slider::new(&mut self.speed, 0.05..=20.0).logarithmic(true))
                     .changed()
                 {
                     self.send(Cmd::SetSpeed(self.speed));
                 }
+                // One speed display: requested realtime factor + the best
+                // this machine has reached (peak steps/s → realtime).
+                let max_x = self.speed_peak * self.dt_ms / 1000.0;
+                ui.label(if max_x > 0.05 {
+                    format!("x{:.1} realtime (max x{:.0})", self.speed, max_x)
+                } else {
+                    format!("x{:.1} realtime", self.speed)
+                });
                 ui.separator();
                 ui.label("backend");
                 egui::ComboBox::from_id_salt("backend")
-                    .selected_text("cuda/cpu")
+                    .selected_text(match self.backend {
+                        sim::BackendKind::Cuda => "cuda",
+                        sim::BackendKind::Cpu => "cpu",
+                    })
                     .show_ui(ui, |ui| {
                         if ui.button("cuda").clicked() {
                             self.send(Cmd::SetBackend(sim::BackendKind::Cuda));
@@ -964,14 +987,9 @@ impl EditorApp {
     }
 
     fn status_bar(&mut self, ctx: &egui::Context) {
-        let (t, rate, spikes, sps) = {
+        let (t, rate, spikes) = {
             let sh = self.ctl.shared.read().unwrap();
-            (
-                sh.snap.time_ms,
-                sh.snap.rate_hz,
-                sh.snap.spikes_total,
-                sh.snap.steps_per_sec,
-            )
+            (sh.snap.time_ms, sh.snap.rate_hz, sh.snap.spikes_total)
         };
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -980,8 +998,6 @@ impl EditorApp {
                 ui.label(format!("rate = {rate:.1} Hz"));
                 ui.separator();
                 ui.label(format!("spikes = {spikes}"));
-                ui.separator();
-                ui.label(format!("sim speed = {sps:.0} steps/s"));
                 if let (Some(g), Some(inst)) = (&self.geo, self.hover) {
                     ui.separator();
                     let label = match crate::view::entity_of(g, inst) {
