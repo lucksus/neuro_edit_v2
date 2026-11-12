@@ -881,15 +881,22 @@ pub fn register_api(
         let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
             "set_syn_tau_one",
-            move |n: &mut NetHandle, src: rhai::INT, tgt: rhai::INT, tau: Dynamic| {
+            move |n: &mut NetHandle,
+                  src: rhai::INT,
+                  tgt: rhai::INT,
+                  tau: Dynamic|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                let len = n.borrow().neurons.len();
+                // Validate before casting — a negative id would wrap.
+                let (src, tgt) = (nid(src, len)?, nid(tgt, len)?);
                 invalidate(&s, &v);
                 let mut nn = n.borrow_mut();
-                let (src, tgt) = (src as u32, tgt as u32);
                 for syn in &mut nn.synapses {
                     if syn.src == src && syn.tgt == tgt {
                         syn.tau_ms = (d_f64(&tau) as f32).max(0.0);
                     }
                 }
+                Ok(())
             },
         );
     }
@@ -1120,14 +1127,23 @@ pub fn register_api(
             Ok(n.borrow().neuron(id).name.clone())
         },
     );
-    engine.register_fn(
-        "set_neuron_name",
-        |n: &mut NetHandle, id: rhai::INT, name: &str| -> Result<(), Box<rhai::EvalAltResult>> {
-            let id = nid(id, n.borrow().neurons.len())?;
-            n.borrow_mut().neuron_mut(id).name = name.to_string();
-            Ok(())
-        },
-    );
+    {
+        let v = net_version.clone();
+        engine.register_fn(
+            "set_neuron_name",
+            move |n: &mut NetHandle,
+                  id: rhai::INT,
+                  name: &str|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                let id = nid(id, n.borrow().neurons.len())?;
+                // Names don't change the sim — bump only so the editor
+                // sees the rename on its next Geo delta.
+                bump(&v);
+                n.borrow_mut().neuron_mut(id).name = name.to_string();
+                Ok(())
+            },
+        );
+    }
     engine.register_fn("neuron", |n: &mut NetHandle, name: &str| -> rhai::INT {
         n.borrow()
             .neuron_index(name)
@@ -1154,21 +1170,29 @@ pub fn register_api(
             .map(|g| Dynamic::from(g.name.clone()))
             .collect()
     });
-    engine.register_fn(
-        "add_to_group",
-        |n: &mut NetHandle, g: &str, ids: rhai::Array| -> Result<(), Box<rhai::EvalAltResult>> {
-            let len = n.borrow().neurons.len();
-            let ids: Vec<u32> = ids
-                .iter()
-                .map(|d| nid(d_i64(d), len))
-                .collect::<Result<_, _>>()?;
-            let mut b = n.borrow_mut();
-            let gi = b.add_group(g);
-            b.groups[gi].members.extend(ids);
-            b.invalidate_grids();
-            Ok(())
-        },
-    );
+    {
+        let (s, v) = (sim.clone(), net_version.clone());
+        engine.register_fn(
+            "add_to_group",
+            move |n: &mut NetHandle,
+                  g: &str,
+                  ids: rhai::Array|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                let len = n.borrow().neurons.len();
+                let ids: Vec<u32> = ids
+                    .iter()
+                    .map(|d| nid(d_i64(d), len))
+                    .collect::<Result<_, _>>()?;
+                // Membership feeds grid readouts — drop the sim and bump.
+                invalidate(&s, &v);
+                let mut b = n.borrow_mut();
+                let gi = b.add_group(g);
+                b.groups[gi].members.extend(ids);
+                b.invalidate_grids();
+                Ok(())
+            },
+        );
+    }
     {
         let (s, v) = (sim.clone(), net_version.clone());
         engine.register_fn(
@@ -1407,7 +1431,8 @@ pub fn register_api(
                 return Ok(0.0);
             };
             let b = h.borrow();
-            Ok(b.v()[nid(id, b.v().len())? as usize] as f64)
+            let v = b.v();
+            Ok(v[nid(id, v.len())? as usize] as f64)
         },
     );
     engine.register_fn(
@@ -1464,7 +1489,7 @@ pub fn register_api(
                   -> Result<(), Box<rhai::EvalAltResult>> {
                 let idx = match n.borrow().input_index(name) {
                     Some(i) => i,
-                    None => return Ok(()),
+                    None => return Err(s_err(format!("unknown input \"{name}\""))),
                 };
                 let h = ensure_sim(&s, &n, &c, &b, &lim)?;
                 h.borrow_mut().set_input_constant(idx, d_f64(&x) as f32);
@@ -1483,7 +1508,7 @@ pub fn register_api(
                   -> Result<(), Box<rhai::EvalAltResult>> {
                 let idx = match n.borrow().input_index(name) {
                     Some(i) => i,
-                    None => return Ok(()),
+                    None => return Err(s_err(format!("unknown input \"{name}\""))),
                 };
                 let series: Vec<f32> = arr.iter().map(|d| d_f64(d) as f32).collect();
                 let h = ensure_sim(&s, &n, &c, &b, &lim)?;
@@ -1625,17 +1650,24 @@ pub fn register_api(
          n_feat: rhai::INT,
          y: rhai::Array,
          lambda: Dynamic|
-         -> rhai::Array {
+         -> Result<rhai::Array, Box<rhai::EvalAltResult>> {
+            let (t, f) = (n_rows.max(0) as usize, n_feat.max(0) as usize);
+            if x.len() < t.saturating_mul(f) {
+                return Err(s_err(format!(
+                    "fit_ridge: x has {} values, need T*F = {t}*{f}",
+                    x.len()
+                )));
+            }
+            if y.len() < t {
+                return Err(s_err(format!(
+                    "fit_ridge: y has {} values, need T = {t}",
+                    y.len()
+                )));
+            }
             let xf: Vec<f32> = x.iter().map(|d| d_f64(d) as f32).collect();
             let yf: Vec<f32> = y.iter().map(|d| d_f64(d) as f32).collect();
-            let w = fit_ridge(
-                &xf,
-                n_rows as usize,
-                n_feat as usize,
-                &yf,
-                d_f64(&lambda) as f32,
-            );
-            w.iter().map(|&v| dyn_f64(v)).collect()
+            let w = fit_ridge(&xf, t, f, &yf, d_f64(&lambda) as f32);
+            Ok(w.iter().map(|&v| dyn_f64(v)).collect())
         },
     );
     engine.register_fn("ridge_output", |w: rhai::Array, x: rhai::Array| -> f64 {
@@ -1752,15 +1784,19 @@ pub fn register_api(
         let (v, dd, q) = (net_version.clone(), data_dir.clone(), quota_bytes.clone());
         engine.register_fn(
             "samples_save",
-            move |n: &mut NetHandle, name: &str, path: &str| {
-                bump(&v);
+            move |n: &mut NetHandle,
+                  name: &str,
+                  path: &str|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
                 let b = n.borrow();
-                if let Some(s) = b.samples(name) {
-                    let text = net_format::io::samples_to_string(s);
-                    if let Err(e) = checked_write(&dd, &q, path, text.as_bytes()) {
-                        eprintln!("samples_save {path}: {e}");
-                    }
-                }
+                let Some(s) = b.samples(name) else {
+                    return Err(s_err(format!("unknown samples \"{name}\"")));
+                };
+                let text = net_format::io::samples_to_string(s);
+                checked_write(&dd, &q, path, text.as_bytes())
+                    .map_err(|e| s_err(format!("samples_save {path}: {e}")))?;
+                bump(&v);
+                Ok(())
             },
         );
     }
@@ -1768,18 +1804,19 @@ pub fn register_api(
         let (v, dd) = (net_version.clone(), data_dir.clone());
         engine.register_fn(
             "samples_load",
-            move |n: &mut NetHandle, name: &str, path: &str| match rdir(&dd, path) {
-                Ok(p) => match net_format::io::load_samples(&p, name) {
-                    Ok(s) => {
-                        bump(&v);
-                        let mut b = n.borrow_mut();
-                        let slot = b.samples_mut(name);
-                        slot.times = s.times;
-                        slot.values = s.values;
-                    }
-                    Err(e) => eprintln!("samples_load {path}: {e}"),
-                },
-                Err(e) => eprintln!("samples_load {path}: {e}"),
+            move |n: &mut NetHandle,
+                  name: &str,
+                  path: &str|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                let p = rdir(&dd, path).map_err(|e| s_err(format!("samples_load {path}: {e}")))?;
+                let s = net_format::io::load_samples(&p, name)
+                    .map_err(|e| s_err(format!("samples_load {path}: {e}")))?;
+                bump(&v);
+                let mut b = n.borrow_mut();
+                let slot = b.samples_mut(name);
+                slot.times = s.times;
+                slot.values = s.values;
+                Ok(())
             },
         );
     }
@@ -1798,15 +1835,18 @@ pub fn register_api(
     });
     {
         let (dd, q) = (data_dir.clone(), quota_bytes.clone());
-        engine.register_fn("write_to_file", move |path: &str, values: rhai::Array| {
-            let mut out = String::new();
-            for v in values {
-                out.push_str(&format!("{}\n", d_f64(&v)));
-            }
-            if let Err(e) = checked_write(&dd, &q, path, out.as_bytes()) {
-                eprintln!("write_to_file {path}: {e}");
-            }
-        });
+        engine.register_fn(
+            "write_to_file",
+            move |path: &str, values: rhai::Array| -> Result<(), Box<rhai::EvalAltResult>> {
+                let mut out = String::new();
+                for v in values {
+                    out.push_str(&format!("{}\n", d_f64(&v)));
+                }
+                checked_write(&dd, &q, path, out.as_bytes())
+                    .map(|_| ())
+                    .map_err(|e| s_err(format!("write_to_file {path}: {e}")))
+            },
+        );
     }
     {
         let dd = data_dir.clone();
