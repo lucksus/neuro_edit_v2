@@ -1577,3 +1577,89 @@ longer queues a full-viewport pick every frame.
 - `busy` is a local-worker concept; remote-server evals stream via
   `dirty_seq` → repaint per message (~snap cadence), which is also
   what keeps status/plots current.
+
+## Stage 15 — layout correctness + palette + SceneKey audit
+
+Review: `review/STAGE15.md`. Screenshots:
+`review/stage15_{before,after}_{800,1440}.png`,
+`review/stage15_after_800_manual.png` (browser build, `:3517`).
+
+### A+C. Windows on-screen, hint strip reserved
+
+- `usable_rect(ctx)` = `ctx.available_rect()` after the toolbar /
+  status / hint panels are laid out — the strip between them.
+- Every floating window (Inspector, Inputs, Files, Manual, Console,
+  Script editor, Plots, all dialogs, Login, Shortcuts) now goes
+  through `app_win` = `Window::new().constrain_to(usable_rect)`.
+  egui re-applies the constraint **every frame**, so persisted
+  off-screen positions and narrow resizes get pulled back; it also
+  caps window size to the strip.
+- Defaults now come from `clamp_window_rect(want, usable)` — position
+  clamps inside and size shrinks to fit. The Manual additionally caps
+  at 70% of the usable strip (was 640×520 covering ~80% of an
+  800 px window).
+- The mode/drag hint moved from in-canvas paint (which windows could
+  cover) to a `TopBottomPanel::bottom("hints")` above the status bar.
+  Because it's a panel it shrinks `usable_rect`, so no window can
+  ever overlap it; the text wraps to a second line at narrow widths.
+- Tests: `window_clamp_keeps_rect_inside_usable` (in/right/bottom/
+  left/oversized cases).
+
+### B. Toolbar wraps by groups
+
+`ui.horizontal` inside `horizontal_wrapped` claims the whole remaining
+row as its desired size, so egui's wrap check (`available < desired`)
+never fires — the old rows split mid-control ("a" / "x1.0" /
+"realtime" orphans at 800 px). `toolbar_group` allocates each group
+with an explicit upper-bound width via `allocate_ui_with_layout`, so
+the wrap check sees a real footprint and moves the group whole
+(cursor still advances by the group's actual width — over-estimating
+the bound only packs slightly early). Groups: run/step/reset, speed,
+backend, dt, noise / modes, plane, view toggles, grid-view. Test:
+`wrapped_toolbar_groups_never_split` (same-row atoms + no panel
+overflow + wrap engages).
+
+### D. Legend vs render — gold lines explained
+
+The gold radial lines with "nothing selected" are **input→target
+links** (`INPUT_LINK_COL`), not stale selection highlight:
+`write_selection` zeroes the selection bitset every frame, and the
+shader only tints synapses gold where a selected bit is set. So the
+render was right and the text was wrong — the manual never mentioned
+input links. Fixed in `docs/manual/getting-started.md`; the link
+colour is now derived from a shared `scene::INPUT_COL` (same gold as
+the input cubes' wgsl literal, pinned by `palette_matches_shader`).
+
+### E. One colour rule: warm = excitatory, cool = inhibitory
+
+Before, neurons inverted the convention the synapses/dots already
+used (excitatory neurons were blue, excitatory synapses salmon).
+
+| element | before | after |
+|---|---|---|
+| neuron excitatory | light blue `0.55,0.8,1.0` | warm amber `1.0,0.62,0.35` |
+| neuron inhibitory | pale purple `0.85,0.6,1.0` | cool blue `0.55,0.68,1.0` |
+| synapse exc/inh | salmon / blue | unchanged |
+| spike dot exc/inh | yellow / light blue | unchanged |
+| input node + links | gold / gold | gold, now one shared const |
+
+`NEURON_EXC/INH` flow to the shader via the `exc_color`/`inh_color`
+uniforms (`write_cam`), so only `scene.rs` changed; the legend in
+getting-started.md states the rule. Visible in
+`stage15_after_800.png` (amber excitatory, blue inhibitory cubes).
+
+### F. SceneKey completeness
+
+`scene_key` (view.rs) extracted from the `render_offscreen` call site
+into a function with the audit as its doc comment. Reads of the
+scene pass: viewport size, camera+aspect+vp-height, preview delta,
+hover, selection/activity/polyline/particle buffers, plane state,
+draw toggles (counts, show_syn, show_grid, planes_on), geo version —
+all keyed. Deliberately unkeyed (compile-time or non-scene): clear
+colour, palette constants, `misc.x/y` (cube size/glow), `misc.z`
+(time — unread by the shader), `misc.w` (pick-mode flag — the pick
+pass writes its own uniform and never touches the scene texture).
+Test: `scene_key_changes_with_app_state` builds a real `EditorApp`
+(`SimCtl::offline`) and flips each input — show_grid, hover,
+preview_delta, plane_key, geo_version, camera orbit — asserting the
+key moves, plus buffer-side inputs (sel/size/show_syn/planes_on).
