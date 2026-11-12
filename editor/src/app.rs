@@ -612,8 +612,10 @@ impl EditorApp {
                     }
                 });
                 ui.separator();
-                // sim controls
-                let (run_icon, run_label) = if self.running {
+                // sim controls — Pause covers a running script (`busy`) too:
+                // abort_now flips the flag on_progress/run chunks watch.
+                let live = self.running || self.busy;
+                let (run_icon, run_label) = if live {
                     (ic_pause, " Pause")
                 } else {
                     (ic_play, " Run")
@@ -622,8 +624,8 @@ impl EditorApp {
                     .add(egui::Button::image_and_text(&run_icon, run_label))
                     .clicked()
                 {
-                    if self.running {
-                        self.send(Cmd::Abort);
+                    if live {
+                        self.ctl.abort_now();
                         self.send(Cmd::AutoRun(false));
                     } else {
                         self.send(Cmd::AutoRun(true));

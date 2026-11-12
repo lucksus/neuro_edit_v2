@@ -110,6 +110,14 @@ impl SimCtl {
     pub fn send(&self, c: Cmd) {
         let _ = self.tx.send(c);
     }
+
+    /// Stop a run NOW: flip the shared flag an in-flight eval/run watches,
+    /// then queue `Cmd::Abort` so `running` clears once the worker drains.
+    /// (The queued command alone can't interrupt a blocked `eval_str`.)
+    pub fn abort_now(&self) {
+        self.abort.store(true, Ordering::Relaxed);
+        let _ = self.tx.send(Cmd::Abort);
+    }
 }
 
 impl Drop for SimCtl {
@@ -166,6 +174,21 @@ fn worker(
             !abp.load(Ordering::Relaxed)
         }));
         env.set_progress(200, cb);
+    }
+
+    // Rhai op-level abort: the chunked `sim.run` hook only fires between
+    // chunks, so a pure-script loop (`while true {}`) would never see the
+    // abort flag. on_progress runs inside the eval loop — a `Some` return
+    // terminates the script with ErrorTerminated.
+    {
+        let ab = abort.clone();
+        env.engine.on_progress(move |ops| {
+            if ops % 64 == 0 && ab.load(Ordering::Relaxed) {
+                Some(rhai::Dynamic::UNIT)
+            } else {
+                None
+            }
+        });
     }
 
     let mut running = false;
@@ -235,7 +258,11 @@ fn worker(
                     bump(&env);
                 }
                 Cmd::AutoRun(b) => {
-                    abort.store(false, Ordering::Relaxed);
+                    // Only a fresh start clears abort — stopping must not
+                    // erase a flag an in-flight eval is about to see.
+                    if b {
+                        abort.store(false, Ordering::Relaxed);
+                    }
                     running = b;
                 }
                 Cmd::SetSpeed(s) => speed = s.max(0.01),

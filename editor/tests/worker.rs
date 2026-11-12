@@ -76,6 +76,33 @@ fn worker_builds_runs_and_publishes() {
     );
 }
 
+/// Abort must interrupt even a pure-Rhai infinite loop — no `sim.run`
+/// chunks, so only the engine's on_progress hook can see the flag.
+#[test]
+fn abort_stops_an_infinite_script() {
+    use std::sync::atomic::Ordering;
+
+    let ctl = SimCtl::start(Network::new(), BackendKind::Cpu, 1);
+    ctl.send(Cmd::Eval("let mut x = 0; while true { x += 1; }".into()));
+    // Give the eval a moment to spin up, then flip the flag exactly like
+    // the pause button does via SimCtl::abort_now.
+    std::thread::sleep(Duration::from_millis(100));
+    ctl.abort.store(true, Ordering::Relaxed);
+    ctl.send(Cmd::Abort);
+
+    // busy clears once the eval terminates.
+    wait_for(Duration::from_secs(10), || {
+        let s = ctl.shared.read().ok()?;
+        (!s.busy).then_some(())
+    });
+    // The worker must still be alive: a follow-up eval answers.
+    ctl.send(Cmd::Eval("sim.time()".into()));
+    wait_for(Duration::from_secs(10), || {
+        let s = ctl.shared.read().ok()?;
+        s.console.iter().any(|l| l.starts_with("= ")).then_some(())
+    });
+}
+
 /// Same path on the CUDA backend (skipped gracefully if no GPU).
 #[test]
 fn worker_cuda_smoke() {
