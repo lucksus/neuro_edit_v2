@@ -2,7 +2,6 @@
 //! snapshots into `Shared`. The UI sends `Cmd`s over an mpsc channel and reads
 //! `Shared` each frame — the sim never waits on the UI.
 
-use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, RwLock};
@@ -65,12 +64,10 @@ pub struct SimCtl {
 }
 
 const GEO_EDGES_PER_NEURON: usize = 4;
-const WATCH_CAP: usize = 4096;
 const COUNTS_WINDOW: usize = 4096;
 
 struct Watch {
     ids: Vec<u32>,
-    ring: Vec<VecDeque<f32>>,
 }
 
 /// Mutable publish state shared by the progress callback and the cmd loop.
@@ -156,10 +153,7 @@ fn worker(
     };
 
     let pub_rc = Rc::new(std::cell::RefCell::new(Pub {
-        watch: Watch {
-            ids: Vec::new(),
-            ring: Vec::new(),
-        },
+        watch: Watch { ids: Vec::new() },
         prev_step: 0,
         sps: 0.0,
     }));
@@ -168,7 +162,7 @@ fn worker(
     // returning false aborts the rest of the run (pause pressed).
     {
         let (shp, abp, pr) = (shared.clone(), abort.clone(), pub_rc.clone());
-        let cb: ProgressFn = Rc::new(std::cell::RefCell::new(move |sim: &Sim| -> bool {
+        let cb: ProgressFn = Rc::new(std::cell::RefCell::new(move |sim: &mut Sim| -> bool {
             let mut p = pr.borrow_mut();
             publish_sim(sim, &shp, &mut p);
             !abp.load(Ordering::Relaxed)
@@ -356,7 +350,7 @@ fn worker(
                     {
                         let mut p = pub_rc.borrow_mut();
                         p.sps = chunk as f32 / el;
-                        publish_sim(&h.borrow(), &shared, &mut p);
+                        publish_sim(&mut h.borrow_mut(), &shared, &mut p);
                     }
                     let dt = env.cfg.borrow().dt_ms;
                     let target_sps = (speed * 1000.0 / dt).max(1.0);
@@ -397,12 +391,12 @@ fn set_busy(shared: &SharedRef, b: bool) {
 
 fn publish_env(env: &Env, shared: &SharedRef, p: &mut Pub) {
     if let Ok(h) = env.sim_handle() {
-        publish_sim(&h.borrow(), shared, p);
+        publish_sim(&mut h.borrow_mut(), shared, p);
     }
 }
 
 /// Publish dynamic state read back from `sim` into `shared`.
-fn publish_sim(sim: &Sim, shared: &SharedRef, p: &mut Pub) {
+fn publish_sim(sim: &mut Sim, shared: &SharedRef, p: &mut Pub) {
     let activity = sim.trace();
     // Counts since previous publish: sum the record-ring rows covering the
     // elapsed steps. Intervals longer than the ring depth undercount the
@@ -414,18 +408,15 @@ fn publish_sim(sim: &Sim, shared: &SharedRef, p: &mut Pub) {
     let counts = sim.spike_counts(back).unwrap_or_default();
     p.prev_step = sim.step_count();
 
+    // per-step v recording happens in the sim; (re)apply the watch list
+    // every publish so a rebuilt sim gets it back, then drain the samples
+    // recorded since the last publish — the plot gets every step, not one
+    // point per chunk.
+    sim.set_v_watch(&p.watch.ids);
+    let hists = sim.drain_v().unwrap_or_default();
     let mut watched_v = Vec::new();
-    if !p.watch.ids.is_empty() {
-        let v = sim.v();
-        for (k, &id) in p.watch.ids.iter().enumerate() {
-            let val = v.get(id as usize).copied().unwrap_or(0.0);
-            let r = &mut p.watch.ring[k];
-            r.push_back(val);
-            if r.len() > WATCH_CAP {
-                r.pop_front();
-            }
-            watched_v.push((id, Arc::new(vec![val])));
-        }
+    for (k, &id) in p.watch.ids.iter().enumerate() {
+        watched_v.push((id, Arc::new(hists.get(k).cloned().unwrap_or_default())));
     }
 
     if let Ok(mut w) = shared.write() {

@@ -44,9 +44,17 @@ pub struct CpuSim {
     pub pn_total: Vec<u64>,
     pub words: usize,
 
+    /// watched neuron ids whose v is recorded every step (editor v(t) plot)
+    pub v_watch: Vec<u32>,
+    /// per-watched-neuron per-step v history, capped at `V_HIST_CAP`
+    pub v_hist: Vec<std::collections::VecDeque<f32>>,
+
     pub t: u64,
     pub spikes_total: u64,
 }
+
+/// Max per-step v samples kept per watched neuron between drains.
+pub const V_HIST_CAP: usize = 4096;
 
 impl CpuSim {
     pub fn new(net: &Network, cfg: SimConfig) -> Self {
@@ -78,6 +86,8 @@ impl CpuSim {
             spike_counts: vec![0; spike_record_steps],
             pn_total: vec![0; n],
             words,
+            v_watch: Vec::new(),
+            v_hist: Vec::new(),
             t: 0,
             spikes_total: 0,
             cfg,
@@ -103,6 +113,9 @@ impl CpuSim {
         self.pn_total.fill(0);
         self.t = 0;
         self.spikes_total = 0;
+        for d in &mut self.v_hist {
+            d.clear();
+        }
     }
 
     #[inline]
@@ -198,8 +211,37 @@ impl CpuSim {
     pub fn run_steps(&mut self, steps: usize) -> anyhow::Result<()> {
         for _ in 0..steps {
             self.step();
+            if !self.v_watch.is_empty() {
+                for (k, &id) in self.v_watch.iter().enumerate() {
+                    let val = self.v.get(id as usize).copied().unwrap_or(0.0);
+                    let r = &mut self.v_hist[k];
+                    r.push_back(val);
+                    if r.len() > V_HIST_CAP {
+                        r.pop_front();
+                    }
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Set the watched-neuron list; no-op when unchanged (safe to call
+    /// every publish — history survives unchanged watch lists).
+    pub fn set_v_watch(&mut self, ids: &[u32]) {
+        if self.v_watch == ids {
+            return;
+        }
+        self.v_watch = ids.to_vec();
+        self.v_hist = vec![std::collections::VecDeque::with_capacity(256); ids.len()];
+    }
+
+    /// Drain per-step v samples recorded since the last drain, one Vec per
+    /// watched neuron (oldest first).
+    pub fn drain_v(&mut self) -> Vec<Vec<f32>> {
+        self.v_hist
+            .iter_mut()
+            .map(|d| d.drain(..).collect())
+            .collect()
     }
 
     pub fn run_ms(&mut self, ms: f32) -> anyhow::Result<()> {

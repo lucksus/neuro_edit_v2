@@ -387,8 +387,11 @@ impl EditorApp {
             }
             for (id, vals) in &snap.watched_v {
                 let h = self.v_hist.entry(*id).or_default();
-                for &v in vals.iter() {
-                    h.push_back((snap.time_ms, v));
+                let n = vals.len();
+                for (i, &v) in vals.iter().enumerate() {
+                    // per-step samples end at snap.time_ms — walk back by dt
+                    let t = snap.time_ms - (n - 1 - i) as f64 * self.dt_ms as f64;
+                    h.push_back((t, v));
                 }
                 while h.len() > 4096 {
                     h.pop_front();

@@ -19,6 +19,10 @@ use net_format::{Network, SynCsr};
 
 const BLOCK: u32 = 256;
 
+/// Ring depth (steps) of the per-step v recording for watched neurons.
+/// Matches the editor's plot cap — older samples are overwritten.
+const VREC_D: usize = 4096;
+
 pub struct CudaSim {
     #[allow(dead_code)]
     ctx: Arc<CudaContext>,
@@ -58,6 +62,17 @@ pub struct CudaSim {
     spk_bits: CudaSlice<u64>,
     /// per-neuron lifetime spike totals (exact answer for windows >= t)
     pn_total: CudaSlice<u64>,
+    // per-step v recording for watched neurons (editor v(t) plot)
+    /// host copy of the watched ids (compared on every set_v_watch call)
+    pub v_watch: Vec<u32>,
+    /// device copy of `v_watch` (W entries)
+    vwatch_dev: CudaSlice<u32>,
+    /// device ring VREC_D x W of per-step v for watched neurons
+    vrec_dev: CudaSlice<f32>,
+    /// device buffers stale after set_v_watch — uploaded lazily in run_steps
+    vrec_dirty: bool,
+    /// steps recorded into vrec_dev since the last drain
+    vrec_valid: u64,
 
     // host-side mirrors
     pub n: usize,
@@ -146,6 +161,11 @@ impl CudaSim {
             total: stream.alloc_zeros(1)?,
             spk_bits: stream.alloc_zeros((record_rows * words).max(1))?,
             pn_total: stream.alloc_zeros(na)?,
+            v_watch: Vec::new(),
+            vwatch_dev: stream.alloc_zeros(1)?,
+            vrec_dev: stream.alloc_zeros(1)?,
+            vrec_dirty: false,
+            vrec_valid: 0,
             n,
             cfg,
             params,
@@ -200,6 +220,8 @@ impl CudaSim {
         };
         let model: i32 = 0;
         let n_inputs_i32 = self.n_inputs as i32;
+        let nwatch_i32 = self.v_watch.len() as i32;
+        let vrec_d_i32 = VREC_D as i32;
         let stim_t0 = self.stim_t0;
         let cur = (t % 2) as usize;
         let record = self.cfg.record_spikes && self.record_rows > 0;
@@ -255,7 +277,11 @@ impl CudaSim {
                     b.arg(&0u64); // NULL spk_row
                 }
             }
-            b.arg(&mut self.pn_total);
+            b.arg(&mut self.pn_total)
+                .arg(&self.vwatch_dev)
+                .arg(&nwatch_i32)
+                .arg(&mut self.vrec_dev)
+                .arg(&vrec_d_i32);
             b.launch(cfg_launch)?;
         }
 
@@ -297,7 +323,69 @@ impl CudaSim {
             b.launch(cfg_prop)?;
         }
         self.t += 1;
+        if !self.v_watch.is_empty() {
+            self.vrec_valid += 1;
+        }
         Ok(())
+    }
+
+    /// Upload the watched-id list + allocate the v record ring (lazy, only
+    /// after `set_v_watch` changed the list).
+    fn upload_vwatch(&mut self) -> Result<()> {
+        let w = self.v_watch.len().max(1);
+        self.vwatch_dev = self.stream.clone_htod(&{
+            let mut v = self.v_watch.clone();
+            if v.is_empty() {
+                v.push(0);
+            }
+            v
+        })?;
+        self.vrec_dev = self.stream.alloc_zeros(VREC_D * w)?;
+        self.vrec_dirty = false;
+        self.vrec_valid = 0;
+        Ok(())
+    }
+
+    /// Set the watched-neuron list; no-op when unchanged (safe to call
+    /// every publish — history survives unchanged watch lists).
+    pub fn set_v_watch(&mut self, ids: &[u32]) {
+        if self.v_watch == ids {
+            return;
+        }
+        self.v_watch = ids.to_vec();
+        self.vrec_dirty = true;
+        self.vrec_valid = 0;
+    }
+
+    /// Drain per-step v samples recorded since the last drain, one Vec per
+    /// watched neuron (oldest first). At most `VREC_D` samples survive.
+    pub fn drain_v(&mut self) -> Result<Vec<Vec<f32>>> {
+        let w = self.v_watch.len();
+        if w == 0 || self.vrec_valid == 0 || self.vrec_dirty {
+            return Ok(vec![Vec::new(); w]);
+        }
+        self.stream.synchronize()?;
+        let k = (self.vrec_valid as usize).min(VREC_D);
+        let r0 = (self.t as usize).wrapping_sub(k) % VREC_D;
+        let mut host = vec![0.0f32; k * w];
+        if r0 + k <= VREC_D {
+            let view = self.vrec_dev.slice(r0 * w..(r0 + k) * w);
+            self.stream.memcpy_dtoh(&view, &mut host)?;
+        } else {
+            let first = VREC_D - r0;
+            let view = self.vrec_dev.slice(r0 * w..VREC_D * w);
+            self.stream.memcpy_dtoh(&view, &mut host[..first * w])?;
+            let view = self.vrec_dev.slice(0..(k - first) * w);
+            self.stream.memcpy_dtoh(&view, &mut host[first * w..])?;
+        }
+        self.vrec_valid = 0;
+        let mut out = vec![Vec::with_capacity(k); w];
+        for r in 0..k {
+            for (c, o) in out.iter_mut().enumerate() {
+                o.push(host[r * w + c]);
+            }
+        }
+        Ok(out)
     }
 
     pub fn run_steps(&mut self, n_steps: usize) -> Result<()> {
@@ -306,6 +394,9 @@ impl CudaSim {
             // error anyway); just advance the clock like the CPU backend.
             self.t += n_steps as u64;
             return Ok(());
+        }
+        if self.vrec_dirty {
+            self.upload_vwatch()?;
         }
         // upload the stimulus window for this chunk, then fire-and-forget
         self.stim_t0 = self.upload_stim(n_steps)?;
@@ -345,6 +436,7 @@ impl CudaSim {
         self.stream.memset_zeros(&mut self.total).unwrap();
         self.stream.memset_zeros(&mut self.spk_bits).unwrap();
         self.stream.memset_zeros(&mut self.pn_total).unwrap();
+        self.vrec_valid = 0;
         self.t = 0;
     }
 

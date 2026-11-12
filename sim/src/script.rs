@@ -26,7 +26,7 @@ pub type PrintFn = Rc<dyn Fn(&str)>;
 
 /// Called between run chunks (editor only): publish snapshots, check pause.
 /// Return `false` to abort the rest of a chunked run (pause pressed).
-pub type ProgressFn = Rc<RefCell<dyn FnMut(&Sim) -> bool>>;
+pub type ProgressFn = Rc<RefCell<dyn FnMut(&mut Sim) -> bool>>;
 
 /// Scripting environment: engine + shared handles.
 pub struct Env {
@@ -262,7 +262,7 @@ fn run_chunked(
                 let n = steps.min(n_chunk);
                 h.borrow_mut().run_steps(n).map_err(|e| e.to_string())?;
                 steps -= n;
-                if !(*cb.borrow_mut())(&h.borrow()) {
+                if !(*cb.borrow_mut())(&mut h.borrow_mut()) {
                     break;
                 }
             }

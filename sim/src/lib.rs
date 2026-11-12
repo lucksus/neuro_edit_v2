@@ -204,6 +204,26 @@ impl Sim {
         }
     }
 
+    /// Set watched-neuron ids whose per-step v is recorded (editor plot).
+    /// No-op when unchanged; safe to call every publish.
+    pub fn set_v_watch(&mut self, ids: &[u32]) {
+        match self {
+            Sim::Cpu(s) => s.set_v_watch(ids),
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.set_v_watch(ids),
+        }
+    }
+
+    /// Drain per-step v samples recorded since the last drain, one Vec per
+    /// watched neuron (oldest first).
+    pub fn drain_v(&mut self) -> anyhow::Result<Vec<Vec<f32>>> {
+        match self {
+            Sim::Cpu(s) => Ok(s.drain_v()),
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.drain_v(),
+        }
+    }
+
     /// Constant external current on one neuron.
     pub fn set_external(&mut self, neuron: usize, amps: f32) {
         match self {
