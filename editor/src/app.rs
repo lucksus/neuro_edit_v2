@@ -1264,9 +1264,7 @@ impl EditorApp {
                 wh: [gs.dims[ua], gs.dims[va], 0, 0],
             });
             if show {
-                for &m in &gs.members {
-                    bits[m as usize >> 5] |= 1 << (m & 31);
-                }
+                mark_bits(&mut bits, &gs.members);
             }
         }
         gpu.write_plane_params(&params);
@@ -2032,7 +2030,8 @@ impl EditorApp {
                                         }
                                     });
                                     if let crate::plane::Proj::Slice(k) = &mut cfg.proj {
-                                        let max = gs.dims[cfg.axis.min(2) as usize] - 1;
+                                        let max =
+                                            gs.dims[cfg.axis.min(2) as usize].saturating_sub(1);
                                         *k = (*k).min(max);
                                         ui.horizontal(|ui| {
                                             ui.label("  slice");
@@ -4169,6 +4168,16 @@ fn secure_storage_file() {
 #[cfg(not(unix))]
 fn secure_storage_file() {}
 
+/// Hide-bits for plane members. Member ids come over the wire — an
+/// out-of-range id must not panic the frame.
+fn mark_bits(bits: &mut [u32], members: &[u32]) {
+    for &m in members {
+        if let Some(w) = bits.get_mut(m as usize >> 5) {
+            *w |= 1 << (m & 31);
+        }
+    }
+}
+
 /// Parent dir of a path for a `ListFiles` request ("." at the top).
 fn dir_of(p: &str) -> String {
     match p.rsplit_once('/') {
@@ -4493,5 +4502,14 @@ mod tests {
         app.file_mkdir();
         assert_eq!(app.files.status, "mkdir okdir");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mark_bits_ignores_out_of_range_member_ids() {
+        let mut bits = vec![0u32; 2]; // covers ids 0..63
+        mark_bits(&mut bits, &[0, 63]);
+        mark_bits(&mut bits, &[64, u32::MAX]); // must not panic
+        assert_eq!(bits[0], 1);
+        assert_eq!(bits[1], 1 << 31);
     }
 }

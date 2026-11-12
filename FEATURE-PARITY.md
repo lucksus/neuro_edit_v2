@@ -87,8 +87,8 @@ Checked against the C++ source at `~/code/neuro_edit-ref` (commit 8c4e7ce), 2026
 
 | # | Original feature | v2 |
 |---|------------------|----|
-| 6.1 | Property browser dock: edit QObject properties of selected objects (name, position, user_movable, weights, params…) | [x] inspector: name/pos/kind/params |
-| 6.2 | Izhikevich property widget (a,b,c,d; presets?) | [x] params editable in inspector |
+| 6.1 | Property browser dock: edit QObject properties of selected objects (name, position, user_movable, weights, params…) | [x] inspector: name/pos/kind |
+| 6.2 | Izhikevich property widget (a,b,c,d; presets?) | [~] params via script `net.set_izh`, not the inspector |
 | 6.3 | Simulation settings widget: simulation_step, real_step, time display | [x] toolbar: dt, speed, noise, time |
 | 6.4 | Settings dialog (GUI settings, detail levels) | [~] view/perf options |
 | 6.5 | Log window | [x] console bottom panel shows log lines |

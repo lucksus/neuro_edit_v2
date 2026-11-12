@@ -416,6 +416,11 @@ impl Fold {
                 if entry.0 == path {
                     entry.1.extend_from_slice(&data);
                     entry.2 = done;
+                } else {
+                    sh.last_error = Some(format!(
+                        "download {path} ignored while {} is in progress",
+                        entry.0
+                    ));
                 }
             }
             proto::ServerMsg::Error(e) => {
@@ -553,8 +558,15 @@ impl Fold {
 }
 
 fn split_disp(ptr: &[u32], edges: &[(u32, u16)]) -> Vec<Vec<(u32, u16)>> {
+    // Offsets come from the server — clamp instead of trusting them;
+    // a corrupt range yields an empty list, not a panic.
+    let n = edges.len();
     ptr.windows(2)
-        .map(|w| edges[w[0] as usize..w[1] as usize].to_vec())
+        .map(|w| {
+            let a = (w[0] as usize).min(n);
+            let b = (w[1] as usize).min(n).max(a);
+            edges[a..b].to_vec()
+        })
         .collect()
 }
 
@@ -879,5 +891,34 @@ mod tests {
         // the second Arc is ours — refcount 2 forces one clone, but no
         // per-edge rescan; still far under the old total.
         assert!(new < old / 5, "expected a big win: {old:?} vs {new:?}");
+    }
+
+    #[test]
+    fn split_disp_clamps_corrupt_offsets() {
+        // ptr pairs outside `edges` (or reversed) give empty lists —
+        // a broken server must not panic the client.
+        // two sources: ptr pairs (0,99) — past the end — and (99,3).
+        let disp = split_disp(&[0, 99, 3], &[(1, 2); 3]);
+        assert_eq!(disp.len(), 2);
+        assert_eq!(disp[0], vec![(1, 2); 3]); // 0..99 clamps to the tail
+        assert!(disp[1].is_empty()); // start past the end → empty
+        assert!(split_disp(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn second_download_is_dropped_with_a_message() {
+        let mut fold = Fold::default();
+        let mut sh = Shared::default();
+        let chunk = |path: &str| proto::ServerMsg::FileChunk {
+            path: path.into(),
+            data: vec![1, 2, 3],
+            done: false,
+        };
+        fold.apply(&mut sh, chunk("a.txt"));
+        fold.apply(&mut sh, chunk("b.txt"));
+        assert_eq!(sh.download.as_ref().unwrap().0, "a.txt");
+        assert_eq!(sh.download.as_ref().unwrap().1, vec![1, 2, 3]);
+        let e = sh.last_error.take().expect("drop must be reported");
+        assert!(e.contains("b.txt") && e.contains("a.txt"), "{e}");
     }
 }
