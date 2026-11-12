@@ -1094,3 +1094,52 @@ fn dangling_ids_refused_then_next_edit_applies() {
     assert!(d.readouts.is_some(), "ok_ro landed: {d:?}");
     rig.stop();
 }
+
+/// Q6: SaveNet gets a typed ack carrying the written version; failures
+/// come back as Errors (never a silent "saved").
+/// Q7: LoadNet answers NetLoaded only on success.
+#[test]
+fn save_and_load_carry_typed_acks() {
+    let dir = std::env::temp_dir().join(format!("serve_q67_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let _ = std::fs::remove_file(dir.join("q6.ne2"));
+    let mut net = Network::new();
+    net.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
+    let rig = start(net, Some(dir.clone()));
+    rig.send(ClientMsg::Hello { proto: 1 });
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+
+    rig.send(ClientMsg::SaveNet { path: "q6.ne2".into() });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Saved { .. }));
+    let saved = evs
+        .iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::Saved { path, version } => Some((path.clone(), *version)),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(saved.0, "q6.ne2");
+    assert_eq!(saved.1, 1, "net version 1 written");
+    assert!(dir.join("q6.ne2").exists(), "file landed");
+
+    // a save that can't resolve comes back as an Error, not a Saved
+    rig.send(ClientMsg::SaveNet { path: "../escape/x.ne2".into() });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Error(_)));
+    assert!(evs.iter().any(|e| matches!(
+        &e.msg,
+        ServerMsg::Error(s) if s.contains("save")
+    )));
+
+    // load success → NetLoaded; bogus path → Error, no NetLoaded
+    rig.send(ClientMsg::LoadNet { path: "q6.ne2".into() });
+    let evs = rig.until(|m| matches!(m, ServerMsg::NetLoaded { .. }));
+    assert!(evs.iter().any(|e| matches!(
+        &e.msg,
+        ServerMsg::NetLoaded { path, .. } if path == "q6.ne2"
+    )));
+    rig.send(ClientMsg::LoadNet { path: "nope.ne2".into() });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Error(_)));
+    assert!(!evs.iter().any(|e| matches!(e.msg, ServerMsg::NetLoaded { .. })));
+    rig.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}

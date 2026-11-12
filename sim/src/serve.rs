@@ -411,9 +411,55 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                                 *env.net.borrow_mut() = n;
                                 env.net_gen.set(env.net_gen.get() + 1);
                                 bump(&env);
+                                // Q7: typed confirmation — clients only
+                                // adopt net_path/recent on this frame.
+                                emit_to(
+                                    &emit,
+                                    client,
+                                    ServerMsg::NetLoaded {
+                                        path: path.clone(),
+                                        version: env.net_version.get(),
+                                    },
+                                );
                                 emit_b(&emit, con(format!("loaded {path}")));
                             }
-                            Err(e) => emit_b(&emit, con(format!("load {path}: {e}"))),
+                            Err(e) => emit_to(
+                                &emit,
+                                client,
+                                ServerMsg::Error(format!("load {path}: {e}")),
+                            ),
+                        }
+                    }
+                    // Q6: typed save — the ack carries the version that
+                    // hit disk so the client marks clean on truth only.
+                    ClientMsg::SaveNet { path } => {
+                        let done = resolve(&env, &path).and_then(|p| {
+                            let mut n = env.net.borrow_mut();
+                            crate::cfg_to_meta(&env.cfg.borrow(), &mut n.meta);
+                            let bytes = net_format::io::to_bytes(&n)
+                                .map_err(|e| e.to_string())?;
+                            crate::script::quota_fits(
+                                &env.data_dir.borrow(),
+                                &p,
+                                bytes.len() as u64,
+                                *env.quota_bytes.borrow(),
+                            )?;
+                            std::fs::write(&p, &bytes).map_err(|e| format!("{p}: {e}"))
+                        });
+                        match done {
+                            Ok(()) => emit_to(
+                                &emit,
+                                client,
+                                ServerMsg::Saved {
+                                    path: path.clone(),
+                                    version: env.net_version.get(),
+                                },
+                            ),
+                            Err(e) => emit_to(
+                                &emit,
+                                client,
+                                ServerMsg::Error(format!("save {path}: {e}")),
+                            ),
                         }
                     }
                     ClientMsg::NewNet => {

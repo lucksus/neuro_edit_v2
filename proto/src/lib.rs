@@ -443,6 +443,13 @@ pub enum ClientMsg {
     },
     /// Polite disconnect.
     Bye,
+    /// Q6: save the live network to `path` (server-resolved) with a typed
+    /// acknowledgement — answers `Saved` or `Error`. Unlike an eval of
+    /// `net.save(..)` this carries the saved net version back so the
+    /// client can mark the document clean only on real confirmation.
+    SaveNet {
+        path: String,
+    },
 }
 
 /// The per-publish dynamic frame — rate-limited by the server
@@ -560,6 +567,12 @@ pub enum ServerMsg {
     },
     /// Refused edit / protocol error / worker failure worth a dialog.
     Error(String),
+    /// Q6: answer to `ClientMsg::SaveNet` — the file landed; `version`
+    /// is the net version that was written (the document's clean mark).
+    Saved { path: String, version: u64 },
+    /// Q7: answer to a successful `ClientMsg::LoadNet` — `net_path` and
+    /// recent-file lists update only on this, never on the request.
+    NetLoaded { path: String, version: u64 },
 }
 
 /// One row of `JobList` — a live job or a `runs/<id>` artifact.
