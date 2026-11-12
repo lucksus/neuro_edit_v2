@@ -2821,13 +2821,7 @@ impl EditorApp {
         self.err_seq_seen = self.ctl.shared.read().unwrap().err_seq;
         let mut open = self.show_console;
         let u = usable_rect(ctx);
-        let dr = clamp_window_rect(
-            egui::Rect::from_min_size(
-                egui::pos2(u.max.x - 430.0, u.max.y - 260.0),
-                egui::vec2(420.0, 240.0),
-            ),
-            u,
-        );
+        let dr = console_default_rect(u);
         app_win(ctx, "Console (Rhai)")
             .open(&mut open)
             .default_size(dr.size())
@@ -3032,13 +3026,7 @@ impl EditorApp {
         }
         let mut open = self.show_plots;
         let u = usable_rect(ctx);
-        let dr = clamp_window_rect(
-            egui::Rect::from_min_size(
-                egui::pos2(u.min.x + 12.0, u.max.y - 240.0),
-                egui::vec2(480.0, 220.0),
-            ),
-            u,
-        );
+        let dr = plots_default_rect(u);
         app_win(ctx, "Plots")
             .open(&mut open)
             .default_size(dr.size())
@@ -3991,6 +3979,34 @@ fn app_win<'open>(ctx: &egui::Context, title: impl Into<egui::WidgetText>) -> eg
     egui::Window::new(title).constrain_to(usable_rect(ctx))
 }
 
+/// U3: bottom-right Console default.
+fn console_default_rect(u: egui::Rect) -> egui::Rect {
+    clamp_window_rect(
+        egui::Rect::from_min_size(
+            egui::pos2(u.max.x - 430.0, u.max.y - 260.0),
+            egui::vec2(420.0, 240.0),
+        ),
+        u,
+    )
+}
+
+/// U3: bottom-left Plots default — on narrow viewports the two
+/// bottom-anchored windows collide, so Plots stacks above Console.
+fn plots_default_rect(u: egui::Rect) -> egui::Rect {
+    let side = egui::vec2(480.0, 220.0);
+    let c = console_default_rect(u);
+    let stacked = c.min.x < u.min.x + 12.0 + side.x + 8.0;
+    let y = if stacked {
+        c.min.y - side.y - 12.0
+    } else {
+        u.max.y - side.y - 20.0
+    };
+    clamp_window_rect(
+        egui::Rect::from_min_size(egui::pos2(u.min.x + 12.0, y), side),
+        u,
+    )
+}
+
 /// U5: the banner shows only on a real mid-session disconnect — not
 /// while the login dialog is up (there is no session to lose yet).
 fn show_disconnect_banner(connected: bool, login_open: bool) -> bool {
@@ -4185,6 +4201,19 @@ mod tests {
         g.pos.truncate(3);
         assert!(!example_geo_covers(Some(7), Some(&g), &ids));
         assert!(!example_geo_covers(Some(7), None, &ids));
+    }
+
+    #[test]
+    fn plots_and_console_defaults_never_overlap() {
+        // U3: at narrow widths the defaults stack; wide stays
+        // side-by-side. Assert disjoint at every reasonable width.
+        for w in [500.0_f32, 800.0, 930.0, 1440.0] {
+            let u = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(w, 700.0));
+            assert!(
+                !plots_default_rect(u).intersects(console_default_rect(u)),
+                "default windows overlap at {w} px"
+            );
+        }
     }
 
     #[test]
