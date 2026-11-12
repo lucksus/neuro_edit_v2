@@ -397,7 +397,15 @@ impl Fold {
                     entry.2 = done;
                 }
             }
-            proto::ServerMsg::Error(e) => sh.log(format!("! {e}")),
+            proto::ServerMsg::Error(e) => {
+                // Q5: a refused edit consumed no version — give the
+                // optimistic slot back, or every later edit carries a
+                // stale base and is refused too (silent-drop spiral).
+                if e.starts_with("edit refused:") {
+                    sh.edits_in_flight = sh.edits_in_flight.saturating_sub(1);
+                }
+                sh.log(format!("! {e}"));
+            }
         }
     }
 
@@ -742,5 +750,39 @@ mod tests {
         };
         fold.apply(&mut sh, proto::ServerMsg::GeoDelta(Box::new(d)));
         assert_eq!(sh.net_gen, 2);
+    }
+
+    #[test]
+    fn refused_edit_returns_the_optimistic_slot() {
+        // Q5: two edits went out on optimistic bases; the second is
+        // refused for a *content* reason (no resync follows). Without the
+        // decrement the in-flight count stays inflated and every later
+        // edit is sent on a stale base → refused → silent drop.
+        let mut fold = Fold::default();
+        let mut sh = Shared::default();
+        sh.net_version = 5;
+        sh.edits_in_flight = 2;
+        fold.apply(
+            &mut sh,
+            proto::ServerMsg::Error("edit refused: unknown neuron id 9".into()),
+        );
+        assert_eq!(sh.edits_in_flight, 1);
+        // unrelated errors don't touch the counter
+        fold.apply(&mut sh, proto::ServerMsg::Error("disk full".into()));
+        assert_eq!(sh.edits_in_flight, 1);
+        fold.apply(
+            &mut sh,
+            proto::ServerMsg::Error("edit refused: bad".into()),
+        );
+        assert_eq!(sh.edits_in_flight, 0);
+        // never goes negative
+        fold.apply(
+            &mut sh,
+            proto::ServerMsg::Error("edit refused: bad".into()),
+        );
+        assert_eq!(sh.edits_in_flight, 0);
+        // and a fresh edit now bases on the true version again
+        sh.edits_in_flight += 1;
+        assert_eq!(sh.net_version + sh.edits_in_flight - 1, 5);
     }
 }
