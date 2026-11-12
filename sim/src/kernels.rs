@@ -51,7 +51,8 @@ extern "C" __global__ void neuron_kernel(
     int* spk, int* cnt_cur,
     u64* spk_row,
     u64* pn_total,
-    const u32* vwatch, int nwatch, float* vrec, int vrec_d)
+    const u32* vwatch, int nwatch, float* vrec, int vrec_d,
+    const int* gmap, int n_grids, u32* gls, const u32* goff)
 {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if(i >= N) return;
@@ -94,6 +95,12 @@ extern "C" __global__ void neuron_kernel(
     if(spk_row != 0){
       atomicOr(spk_row + (i >> 6), (u64)1 << (i & 63));
     }
+    // mark the texels this neuron belongs to (editor plane view): each
+    // grid group's last-spike-step array is materialized on readback.
+    for(int g = 0; g < n_grids; ++g){
+      int tex = gmap[(u64)g * (u64)N + (u64)i];
+      if(tex >= 0) gls[(u64)goff[g] + (u64)tex] = (u32)t;
+    }
   }else{
     trace[i] *= decay_t;
   }
@@ -128,5 +135,17 @@ extern "C" __global__ void prop_kernel(
       atomicAdd(&ring[(u64)slot * N + tgt[j]], rt_put(w[j]));
     }
   }
+}
+
+// Materialize one grid group's spike-trace buffer for readback:
+// out[texel] = exp(-(t - last_spike_step) * k), 0 for never-spiked.
+extern "C" __global__ void grid_trace_kernel(
+    const u32* ls, int M, u64 t, float k, float* out)
+{
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if(i >= M) return;
+  u32 l = ls[i];
+  out[i] = (l == 0xFFFFFFFFu) ? 0.f
+        : expf(-(float)(t - (u64)l) * k);
 }
 "#;

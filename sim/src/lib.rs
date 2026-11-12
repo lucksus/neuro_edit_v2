@@ -224,6 +224,27 @@ impl Sim {
         }
     }
 
+    /// Set the grid-group member lists (texel order) whose spike traces the
+    /// editor's plane view wants. No-op when unchanged; safe to call every
+    /// publish.
+    pub fn set_grid_watches(&mut self, groups: &[Vec<u32>]) {
+        match self {
+            Sim::Cpu(s) => s.set_grid_watches(groups),
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.set_grid_watches(groups),
+        }
+    }
+
+    /// Materialized spike traces for each watched grid group — one f32 per
+    /// texel (member order), `exp(-(t - last_spike) * dt / tau_ms)`.
+    pub fn grid_traces(&mut self, tau_ms: f32) -> anyhow::Result<Vec<Vec<f32>>> {
+        match self {
+            Sim::Cpu(s) => Ok(s.grid_traces(tau_ms)),
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.grid_traces(tau_ms),
+        }
+    }
+
     /// Constant external current on one neuron.
     pub fn set_external(&mut self, neuron: usize, amps: f32) {
         match self {

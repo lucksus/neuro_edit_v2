@@ -49,12 +49,29 @@ pub struct CpuSim {
     /// per-watched-neuron per-step v history, capped at `V_HIST_CAP`
     pub v_hist: Vec<std::collections::VecDeque<f32>>,
 
+    /// per-grid-group spike-trace bookkeeping (editor plane view)
+    pub grid_watches: Vec<GridWatch>,
+
     pub t: u64,
     pub spikes_total: u64,
 }
 
 /// Max per-step v samples kept per watched neuron between drains.
 pub const V_HIST_CAP: usize = 4096;
+
+/// Per-grid-group spike-trace bookkeeping. `map[neuron]` is that neuron's
+/// texel index (-1 when not a member); `ls[texel]` is the absolute step of
+/// the texel's most recent spike (u32::MAX = never). The materialized
+/// trace `exp(-(t - ls) * dt / tau)` is computed on read so the view's tau
+/// stays a display choice rather than baked into the sim state.
+pub struct GridWatch {
+    /// member list in texel order (kept for the no-op check)
+    pub members: Vec<u32>,
+    /// neuron id -> texel index, -1 when not a member
+    pub map: Vec<i32>,
+    /// texel -> absolute step of last spike (u32::MAX = never spiked)
+    pub ls: Vec<u32>,
+}
 
 impl CpuSim {
     pub fn new(net: &Network, cfg: SimConfig) -> Self {
@@ -88,6 +105,7 @@ impl CpuSim {
             words,
             v_watch: Vec::new(),
             v_hist: Vec::new(),
+            grid_watches: Vec::new(),
             t: 0,
             spikes_total: 0,
             cfg,
@@ -115,6 +133,9 @@ impl CpuSim {
         self.spikes_total = 0;
         for d in &mut self.v_hist {
             d.clear();
+        }
+        for w in &mut self.grid_watches {
+            w.ls.fill(u32::MAX);
         }
     }
 
@@ -204,6 +225,17 @@ impl CpuSim {
         for &i in &spiked {
             self.pn_total[i as usize] += 1;
         }
+        if !self.grid_watches.is_empty() {
+            let t32 = (t.min(u32::MAX as u64 - 1)) as u32;
+            for &i in &spiked {
+                for w in &mut self.grid_watches {
+                    let k = w.map[i as usize];
+                    if k >= 0 {
+                        w.ls[k as usize] = t32;
+                    }
+                }
+            }
+        }
         self.spikes_total += spiked.len() as u64;
         self.t += 1;
     }
@@ -241,6 +273,56 @@ impl CpuSim {
         self.v_hist
             .iter_mut()
             .map(|d| d.drain(..).collect())
+            .collect()
+    }
+
+    /// Set the grid-group member lists (texel order) whose spike traces the
+    /// plane view wants. No-op when unchanged; safe to call every publish.
+    pub fn set_grid_watches(&mut self, groups: &[Vec<u32>]) {
+        if self.grid_watches.len() == groups.len()
+            && self
+                .grid_watches
+                .iter()
+                .zip(groups)
+                .all(|(w, g)| w.members == *g)
+        {
+            return;
+        }
+        self.grid_watches = groups
+            .iter()
+            .map(|members| {
+                let mut map = vec![-1i32; self.n];
+                for (k, &m) in members.iter().enumerate() {
+                    if let Some(slot) = map.get_mut(m as usize) {
+                        *slot = k as i32;
+                    }
+                }
+                GridWatch {
+                    ls: vec![u32::MAX; members.len()],
+                    members: members.clone(),
+                    map,
+                }
+            })
+            .collect();
+    }
+
+    /// Materialized spike traces for each watched grid group: one f32 per
+    /// texel (member order), `exp(-(t - last_spike) * dt / tau_ms)`.
+    pub fn grid_traces(&self, tau_ms: f32) -> Vec<Vec<f32>> {
+        let k = self.cfg.dt_ms / tau_ms.max(1e-6);
+        self.grid_watches
+            .iter()
+            .map(|w| {
+                w.ls.iter()
+                    .map(|&l| {
+                        if l == u32::MAX {
+                            0.0
+                        } else {
+                            (-(self.t.saturating_sub(l as u64) as f32) * k).exp()
+                        }
+                    })
+                    .collect()
+            })
             .collect()
     }
 

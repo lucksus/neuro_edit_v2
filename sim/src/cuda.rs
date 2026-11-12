@@ -29,6 +29,7 @@ pub struct CudaSim {
     stream: Arc<CudaStream>,
     f_neuron: CudaFunction,
     f_prop: CudaFunction,
+    f_gtrace: CudaFunction,
 
     // device state
     v: CudaSlice<f32>,
@@ -74,6 +75,20 @@ pub struct CudaSim {
     /// steps recorded into vrec_dev since the last drain
     vrec_valid: u64,
 
+    // grid-group spike traces (editor plane view): last-spike-step per
+    // texel, marked inside neuron_kernel and materialized on readback
+    /// host copy of each group's member list in texel order
+    pub grid_watches: Vec<Vec<u32>>,
+    /// concat neuron->texel map, n entries per group (-1 = not a member)
+    gmap: CudaSlice<i32>,
+    /// concat per-texel last-spike-step (u32::MAX = never spiked)
+    gls: CudaSlice<u32>,
+    /// per-group offset into gls
+    goff: CudaSlice<u32>,
+    /// scratch for `grid_trace_kernel` output (largest group's texel count)
+    gtr: CudaSlice<f32>,
+    grid_dirty: bool,
+
     // host-side mirrors
     pub n: usize,
     pub cfg: SimConfig,
@@ -110,6 +125,7 @@ impl CudaSim {
         let module: Arc<CudaModule> = ctx.load_module(ptx).context("load_module")?;
         let f_neuron = module.load_function("neuron_kernel")?;
         let f_prop = module.load_function("prop_kernel")?;
+        let f_gtrace = module.load_function("grid_trace_kernel")?;
 
         let stim_ptr_host: Vec<u32> = stim_map.neuron_ptr.clone();
         let stim_input_host = stim_map.input_idx.clone();
@@ -166,6 +182,12 @@ impl CudaSim {
             vrec_dev: stream.alloc_zeros(1)?,
             vrec_dirty: false,
             vrec_valid: 0,
+            grid_watches: Vec::new(),
+            gmap: stream.alloc_zeros(1)?,
+            gls: stream.alloc_zeros(1)?,
+            goff: stream.alloc_zeros(1)?,
+            gtr: stream.alloc_zeros(1)?,
+            grid_dirty: false,
             n,
             cfg,
             params,
@@ -181,6 +203,7 @@ impl CudaSim {
             stream,
             f_neuron,
             f_prop,
+            f_gtrace,
         };
         Ok(sim)
     }
@@ -222,6 +245,7 @@ impl CudaSim {
         let n_inputs_i32 = self.n_inputs as i32;
         let nwatch_i32 = self.v_watch.len() as i32;
         let vrec_d_i32 = VREC_D as i32;
+        let n_grids_i32 = self.grid_watches.len() as i32;
         let stim_t0 = self.stim_t0;
         let cur = (t % 2) as usize;
         let record = self.cfg.record_spikes && self.record_rows > 0;
@@ -281,7 +305,11 @@ impl CudaSim {
                 .arg(&self.vwatch_dev)
                 .arg(&nwatch_i32)
                 .arg(&mut self.vrec_dev)
-                .arg(&vrec_d_i32);
+                .arg(&vrec_d_i32)
+                .arg(&self.gmap)
+                .arg(&n_grids_i32)
+                .arg(&mut self.gls)
+                .arg(&self.goff);
             b.launch(cfg_launch)?;
         }
 
@@ -346,6 +374,96 @@ impl CudaSim {
         Ok(())
     }
 
+    /// Upload the concat maps + offsets for grid watches (lazy, only after
+    /// `set_grid_watches` changed the member lists).
+    fn upload_grid(&mut self) -> Result<()> {
+        let mut map = vec![-1i32; self.grid_watches.len() * self.n];
+        let mut off: Vec<u32> = Vec::with_capacity(self.grid_watches.len());
+        let mut m_max = 0usize;
+        let mut acc = 0u32;
+        for (g, members) in self.grid_watches.iter().enumerate() {
+            off.push(acc);
+            acc += members.len() as u32;
+            for (k, &m) in members.iter().enumerate() {
+                if let Some(slot) = map.get_mut(g * self.n + m as usize) {
+                    *slot = k as i32;
+                }
+            }
+            m_max = m_max.max(members.len());
+        }
+        let total: usize = self.grid_watches.iter().map(|m| m.len()).sum();
+        self.gmap = self.stream.clone_htod(&{
+            let mut v = map;
+            if v.is_empty() {
+                v.push(-1);
+            }
+            v
+        })?;
+        self.gls = self.stream.clone_htod(&vec![u32::MAX; total.max(1)])?;
+        self.goff = self.stream.clone_htod(&{
+            let mut v = off;
+            if v.is_empty() {
+                v.push(0);
+            }
+            v
+        })?;
+        if self.gtr.len() < m_max.max(1) {
+            self.gtr = self.stream.alloc_zeros(m_max.max(1))?;
+        }
+        self.grid_dirty = false;
+        Ok(())
+    }
+
+    /// Set the grid-group member lists (texel order) whose spike traces the
+    /// plane view wants. No-op when unchanged; safe to call every publish.
+    pub fn set_grid_watches(&mut self, groups: &[Vec<u32>]) {
+        if self.grid_watches == groups {
+            return;
+        }
+        self.grid_watches = groups.to_vec();
+        self.grid_dirty = true;
+    }
+
+    /// Materialized spike traces for each watched grid group: one f32 per
+    /// texel (member order), `exp(-(t - last_spike) * dt / tau_ms)` —
+    /// computed on device by `grid_trace_kernel`, read back per group.
+    pub fn grid_traces(&mut self, tau_ms: f32) -> Result<Vec<Vec<f32>>> {
+        if self.grid_dirty {
+            self.upload_grid()?;
+        }
+        self.stream.synchronize()?;
+        let k = self.cfg.dt_ms / tau_ms.max(1e-6);
+        let mut out = Vec::with_capacity(self.grid_watches.len());
+        let mut off = 0usize;
+        for members in &self.grid_watches {
+            let m = members.len();
+            let mut host = vec![0.0f32; m];
+            if m > 0 {
+                let m_i32 = m as i32;
+                let ls_view = self.gls.slice(off..off + m);
+                let mut tr_view = self.gtr.slice_mut(0..m);
+                let cfg = LaunchConfig {
+                    grid_dim: (m.div_ceil(BLOCK as usize) as u32, 1, 1),
+                    block_dim: (BLOCK, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                unsafe {
+                    let mut b = self.stream.launch_builder(&self.f_gtrace);
+                    b.arg(&ls_view)
+                        .arg(&m_i32)
+                        .arg(&self.t)
+                        .arg(&k)
+                        .arg(&mut tr_view);
+                    b.launch(cfg)?;
+                }
+                self.stream.memcpy_dtoh(&tr_view, &mut host)?;
+            }
+            out.push(host);
+            off += m;
+        }
+        Ok(out)
+    }
+
     /// Set the watched-neuron list; no-op when unchanged (safe to call
     /// every publish — history survives unchanged watch lists).
     pub fn set_v_watch(&mut self, ids: &[u32]) {
@@ -398,6 +516,9 @@ impl CudaSim {
         if self.vrec_dirty {
             self.upload_vwatch()?;
         }
+        if self.grid_dirty {
+            self.upload_grid()?;
+        }
         // upload the stimulus window for this chunk, then fire-and-forget
         self.stim_t0 = self.upload_stim(n_steps)?;
         for _ in 0..n_steps {
@@ -437,6 +558,12 @@ impl CudaSim {
         self.stream.memset_zeros(&mut self.spk_bits).unwrap();
         self.stream.memset_zeros(&mut self.pn_total).unwrap();
         self.vrec_valid = 0;
+        if !self.grid_watches.is_empty() && !self.grid_dirty {
+            let total: usize = self.grid_watches.iter().map(|m| m.len()).sum();
+            self.stream
+                .memcpy_htod(&vec![u32::MAX; total], &mut self.gls)
+                .unwrap();
+        }
         self.t = 0;
     }
 
