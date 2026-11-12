@@ -116,6 +116,10 @@ pub struct EditorApp {
     /// disconnect banner's reconnect button.
     connect_url: String,
     connect_tok: String,
+    /// U5b: auto-retry schedule — egui time of the next attempt and
+    /// the current backoff step (2,4,8…60 s).
+    reconnect_at: Option<f64>,
+    reconnect_delay: f64,
     pub(crate) show_console: bool,
     pub(crate) show_plots: bool,
     pub(crate) show_inspector: bool,
@@ -596,6 +600,8 @@ impl EditorApp {
             err_seq_seen: 0,
             connect_url: String::new(),
             connect_tok: String::new(),
+            reconnect_at: None,
+            reconnect_delay: 2.0,
             show_console: wins.console,
             show_plots: wins.plots,
             show_inspector: wins.inspector,
@@ -1852,37 +1858,105 @@ impl EditorApp {
         ) {
             return;
         }
-        egui::Window::new("disconnected")
-            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 8.0))
-            .collapsible(false)
-            .resizable(false)
+        // U5b: schedule the first auto-retry once, then countdown in
+        // the banner. egui only repaints on dirty — nudge it so the
+        // countdown (and the due attempt) actually ticks.
+        // U5b: arm the next attempt from the *persisted* delay —
+        // a fresh login resets it to 2 s, but a retry that fails (or,
+        // on wasm, a pending socket that closes right after) keeps
+        // backing off instead of looping at the initial 2 s.
+        let now = ctx.input(|i| i.time);
+        if self.reconnect_at.is_none() {
+            self.reconnect_at = Some(now + self.reconnect_delay);
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        let can_retry = self.can_reconnect();
+        let due = can_retry && self.reconnect_at.is_some_and(|t| now >= t);
+        let mut manual = false;
+        let top = usable_rect(ctx).min.y + 8.0;
+        egui::Area::new("disconnect-banner".into())
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, top))
+            .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("connection to server lost")
-                            .color(egui::Color32::LIGHT_RED),
-                    );
-                    #[cfg(target_arch = "wasm32")]
-                    if ui.button("reconnect").clicked() {
-                        if let Some(w) = web_sys::window() {
-                            let _ = w.location().reload();
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("connection to server lost")
+                                .color(egui::Color32::LIGHT_RED),
+                        );
+                        if can_retry {
+                            let left = self
+                                .reconnect_at
+                                .map(|t| (t - now).ceil().max(0.0) as u32)
+                                .unwrap_or(0);
+                            ui.weak(format!("retrying in {left}s"));
+                            manual = ui.button("Retry now").clicked();
                         }
-                    }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    if ui
-                        .add_enabled(!self.connect_url.is_empty(), egui::Button::new("reconnect"))
-                        .clicked()
-                    {
-                        match SimCtl::connect_secure(&self.connect_url, &self.connect_tok) {
-                            Ok(ctl) => {
-                                self.ctl = ctl;
-                                self.status = "reconnected".into();
-                            }
-                            Err(e) => self.status = format!("reconnect: {e}"),
-                        }
-                    }
+                    });
                 });
             });
+        if due || manual {
+            if self.try_reconnect() {
+                // Attempt launched. Native connect_secure only returns
+                // Ok for a live socket; the wasm socket is still
+                // pending — either way, clear the timer: if it closes
+                // again the banner re-arms at the (already grown)
+                // delay, so attempts march 2,4,8…60 and never tighten.
+                self.reconnect_at = None;
+                self.status = "reconnecting…".into();
+            } else {
+                self.reconnect_at = Some(now + self.reconnect_delay);
+            }
+            self.reconnect_delay = next_backoff(self.reconnect_delay);
+        }
+    }
+
+    /// Whether a retry is possible at all (native local mode has no
+    /// socket to lose; the flag can never go false there anyway).
+    fn can_reconnect(&self) -> bool {
+        if cfg!(target_arch = "wasm32") {
+            true // ws url recomputed from location each attempt
+        } else {
+            !self.connect_url.is_empty()
+        }
+    }
+
+    /// One reconnect attempt, in place — the dead SimCtl is replaced
+    /// wholesale (native spawns fresh pump/writer threads; wasm opens
+    /// a new WebSocket, whose server re-sends Hello + Geo).
+    fn try_reconnect(&mut self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let host = web_sys::window()
+                .and_then(|w| w.location().host().ok())
+                .unwrap_or_default();
+            let secure = web_sys::window()
+                .and_then(|w| w.location().protocol().ok())
+                .as_deref()
+                == Some("https:");
+            let url = format!("{}://{}/ws", if secure { "wss" } else { "ws" }, host);
+            match SimCtl::connect(&url) {
+                Ok(ctl) => {
+                    self.ctl = ctl;
+                    true
+                }
+                Err(e) => {
+                    self.status = format!("reconnect: {e}");
+                    false
+                }
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        match SimCtl::connect_secure(&self.connect_url, &self.connect_tok) {
+            Ok(ctl) => {
+                self.ctl = ctl;
+                true
+            }
+            Err(e) => {
+                self.status = format!("reconnect: {e}");
+                false
+            }
+        }
     }
 
     fn inspector(&mut self, ctx: &egui::Context) {
@@ -2498,6 +2572,7 @@ impl EditorApp {
                         self.ctl = ctl;
                         self.connect_url = url.to_string();
                         self.connect_tok = tok;
+                        self.reconnect_delay = 2.0;
                         self.status = "connected".into();
                         return;
                     }
@@ -2540,6 +2615,7 @@ impl EditorApp {
                 self.ctl = ctl;
                 self.connect_url = lg.url.clone();
                 self.connect_tok = token.clone();
+                self.reconnect_delay = 2.0;
                 if lg.remember {
                     self.saved_token = Some((lg.url.clone(), token));
                 }
@@ -3974,6 +4050,12 @@ impl eframe::App for EditorApp {
         if animating {
             ctx.request_repaint();
         }
+        // U5b: one quiet heartbeat per second even when fully idle —
+        // transport writes (a closed socket, a late ServerMsg) bump
+        // dirty_seq inside Shared, but nothing else wakes a frame to
+        // notice, so an idle page would sit frozen forever. 1 fps is
+        // effectively free and bounds the disconnect notice to ~1 s.
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
         self.net_touched = false;
     }
 }
@@ -4054,6 +4136,16 @@ fn plots_default_rect(u: egui::Rect) -> egui::Rect {
         egui::Rect::from_min_size(egui::pos2(u.min.x + 12.0, y), side),
         u,
     )
+}
+
+/// U5b: next auto-retry delay — 2 s first, doubling, capped at 60 s.
+/// A manual Retry keeps the same progression (a click is not a loop).
+fn next_backoff(prev: f64) -> f64 {
+    if prev <= 0.0 {
+        2.0
+    } else {
+        (prev * 2.0).min(60.0)
+    }
 }
 
 /// U5: the banner shows only on a real mid-session disconnect — not
@@ -4291,6 +4383,18 @@ mod tests {
                 "default windows overlap at {w} px"
             );
         }
+    }
+
+    #[test]
+    fn reconnect_backoff_doubles_to_60() {
+        let mut d = 0.0;
+        let seq: Vec<u64> = (0..8)
+            .map(|_| {
+                d = next_backoff(d);
+                d as u64
+            })
+            .collect();
+        assert_eq!(seq, vec![2, 4, 8, 16, 32, 60, 60, 60]);
     }
 
     #[test]
