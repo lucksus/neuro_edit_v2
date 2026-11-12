@@ -125,6 +125,14 @@ server --bind 127.0.0.1:3090 --data-dir /path/to/data --web editor/dist-web
 Without `--web` the port only speaks the wire protocol: a browser GET gets a
 `426` reply explaining these steps.
 
+**WebGPU**: the page checks `navigator.gpu`/`requestAdapter()` before loading
+the wasm and, when WebGPU can't be had, shows a per-browser how-to page
+(Chrome/Brave/Edge/Vivaldi/Opera flags on Linux, Firefox `dom.webgpu.enabled`,
+Safari Feature Flags, plus the `editor --connect` fallback for the desktop
+editor). The detection + instruction choice is a plain ES module
+(`editor/web/webgpu-help.mjs`) tested with
+`node --test editor/web/webgpu-help.test.mjs`.
+
 ## Architecture notes
 
 - One `Network` (flat arrays) is shared by the CPU sim, CUDA sim and the

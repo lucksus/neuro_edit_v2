@@ -15,10 +15,14 @@
 </head>
 <body>
 <canvas id="ne_canvas"></canvas>
-<div id="loading">loading neuro_edit v2…</div>
+<div id="loading">checking WebGPU…</div>
 <script type="module">
+  // Check WebGPU BEFORE the wasm bundle loads: without it the editor
+  // can't start anyway, and a clear how-to page beats a dead canvas.
+  // webgpu-help.mjs is a plain ES module — no build step.
+  import { boot } from './webgpu-help.mjs';
   import init from './editor.js';
-  init().finally(() => document.getElementById('loading')?.remove());
+  boot(() => init());
 </script>
 </body>
 </html>

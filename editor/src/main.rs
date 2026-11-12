@@ -231,16 +231,29 @@ fn main() {
             )
             .await;
         if let Err(e) = r {
-            let msg = format!(
-                "neuro_edit v2 needs WebGPU (the 3D view uses storage buffers). \
-                 Adapter/device request failed: {e:?}"
-            );
+            // index.html's boot() already showed WebGPU help when the
+            // adapter check failed; a failure HERE means an adapter was
+            // offered but the device request died — render the same
+            // per-browser help via window.neWebgpuHelp.show(), keeping
+            // the raw JsValue in the details line.
+            let msg = format!("Adapter/device request failed: {e:?}");
             if let Some(w) = web_sys::window() {
-                if let Some(d) = w.document() {
-                    if let Some(b) = d.body() {
+                let shown = js_sys::Reflect::get(&w, &"neWebgpuHelp".into())
+                    .ok()
+                    .and_then(|o| js_sys::Reflect::get(&o, &"show".into()).ok())
+                    .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+                    .map(|f| f.call1(&w, &msg.clone().into()));
+                if shown.is_none() {
+                    // help module not on the page (old bundle): last
+                    // resort — the raw message on a dark page
+                    let full = format!(
+                        "neuro_edit v2 needs WebGPU (the 3D view uses storage \
+                         buffers). {msg}"
+                    );
+                    if let Some(b) = w.document().and_then(|d| d.body()) {
                         b.set_inner_html(&format!(
                             "<div style='color:#ddd;background:#181818;\
-                             font:15px/1.6 monospace;padding:3em'>{msg}</div>"
+                             font:15px/1.6 monospace;padding:3em'>{full}</div>"
                         ));
                     }
                 }

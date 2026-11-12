@@ -15,4 +15,5 @@ wasm-bindgen --target web \
   --out-dir editor/dist-web \
   target/wasm32-unknown-unknown/release/editor.wasm
 cp editor/web/index.html editor/dist-web/index.html
+cp editor/web/webgpu-help.mjs editor/dist-web/webgpu-help.mjs
 echo "editor/dist-web ready — serve with: server --bind 127.0.0.1:3090 --web editor/dist-web"
