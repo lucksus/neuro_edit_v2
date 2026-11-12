@@ -32,7 +32,6 @@ pub type ProgressFn = Rc<RefCell<dyn FnMut(&Sim) -> bool>>;
 pub struct Env {
     pub engine: Engine,
     pub net: NetHandle,
-    pub backend: BackendKind,
     pub rng: RngHandle,
     pub cfg: CfgHandle,
     sim: SimSlot,
@@ -43,6 +42,8 @@ pub struct Env {
     pub progress: Rc<RefCell<Option<ProgressFn>>>,
     /// Chunk length for progress callbacks, in steps.
     pub progress_chunk: Rc<std::cell::Cell<usize>>,
+    /// Live backend choice; write via `set_backend`.
+    pub backend: BackendCell,
 }
 
 impl Env {
@@ -68,13 +69,14 @@ impl Env {
         let net_version = Rc::new(std::cell::Cell::new(1u64));
         let progress: Rc<RefCell<Option<ProgressFn>>> = Rc::new(RefCell::new(None));
         let progress_chunk = Rc::new(std::cell::Cell::new(200usize));
+        let backend: BackendCell = Rc::new(std::cell::Cell::new(backend));
         register_api(
             &mut engine,
             net.clone(),
             sim.clone(),
             rng.clone(),
             cfg.clone(),
-            backend,
+            backend.clone(),
             net_version.clone(),
             progress.clone(),
             progress_chunk.clone(),
@@ -99,10 +101,16 @@ impl Env {
         *self.progress.borrow_mut() = Some(cb);
     }
 
+    /// Switch the backend scripts build sims on (invalidates any built sim).
+    pub fn set_backend(&self, b: BackendKind) {
+        self.backend.set(b);
+        self.invalidate_sim();
+    }
+
     /// Build (or rebuild) the simulator from the current network + config.
     pub fn build_sim(&self) -> anyhow::Result<Rc<RefCell<Sim>>> {
         let cfg = self.cfg.borrow().clone();
-        let s = Sim::new(&self.net.borrow(), cfg, self.backend)?;
+        let s = Sim::new(&self.net.borrow(), cfg, self.backend.get())?;
         let h = Rc::new(RefCell::new(s));
         *self.sim.borrow_mut() = Some(h.clone());
         Ok(h)
@@ -203,18 +211,24 @@ fn nid(id: i64, n: usize) -> Result<u32, Box<rhai::EvalAltResult>> {
     Ok(id as u32)
 }
 
+/// Shared backend cell — `Cmd::SetBackend` writes here and the Rhai
+/// `sim.*` closures read it live, so a backend switch is honoured by the
+/// next script-run sim build (previously the choice was captured once at
+/// `Env` creation and scripts kept using the old backend).
+pub type BackendCell = Rc<std::cell::Cell<BackendKind>>;
+
 /// Build or fetch the sim inside the slot (mirrors `Env::sim_handle`).
 fn ensure_sim(
     slot: &SimSlot,
     net: &NetHandle,
     cfg: &CfgHandle,
-    kind: BackendKind,
+    kind: &BackendCell,
 ) -> Result<Rc<RefCell<Sim>>, Box<rhai::EvalAltResult>> {
     if let Some(h) = slot.borrow().as_ref() {
         return Ok(h.clone());
     }
     let c = cfg.borrow().clone();
-    let s = Sim::new(&net.borrow(), c, kind)
+    let s = Sim::new(&net.borrow(), c, kind.get())
         .map_err(|e| -> Box<rhai::EvalAltResult> { e.to_string().into() })?;
     let h = Rc::new(RefCell::new(s));
     *slot.borrow_mut() = Some(h.clone());
@@ -266,7 +280,7 @@ pub fn register_api(
     sim: SimSlot,
     rng: RngHandle,
     cfg: CfgHandle,
-    backend: BackendKind,
+    backend: BackendCell,
     net_version: Rc<std::cell::Cell<u64>>,
     progress: Rc<RefCell<Option<ProgressFn>>>,
     progress_chunk: Rc<std::cell::Cell<usize>>,
@@ -665,11 +679,12 @@ pub fn register_api(
     // ---- sim methods ----
     {
         let (s, n, c) = (sim.clone(), net.clone(), cfg.clone());
+        let b = backend.clone();
         let (p, pc) = (progress.clone(), progress_chunk.clone());
         engine.register_fn(
             "run",
             move |_: &mut SimSlot, ms: Dynamic| -> Result<(), Box<rhai::EvalAltResult>> {
-                let h = ensure_sim(&s, &n, &c, backend)?;
+                let h = ensure_sim(&s, &n, &c, &b)?;
                 let steps = (d_f64(&ms) as f32 / c.borrow().dt_ms).round().max(0.0) as usize;
                 run_chunked(&h, steps, &p, &pc).map_err(s_err)
             },
@@ -677,21 +692,23 @@ pub fn register_api(
     }
     {
         let (s, n, c) = (sim.clone(), net.clone(), cfg.clone());
+        let b = backend.clone();
         let (p, pc) = (progress.clone(), progress_chunk.clone());
         engine.register_fn(
             "run_steps",
             move |_: &mut SimSlot, steps: rhai::INT| -> Result<(), Box<rhai::EvalAltResult>> {
-                let h = ensure_sim(&s, &n, &c, backend)?;
+                let h = ensure_sim(&s, &n, &c, &b)?;
                 run_chunked(&h, steps.max(0) as usize, &p, &pc).map_err(s_err)
             },
         );
     }
     {
         let (s, n, c) = (sim.clone(), net.clone(), cfg.clone());
+        let b = backend.clone();
         engine.register_fn(
             "build",
             move |_: &mut SimSlot| -> Result<(), Box<rhai::EvalAltResult>> {
-                ensure_sim(&s, &n, &c, backend)?;
+                ensure_sim(&s, &n, &c, &b)?;
                 Ok(())
             },
         );
@@ -804,6 +821,7 @@ pub fn register_api(
     });
     {
         let (s, n, c) = (sim.clone(), net.clone(), cfg.clone());
+        let b = backend.clone();
         engine.register_fn(
             "set_input",
             move |_: &mut SimSlot,
@@ -814,7 +832,7 @@ pub fn register_api(
                     Some(i) => i,
                     None => return Ok(()),
                 };
-                let h = ensure_sim(&s, &n, &c, backend)?;
+                let h = ensure_sim(&s, &n, &c, &b)?;
                 h.borrow_mut().set_input_constant(idx, d_f64(&x) as f32);
                 Ok(())
             },
@@ -822,6 +840,7 @@ pub fn register_api(
     }
     {
         let (s, n, c) = (sim.clone(), net.clone(), cfg.clone());
+        let b = backend.clone();
         engine.register_fn(
             "play_input",
             move |_: &mut SimSlot,
@@ -833,7 +852,7 @@ pub fn register_api(
                     None => return Ok(()),
                 };
                 let series: Vec<f32> = arr.iter().map(|d| d_f64(d) as f32).collect();
-                let h = ensure_sim(&s, &n, &c, backend)?;
+                let h = ensure_sim(&s, &n, &c, &b)?;
                 h.borrow_mut().play_input(idx, series);
                 Ok(())
             },
@@ -841,13 +860,14 @@ pub fn register_api(
     }
     {
         let (s, n, c) = (sim.clone(), net.clone(), cfg.clone());
+        let b = backend.clone();
         engine.register_fn(
             "set_external",
             move |_: &mut SimSlot,
                   id: rhai::INT,
                   amps: Dynamic|
                   -> Result<(), Box<rhai::EvalAltResult>> {
-                let h = ensure_sim(&s, &n, &c, backend)?;
+                let h = ensure_sim(&s, &n, &c, &b)?;
                 let n_len = h.borrow().v().len();
                 h.borrow_mut()
                     .set_external(nid(id, n_len)? as usize, d_f64(&amps) as f32);

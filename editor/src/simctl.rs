@@ -285,14 +285,13 @@ fn worker(
                 Cmd::Watch(ids) => {
                     let mut p = pub_rc.borrow_mut();
                     p.watch.ids = ids;
-                    p.watch.ring = vec![VecDeque::with_capacity(WATCH_CAP); p.watch.ids.len()];
                 }
                 Cmd::EditNet(f) => {
                     f(&mut env.net.borrow_mut());
                     bump(&env);
                 }
                 Cmd::SetBackend(b) => {
-                    env.backend = b;
+                    env.set_backend(b);
                     env.invalidate_sim();
                 }
                 Cmd::SetDtMs(dt) => {
