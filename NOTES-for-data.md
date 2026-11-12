@@ -1966,3 +1966,69 @@ so the assertion passed whether or not the worker exited. With every
 - Red check (done): all 5 `shutdown.load`/`shut.load` sites forced
   `false` → the test FAILS in 8.07 s (3 s bounded join + 5 s poll —
   the detached-but-alive worker is caught). Restored → passes.
+
+## Stage 18 — the remaining small items (review/fable-review-1112.md leftovers)
+
+- **Q12** `48e5608` — script API edges: `set_input`/`play_input` now error
+  on an unknown input name (`unknown input "x"` like `group_or_err`);
+  `set_neuron_name`/`add_to_group` bump `net_version` (group also
+  invalidates — membership feeds grid readouts); `set_syn_tau_one`
+  validates ids before casting (a negative used to wrap); `fit_ridge`
+  checks `x.len >= T*F` and `y.len >= T`; `samples_save`/`samples_load`/
+  `write_to_file` return their io errors to the script instead of
+  eprintln to the server stderr; `sim.v(id)` downloads the voltage
+  array once, not twice (matters on CUDA). Tests: bounds.rs
+  `script_unknown_input_name_is_an_error`,
+  `script_net_mutations_bump_net_version`,
+  `script_set_syn_tau_one_rejects_negative_ids`,
+  `script_fit_ridge_rejects_short_arrays`,
+  `script_file_errors_reach_the_script`.
+- **Q13** `9d91416` — the mouse-reachable quadratic paths, measured
+  (release build): `AddToGroup` 50k ids onto a 50k-member group —
+  `Vec::contains` per id: **84.6 ms → 1.0 ms** (HashSet dedupe);
+  `MoveNeurons` 5k of 20k neurons / 400k synapses — a
+  `refresh_delays_of` per id plus a `disp_list` rescan per source:
+  **565 ms → 19.7 ms** (`refresh_delays_moved` + `disp_lists`, one
+  synapse pass each); `GeoDelta` removing 30k of 60k edges — whole-
+  `GeoSnap` clone + `position()` per edge: **127.5 ms → 23.7 ms**
+  (`Arc::make_mut` + one set-retain pass). `cuda_available()` now
+  probes `CudaContext::new(0)` instead of NVRTC-building a whole
+  CudaSim to answer yes/no. Tests measure old-vs-new inline:
+  `add_to_group_large_net_is_not_quadratic`,
+  `move_neurons_large_net_is_one_pass` (serve.rs),
+  `geo_delta_inplace_and_batch_removal` (snap.rs).
+- **Q15** `31b4af0` — grid slice max `saturating_sub` (dim 0
+  underflowed); `mark_bits` helper skips out-of-range member ids;
+  `split_disp` clamps server offsets (a broken server can no longer
+  panic the client); a second `FileChunk` download mid-flight reports
+  via `last_error` instead of vanishing; FEATURE-PARITY 6.1/6.2
+  corrected (inspector has name/pos/kind, params are script-only).
+  The `conduction_delay_ms` doc comment already matched the code
+  after M2 — no change needed. Tests: `mark_bits_ignores_out_of_
+  range_member_ids`, `split_disp_clamps_corrupt_offsets`,
+  `second_download_is_dropped_with_a_message`; the dims underflow
+  sits inside the inspector UI (saturating_sub — not testable headless).
+- **3.2** `be3f518` — `XSyn::build(&csr, dt)` in state.rs replaces the
+  twin per-synapse-tau table builds in CpuSim::new and CudaSim::new
+  (the layout both backends must agree on); `drain_rec` merges the
+  identical drain_v/drain_u bodies and makes the vrec_valid reset
+  order explicit. `ring_depth`/`noise_hash` were already shared.
+  Test: `xsyn_layout_only_custom_synapses_get_slots`; cpu_ref and
+  gpu_vs_cpu cover the end-to-end path (they drive custom taus).
+  Left, with reasons: model equations in cpu.rs vs kernels.rs and the
+  `Sim` enum dispatch — the section-1 pluggable-model refactor waits
+  for Nico; serve.rs's repeated geo+trace emit blocks, file-op arms,
+  the two static file servers and the civil-date copies are same-
+  crate convenience duplication, not CPU/CUDA pairs that can diverge
+  silently.
+- **3.3** `f819c0a` — `ServerMsg::UploadReady` now arrives via
+  `Shared.upload_ready` (typed) instead of a `file_op` string parsed
+  with `strip_prefix("upload ready ")`. The full request-id `Reply`
+  protocol stays out per the stage scope ("concrete items only") —
+  Q5–Q8 already typed the refused/save/load/upload acks that were the
+  concrete casualties. Test: `upload_ready_arrives_typed`.
+- **Nits** `f244ecf` — `y_label_hits_corner` suppresses the lowest y
+  tick label (within half a grid step of the visible min) on the
+  v/phase/raster plots — it painted on top of the leftmost x label
+  ("-100" over "-200"). Test: `corner_label_detection`. The manual's
+  toolbar line now lists the input-links toggle.
