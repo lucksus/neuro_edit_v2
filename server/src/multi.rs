@@ -38,12 +38,23 @@ pub struct MultiOpts {
     pub max_runs: usize,
     pub idle: Duration,
     pub default_quota_bytes: u64,
+    /// Sim-size ceiling per user run (`--max-neurons/--max-syns/--max-ring-mb`).
+    pub sim_limits: sim::SimLimits,
+    /// Live-job cap per user (`--max-jobs`) and wall-clock limit
+    /// (`--job-hours`).
+    pub max_jobs: usize,
+    pub job_wall: Duration,
+    /// Concurrent-connection ceiling (`--max-connections`) — threads
+    /// are per-conn blocking, so the count is the resource.
+    pub max_connections: usize,
 }
 
 pub struct Multi {
     pub accounts: Arc<Accounts>,
     pub runs: Arc<Runs>,
     opts: MultiOpts,
+    /// Live connections in `serve()` — the `max_connections` gate.
+    conns: std::sync::atomic::AtomicUsize,
 }
 
 /// Parsed HTTP request — head + bounded body (`Content-Length`; forms
@@ -85,13 +96,14 @@ impl Req {
     fn bearer(&self) -> Option<&str> {
         self.header("authorization")?.trim().strip_prefix("Bearer ")
     }
-    /// Rate-limit IP: the XFF first hop, but only when the TCP peer is
-    /// a declared proxy (`--trust-proxy`).
+    /// Rate-limit IP: the XFF *last* hop — the one our trusted proxy
+    /// appended — so a client can't seed the head of the list with a
+    /// fake address. Spoofable headers from anyone else are ignored.
     fn client_ip(&self, trust: &[IpAddr]) -> IpAddr {
         if trust.contains(&self.peer) {
             if let Some(xff) = self.header("x-forwarded-for") {
-                if let Some(first) = xff.split(',').next() {
-                    if let Ok(ip) = first.trim().parse() {
+                if let Some(last) = xff.split(',').last() {
+                    if let Ok(ip) = last.trim().parse() {
                         return ip;
                     }
                 }
@@ -101,16 +113,28 @@ impl Req {
     }
 }
 
+/// Byte-wise form decoding — never indexes into `&str` (`%E2` mid-
+/// char would panic the old `s[i+1..i+3]` slice), and splits on raw
+/// bytes so a lone `%` can't corrupt the pair boundaries either.
 fn url_decode_form(body: &[u8]) -> Vec<(String, String)> {
-    let dec = |s: &str| -> String {
-        let mut out = Vec::with_capacity(s.len());
-        let b = s.as_bytes();
+    fn hex(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    fn dec(bs: &[u8]) -> String {
+        let mut out = Vec::with_capacity(bs.len());
         let mut i = 0;
-        while i < b.len() {
-            match b[i] {
-                b'%' if i + 2 < b.len() => {
-                    let h = u8::from_str_radix(&s[i + 1..i + 3], 16).unwrap_or(b'?');
-                    out.push(h);
+        while i < bs.len() {
+            match bs[i] {
+                b'%' if i + 2 < bs.len()
+                    && hex(bs[i + 1]).is_some()
+                    && hex(bs[i + 2]).is_some() =>
+                {
+                    out.push(hex(bs[i + 1]).unwrap() * 16 + hex(bs[i + 2]).unwrap());
                     i += 3;
                 }
                 b'+' => {
@@ -124,12 +148,15 @@ fn url_decode_form(body: &[u8]) -> Vec<(String, String)> {
             }
         }
         String::from_utf8_lossy(&out).into_owned()
-    };
-    String::from_utf8_lossy(body)
-        .split('&')
+    }
+    body.split(|&b| b == b'&')
         .filter(|p| !p.is_empty())
         .map(|p| {
-            let (k, v) = p.split_once('=').unwrap_or((p, ""));
+            let (k, v) = p
+                .iter()
+                .position(|&b| b == b'=')
+                .map(|e| (&p[..e], &p[e + 1..]))
+                .unwrap_or((p, &[][..]));
             (dec(k), dec(v))
         })
         .collect()
@@ -210,9 +237,19 @@ fn respond(
     body: &[u8],
     extra: &str,
 ) -> anyhow::Result<()> {
+    // Baseline headers on everything; HTML responses (which include
+    // the authenticated pages) additionally refuse framing and forbid
+    // caching so a back-button can't replay a dead session's view.
+    let security = if content_type.contains("text/html") {
+        "X-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\n\
+         Referrer-Policy: no-referrer\r\nCache-Control: no-store\r\n\
+         Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'\r\n"
+    } else {
+        "X-Content-Type-Options: nosniff\r\n"
+    };
     let head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
-         Connection: close\r\n{extra}\r\n",
+         Connection: close\r\n{security}{extra}\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes())?;
@@ -238,6 +275,7 @@ impl Multi {
     pub fn new(accounts: Arc<Accounts>, opts: MultiOpts) -> Self {
         std::fs::create_dir_all(opts.data_root.join("users")).ok();
         std::fs::create_dir_all(opts.data_root.join("deleted")).ok();
+        let acct = accounts.clone();
         let runs = Runs::new(RunsOpts {
             backend: opts.backend,
             seed: opts.seed,
@@ -246,11 +284,19 @@ impl Multi {
             max_upload_bytes: opts.max_upload_bytes,
             max_runs: opts.max_runs,
             idle: opts.idle,
+            // The reaper consults the DB each tick — CLI `admin
+            // disable`/delete runs in another process, so this closure
+            // is the only channel that reaches it.
+            user_status: Some(Arc::new(move |id: i64| acct.by_id(id).map(|u| u.status))),
+            sim_limits: opts.sim_limits,
+            max_jobs: opts.max_jobs,
+            job_wall: opts.job_wall,
         });
         Self {
             accounts,
             runs,
             opts,
+            conns: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -260,21 +306,39 @@ impl Multi {
     }
 
     /// Blocking accept loop — same shape as `Server::accept_web`.
+    /// Conns are capped (`--max-connections`) because each one is a
+    /// thread; idle reads/writes time out so a dead peer can't pin its
+    /// thread forever.
     pub fn serve(self: &Arc<Self>, listener: TcpListener) -> anyhow::Result<()> {
+        const IO_TIMEOUT: Duration = Duration::from_secs(120);
         for stream in listener.incoming() {
-            let stream = match stream {
+            let mut stream = match stream {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("accept: {e}");
                     continue;
                 }
             };
+            if self.conns.fetch_add(1, Ordering::Relaxed) >= self.opts.max_connections {
+                self.conns.fetch_sub(1, Ordering::Relaxed);
+                let _ = respond(
+                    &mut stream,
+                    "503 Service Unavailable",
+                    "text/plain",
+                    b"too busy",
+                    "Retry-After: 5\r\n",
+                );
+                continue;
+            }
+            let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+            let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
             let me = self.clone();
             std::thread::spawn(move || {
                 let mut s = stream;
                 if let Err(e) = me.handle(&mut s) {
                     let _ = e; // closed sockets are routine
                 }
+                me.conns.fetch_sub(1, Ordering::Relaxed);
             });
         }
         Ok(())
@@ -282,6 +346,8 @@ impl Multi {
 
     /// Cookie session → the user, only while `active`. Disabled/
     /// deleted users' sessions are gone from the DB so this is None.
+    /// Returns `(user, csrf)` — `session_token` below also reports how
+    /// the request authenticated (cookie vs Bearer) and its raw token.
     fn session_user(&self, req: &Req) -> Option<(User, String)> {
         let token = req
             .cookie(SESSION_COOKIE)
@@ -289,6 +355,20 @@ impl Multi {
         let (uid, csrf) = self.accounts.session(&token)?;
         let u = self.accounts.by_id(uid)?;
         (u.status == "active").then_some((u, csrf))
+    }
+
+    /// `(user, token, via_cookie)` for the request — the WS handshake
+    /// needs all three: `via_cookie` gates the Origin check (a browser
+    /// cross-site upgrade is only dangerous with ambient cookies), and
+    /// `token` feeds the live-connection validity recheck.
+    fn session_full(&self, req: &Req) -> Option<(User, String, bool)> {
+        let (token, via_cookie) = match req.cookie(SESSION_COOKIE) {
+            Some(t) => (t, true),
+            None => (req.bearer()?.to_string(), false),
+        };
+        let (uid, _csrf) = self.accounts.session(&token)?;
+        let u = self.accounts.by_id(uid)?;
+        (u.status == "active").then_some((u, token, via_cookie))
     }
 
     /// The origin POSTs must match: `--public-url` when set, else the
@@ -390,6 +470,30 @@ impl Multi {
                 if !self.origin_ok(&req) {
                     return respond(stream, "403 Forbidden", "text/plain", b"bad origin", "");
                 }
+                // One argon2 hash + one row per request — cap both the
+                // per-IP rate and the total pending pile so a loop
+                // can't bury real signups in /admin.
+                let ip = req.client_ip(&self.opts.trust_proxy);
+                let key = format!("signup:{ip}");
+                if self.accounts.limiter.limited_n(&key, 5) {
+                    return respond(
+                        stream,
+                        "429 Too Many Requests",
+                        "text/plain",
+                        b"too many signups - try later",
+                        "",
+                    );
+                }
+                self.accounts.limiter.record_fail(&key);
+                if self.accounts.pending_count() >= 1000 {
+                    return respond(
+                        stream,
+                        "503 Service Unavailable",
+                        "text/plain",
+                        b"signups are full - ask an admin",
+                        "",
+                    );
+                }
                 let f: std::collections::HashMap<_, _> = req.form().into_iter().collect();
                 match self.accounts.create_user(
                     f.get("email").map(String::as_str).unwrap_or(""),
@@ -411,8 +515,22 @@ impl Multi {
                     }
                 }
             }
-            ("POST", "/login") => self.login(stream, &req, false),
-            ("POST", "/api/login") => self.login(stream, &req, true),
+            // Login CSRF: a foreign Origin means another site is
+            // logging our visitor into the attacker's account. The API
+            // route is Bearer/native — no Origin header at all — so
+            // the check only applies when a browser sends one.
+            ("POST", "/login") => {
+                if !self.origin_ok(&req) {
+                    return respond(stream, "403 Forbidden", "text/plain", b"bad origin", "");
+                }
+                self.login(stream, &req, false)
+            }
+            ("POST", "/api/login") => {
+                if req.header("origin").is_some() && !self.origin_ok(&req) {
+                    return respond(stream, "403 Forbidden", "text/plain", b"bad origin", "");
+                }
+                self.login(stream, &req, true)
+            }
             ("POST", "/logout") => {
                 if let Some((_, csrf)) = &sess {
                     let ok_csrf = req
@@ -425,6 +543,8 @@ impl Multi {
                 }
                 if let Some(t) = req.cookie(SESSION_COOKIE) {
                     self.accounts.delete_session(&t);
+                } else if let Some(t) = req.bearer() {
+                    self.accounts.delete_session(t);
                 }
                 redirect(
                     stream,
@@ -505,15 +625,24 @@ impl Multi {
             .to_lowercase();
         let password = f.get("password").map(String::as_str).unwrap_or("");
         let ip = req.client_ip(&self.opts.trust_proxy);
-        let (ip_key, em_key) = (format!("ip:{ip}"), format!("email:{email}"));
+        // Three buckets: per-IP (spray), per (email,ip) pair (the
+        // actual brute-force knob at 10/10min), and a high per-email
+        // ceiling (30) so an attacker can only slow — never lock — the
+        // victim's own login from other IPs.
+        let (ip_key, em_key, pair_key) = (
+            format!("ip:{ip}"),
+            format!("email:{email}"),
+            format!("pair:{ip}|{email}"),
+        );
         let lim = &self.accounts.limiter;
-        let too_many = lim.limited(&ip_key) || lim.limited(&em_key);
+        let too_many = lim.limited(&ip_key) || lim.limited_n(&em_key, 30) || lim.limited(&pair_key);
         let out: (&str, Option<String>, Option<(i64, String)>) = if too_many {
             ("too many tries — wait a few minutes", None, None)
         } else {
             match self.accounts.verify_login(&email, password) {
                 Login::Ok(u) => {
                     lim.clear(&em_key);
+                    lim.clear(&pair_key);
                     match self.accounts.create_session(u.id) {
                         Ok((tok, csrf)) => {
                             self.accounts.touch_login(u.id);
@@ -525,16 +654,19 @@ impl Multi {
                 Login::Pending => {
                     lim.record_fail(&ip_key);
                     lim.record_fail(&em_key);
+                    lim.record_fail(&pair_key);
                     ("your account is waiting for activation", None, None)
                 }
                 Login::Disabled => {
                     lim.record_fail(&ip_key);
                     lim.record_fail(&em_key);
+                    lim.record_fail(&pair_key);
                     ("your account is disabled", None, None)
                 }
                 Login::Bad => {
                     lim.record_fail(&ip_key);
                     lim.record_fail(&em_key);
+                    lim.record_fail(&pair_key);
                     ("wrong email or password", None, None)
                 }
             }
@@ -602,6 +734,21 @@ impl Multi {
         }
         let id: i64 = f.get("id").and_then(|s| s.parse().ok()).unwrap_or(-1);
         let act = path.trim_start_matches("/admin/");
+        let Some(target) = self.accounts.by_id(id) else {
+            return redirect(stream, "/admin?did=no+such+user", "");
+        };
+        // You can't disable, delete, or de-admin yourself — and the
+        // same for the last active admin either way around.
+        let demoting = matches!(act, "disable" | "delete" | "revoke-admin")
+            && (id == admin.id || (target.is_admin && !self.accounts.has_other_admin(id)));
+        if demoting {
+            let why = if id == admin.id {
+                "cannot do that to yourself"
+            } else {
+                "last active admin"
+            };
+            return redirect(stream, &format!("/admin?did={}", why.replace(' ', "+")), "");
+        }
         let did = match act {
             "activate" => {
                 self.accounts.set_status(id, "active").ok();
@@ -615,7 +762,12 @@ impl Multi {
             }
             "quota" => {
                 let mb: u64 = f.get("mb").and_then(|s| s.parse().ok()).unwrap_or(0);
-                self.accounts.set_quota(id, mb * (1 << 20)).ok();
+                let bytes = mb.saturating_mul(1 << 20);
+                self.accounts.set_quota(id, bytes).ok();
+                // A live run keeps the old value — push the new one.
+                if let Some(run) = self.runs.get(id) {
+                    let _ = run.cmd_tx.try_send((0, proto::ClientMsg::SetQuota(bytes)));
+                }
                 "quota set"
             }
             "grant-admin" => {
@@ -623,16 +775,11 @@ impl Multi {
                 "admin granted"
             }
             "revoke-admin" => {
-                if id == admin.id {
-                    "cannot revoke yourself"
-                } else {
-                    self.accounts.set_admin(id, false).ok();
-                    "admin revoked"
-                }
+                self.accounts.set_admin(id, false).ok();
+                "admin revoked"
             }
             "delete" => {
-                let ok = f.get("confirm").map(String::as_str)
-                    == self.accounts.by_id(id).map(|u| u.email).as_deref();
+                let ok = f.get("confirm").map(String::as_str) == Some(target.email.as_str());
                 if ok {
                     self.runs.drop_user(id);
                     self.accounts.delete_user(id).ok();
@@ -659,10 +806,38 @@ impl Multi {
     /// `GET /ws` (+ Upgrade): session via cookie or Bearer → the user's
     /// run (started on demand) → the shared client loop.
     fn handle_ws(&self, stream: &mut TcpStream, req: Req) -> anyhow::Result<()> {
-        let sess = self.session_user(&req);
-        let Some((u, _csrf)) = sess else {
+        let Some((u, token, via_cookie)) = self.session_full(&req) else {
             return respond(stream, "403 Forbidden", "text/plain", b"login required", "");
         };
+        // Cookie sessions ride on ambient browser auth — a cross-site
+        // upgrade is a WS-CSRF. Bearer clients (native editor) carry no
+        // ambient credentials, so a missing Origin is fine for them but
+        // a present one must still be ours when it authenticates by
+        // cookie.
+        if via_cookie && !self.origin_ok(&req) {
+            return respond(stream, "403 Forbidden", "text/plain", b"bad origin", "");
+        }
+        // Live-connection invalidation: CLI `admin disable`/delete and
+        // session revocation all land in the DB; recheck (throttled)
+        // per inbound frame so the socket dies on its next message.
+        let accounts = self.accounts.clone();
+        let uid = u.id;
+        let last =
+            std::sync::Mutex::new((std::time::Instant::now() - Duration::from_millis(600), true));
+        let valid: crate::ValidCheck = Some(Arc::new(move || {
+            let mut l = last.lock().unwrap();
+            if l.0.elapsed() < Duration::from_millis(500) {
+                return l.1;
+            }
+            l.0 = std::time::Instant::now();
+            let ok = accounts.session(&token).map(|(id, _)| id) == Some(uid)
+                && accounts
+                    .by_id(uid)
+                    .map(|u| u.status == "active")
+                    .unwrap_or(false);
+            l.1 = ok;
+            ok
+        }));
         let run = match self.runs.get_or_start(u.id, self.quota_of(&u)) {
             Ok(r) => r,
             Err(_) => {
@@ -691,7 +866,7 @@ impl Multi {
         let ws = tungstenite::WebSocket::from_raw_socket(
             stream.try_clone()?,
             tungstenite::protocol::Role::Server,
-            None,
+            Some(crate::server_ws_config()),
         );
         let id = RUN_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
         crate::ws_client_loop(
@@ -700,6 +875,8 @@ impl Multi {
             run.cmd_tx.clone(),
             run.clients.clone(),
             run.jobs.clone(),
+            run.abort_flag(),
+            valid,
         )?;
         run.touch();
         Ok(())
@@ -746,5 +923,64 @@ fn serve_static(stream: &mut TcpStream, web_dir: &Path, rel: &str) -> anyhow::Re
     match if bad { None } else { std::fs::read(&path).ok() } {
         Some(b) => respond(stream, "200 OK", mime, &b, ""),
         None => not_found(stream),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req_with(headers: &[(&str, &str)], peer: IpAddr) -> Req {
+        Req {
+            method: "GET".into(),
+            target: "/".into(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: Vec::new(),
+            peer,
+        }
+    }
+
+    /// S15: `%` followed by a multi-byte char used to slice a `&str`
+    /// mid-char and panic the connection thread. Byte-wise decode must
+    /// not panic on any of these.
+    #[test]
+    fn url_decode_never_panics() {
+        for body in [
+            b"%a\xc3\xa9" as &[u8], // %a then é
+            b"%zz",
+            b"%",
+            b"%e2%82", // truncated utf-8
+            b"a=%&b=%x",
+            b"name=J%C3%B8rgen+Ok",
+        ] {
+            let pairs = url_decode_form(body);
+            let _ = pairs; // reaching here without panic is the test
+        }
+        let pairs = url_decode_form(b"k=v%202&plus=a+b");
+        assert_eq!(
+            pairs,
+            vec![
+                ("k".to_string(), "v 2".to_string()),
+                ("plus".to_string(), "a b".to_string())
+            ]
+        );
+    }
+
+    /// S9: the rate-limit IP is the LAST XFF hop (the one our proxy
+    /// appended) — the client-controlled first hop must not be used.
+    #[test]
+    fn client_ip_takes_last_xff_hop() {
+        let proxy: IpAddr = "10.0.0.1".parse().unwrap();
+        let r = req_with(&[("x-forwarded-for", "1.2.3.4, 5.6.7.8")], proxy);
+        assert_eq!(r.client_ip(&[proxy]), "5.6.7.8".parse::<IpAddr>().unwrap());
+        // an untrusted peer's header is ignored entirely
+        let r2 = req_with(
+            &[("x-forwarded-for", "1.2.3.4")],
+            "9.9.9.9".parse().unwrap(),
+        );
+        assert_eq!(r2.client_ip(&[proxy]), "9.9.9.9".parse::<IpAddr>().unwrap());
     }
 }

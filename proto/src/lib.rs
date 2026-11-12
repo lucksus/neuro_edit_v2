@@ -336,6 +336,9 @@ pub enum ClientMsg {
     },
     SetBackend(Backend),
     SetDtMs(f32),
+    /// Admin-pushed per-user quota update (hosted mode; editors never
+    /// send this — the worker just adjusts its write cap).
+    SetQuota(u64),
     SetNoise {
         hz: f32,
         kick: f32,
@@ -711,6 +714,7 @@ mod tests {
             ClientMsg::CopySubnet { ids: vec![4, 5] },
             ClientMsg::SetBackend(Backend::Cuda),
             ClientMsg::SetDtMs(0.05),
+            ClientMsg::SetQuota(1 << 30),
             ClientMsg::SetNoise {
                 hz: 60.0,
                 kick: 20.0,

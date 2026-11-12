@@ -79,6 +79,25 @@ struct Cli {
     /// Default per-user storage quota (MiB).
     #[arg(long, default_value_t = 2048)]
     default_quota_mb: u64,
+    /// Per-user sim-size ceiling: neurons (0 = unlimited; the shared
+    /// local mode uses 0).
+    #[arg(long, default_value_t = 1_000_000)]
+    max_neurons: usize,
+    /// Per-user sim-size ceiling: synapses.
+    #[arg(long, default_value_t = 50_000_000)]
+    max_syns: usize,
+    /// Per-user sim-size ceiling: delay-ring memory (MiB).
+    #[arg(long, default_value_t = 4096)]
+    max_ring_mb: u64,
+    /// Live jobs per user (0 = unlimited).
+    #[arg(long, default_value_t = 2)]
+    max_jobs: usize,
+    /// Job wall-clock limit in hours (0 = unlimited).
+    #[arg(long, default_value_t = 2.0)]
+    job_hours: f64,
+    /// Concurrent TCP connections the HTTP front door accepts.
+    #[arg(long, default_value_t = 512)]
+    max_connections: usize,
     #[command(subcommand)]
     command: Option<Cmd>,
 }
@@ -163,6 +182,18 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Without --public-url the server can't tell its outward origin
+    // (Origin checks fall back to the Host header a client controls,
+    // and the session cookie can't be Secure). On loopback that's a
+    // dev convenience; off-loopback it's a footgun — refuse.
+    if cli.accounts.is_some() && cli.public_url.is_none() && !bind_is_loopback(&cli.bind) {
+        anyhow::bail!(
+            "--accounts on a non-loopback bind {} needs --public-url \
+             (origin checks and the cookie's Secure flag depend on it)",
+            cli.bind
+        );
+    }
+
     if let Some(state_dir) = &cli.accounts {
         return serve_multi(&cli, state_dir, backend);
     }
@@ -198,6 +229,8 @@ fn main() -> anyhow::Result<()> {
             max_upload_bytes: cli.max_upload_mb.saturating_mul(1024 * 1024),
             quota_bytes: 0,
             abort: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            sim_limits: sim::SimLimits::default(),
         },
     );
 
@@ -236,6 +269,7 @@ fn main() -> anyhow::Result<()> {
 /// Multi-user serve: accounts DB + HTTP front door + per-user runs.
 fn serve_multi(cli: &Cli, state_dir: &std::path::Path, backend: BackendKind) -> anyhow::Result<()> {
     let accounts = Arc::new(server::accounts::Accounts::open(state_dir)?);
+    accounts.sweep_expired_sessions();
     let multi = Arc::new(server::multi::Multi::new(
         accounts.clone(),
         server::multi::MultiOpts {
@@ -252,7 +286,19 @@ fn serve_multi(cli: &Cli, state_dir: &std::path::Path, backend: BackendKind) -> 
             max_upload_bytes: cli.max_upload_mb.saturating_mul(1024 * 1024),
             max_runs: cli.max_runs,
             idle: std::time::Duration::from_secs(cli.idle_minutes * 60),
-            default_quota_bytes: cli.default_quota_mb * (1 << 20),
+            default_quota_bytes: cli.default_quota_mb.saturating_mul(1 << 20),
+            sim_limits: sim::SimLimits {
+                max_neurons: cli.max_neurons,
+                max_synapses: cli.max_syns,
+                max_ring_bytes: cli.max_ring_mb.saturating_mul(1 << 20),
+            },
+            max_jobs: cli.max_jobs,
+            job_wall: if cli.job_hours > 0.0 {
+                std::time::Duration::from_secs_f64(cli.job_hours * 3600.0)
+            } else {
+                std::time::Duration::MAX
+            },
+            max_connections: cli.max_connections,
         },
     ));
     let listener =
@@ -286,17 +332,31 @@ fn admin(action: &AdminAction) -> anyhow::Result<()> {
             name,
         } => {
             let pw = read_admin_password(email)?;
-            let u = server::accounts::Accounts::open(dir)?.create_admin(email, name, &pw)?;
-            eprintln!("admin {} ({}) active", u.email, u.id);
+            let (u, replaced) =
+                server::accounts::Accounts::open(dir)?.create_admin(email, name, &pw)?;
+            if replaced {
+                eprintln!(
+                    "admin {} ({}) replaced an existing account — \
+                     password, name and sessions reset",
+                    u.email, u.id
+                );
+            } else {
+                eprintln!("admin {} ({}) active", u.email, u.id);
+            }
         }
         AdminAction::List { accounts: dir } => {
             for u in server::accounts::Accounts::open(dir)?.list() {
+                // quota_bytes==0 means "server default", not "none"
+                let quota = match u.quota_bytes {
+                    0 => "default".to_string(),
+                    q => format!("{}MB", q / (1 << 20)),
+                };
                 println!(
-                    "{}\t{}\t{}\t{}MB\t{}{}",
+                    "{}\t{}\t{}\t{}\t{}{}",
                     u.id,
                     u.email,
                     u.status,
-                    u.quota_bytes / (1 << 20),
+                    quota,
                     u.name,
                     if u.is_admin { " (admin)" } else { "" }
                 );

@@ -71,6 +71,15 @@ pub struct Env {
     /// `job_dir()` — the `runs/<id>` path scripts write job outputs to;
     /// `None` outside a job (interactive eval returns "").
     pub job_dir: Rc<RefCell<Option<String>>>,
+    /// Server-side sim-size ceiling, consulted before every sim build
+    /// (`build_sim`, script `sim.*` handles). All-zeros = unlimited —
+    /// the local editor never sets it.
+    pub sim_limits: Rc<RefCell<crate::SimLimits>>,
+    /// Per-run storage quota for script file writes (`net.save`,
+    /// `samples_save`, `write_to_file`, `dataset_gen`); the server sets
+    /// it, 0 = unlimited (local mode). Same accounting the protocol
+    /// file commands use.
+    pub quota_bytes: Rc<RefCell<u64>>,
 }
 
 impl Env {
@@ -89,6 +98,14 @@ impl Env {
             ..Default::default()
         }));
         let mut engine = Engine::new();
+        // Memory bounds (S5): a `loop { a.push(0.0) }` must die inside
+        // the eval, not OOM the process. Generous ceilings — these are
+        // per-value bounds, not totals; legit scripts stay far below.
+        // No `max_operations`: long simulations are legitimate — Abort
+        // (or shutdown) is the time-control mechanism.
+        engine.set_max_array_size(10_000_000);
+        engine.set_max_string_size(64 * 1024 * 1024);
+        engine.set_max_map_size(1_000_000);
         {
             let p = on_print.clone();
             engine.on_print(move |s| p(s));
@@ -100,6 +117,9 @@ impl Env {
         let backend: BackendCell = Rc::new(std::cell::Cell::new(backend));
         let cancel: Rc<RefCell<CancelFn>> = Rc::new(RefCell::new(Rc::new(|| false)));
         let data_dir: Rc<RefCell<Option<std::path::PathBuf>>> = Rc::new(RefCell::new(None));
+        let sim_limits: Rc<RefCell<crate::SimLimits>> =
+            Rc::new(RefCell::new(crate::SimLimits::default()));
+        let quota_bytes: Rc<RefCell<u64>> = Rc::new(RefCell::new(0));
         // Interactive default: job_progress fields print to the console.
         let job_sink: Rc<RefCell<JobSinkFn>> = {
             let p = on_print.clone();
@@ -128,6 +148,8 @@ impl Env {
             data_dir.clone(),
             job_sink.clone(),
             job_dir.clone(),
+            sim_limits.clone(),
+            quota_bytes.clone(),
         );
         Env {
             engine,
@@ -145,6 +167,8 @@ impl Env {
             data_dir,
             job_sink,
             job_dir,
+            sim_limits,
+            quota_bytes,
         }
     }
 
@@ -179,6 +203,10 @@ impl Env {
     /// Build (or rebuild) the simulator from the current network + config.
     pub fn build_sim(&self) -> anyhow::Result<Rc<RefCell<Sim>>> {
         let cfg = self.cfg.borrow().clone();
+        self.sim_limits
+            .borrow()
+            .check(&self.net.borrow(), cfg.dt_ms)
+            .map_err(anyhow::Error::msg)?;
         let s = Sim::new(&self.net.borrow(), cfg, self.backend.get())?;
         let h = Rc::new(RefCell::new(s));
         *self.sim.borrow_mut() = Some(h.clone());
@@ -410,11 +438,16 @@ fn ensure_sim(
     net: &NetHandle,
     cfg: &CfgHandle,
     kind: &BackendCell,
+    limits: &Rc<RefCell<crate::SimLimits>>,
 ) -> Result<Rc<RefCell<Sim>>, Box<rhai::EvalAltResult>> {
     if let Some(h) = slot.borrow().as_ref() {
         return Ok(h.clone());
     }
     let c = cfg.borrow().clone();
+    limits
+        .borrow()
+        .check(&net.borrow(), c.dt_ms)
+        .map_err(s_err)?;
     let s = Sim::new(&net.borrow(), c, kind.get())
         .map_err(|e| -> Box<rhai::EvalAltResult> { e.to_string().into() })?;
     let h = Rc::new(RefCell::new(s));
@@ -517,6 +550,46 @@ fn rdir(
     resolve_in(&dd.borrow(), p).map_err(s_err)
 }
 
+/// Quota gate for script-side writes: `usage(data_dir) - existing(path)
+/// + bytes` must fit `quota` (0 = unlimited). Mirrors the protocol-side
+/// `quota_check` in serve.rs — same accounting, same message, so a user
+/// can't reach around the wire limits through `net.save` and friends.
+pub fn quota_fits(
+    dir: &Option<std::path::PathBuf>,
+    resolved_path: &str,
+    bytes: u64,
+    quota: u64,
+) -> Result<(), String> {
+    if quota == 0 {
+        return Ok(());
+    }
+    let Some(d) = dir else { return Ok(()) };
+    let existing = std::fs::metadata(resolved_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let used = crate::serve::dir_size(d).saturating_sub(existing);
+    if used.saturating_add(bytes) > quota {
+        return Err(format!(
+            "over quota: {used} + {bytes} B would exceed the {quota} B limit"
+        ));
+    }
+    Ok(())
+}
+
+/// `rdir` + `quota_fits` + `std::fs::write` — the one helper every
+/// script file write goes through (S7).
+fn checked_write(
+    dd: &Rc<RefCell<Option<std::path::PathBuf>>>,
+    quota: &Rc<RefCell<u64>>,
+    path: &str,
+    bytes: &[u8],
+) -> Result<String, Box<rhai::EvalAltResult>> {
+    let p = rdir(dd, path)?;
+    quota_fits(&dd.borrow(), &p, bytes.len() as u64, *quota.borrow()).map_err(s_err)?;
+    std::fs::write(&p, bytes).map_err(|e| s_err(format!("write {path}: {e}")))?;
+    Ok(p)
+}
+
 /// `import` resolver confined to a server's `--data-dir`: the path gets
 /// the same `resolve_in` rules as every other script file fn (no `..`,
 /// no absolute, no symlink escapes), then an inner `FileModuleResolver`
@@ -579,6 +652,8 @@ pub fn register_api(
     data_dir: Rc<RefCell<Option<std::path::PathBuf>>>,
     job_sink: Rc<RefCell<JobSinkFn>>,
     job_dir: Rc<RefCell<Option<String>>>,
+    sim_limits: Rc<RefCell<crate::SimLimits>>,
+    quota_bytes: Rc<RefCell<u64>>,
 ) {
     engine
         .register_type_with_name::<NetHandle>("Net")
@@ -651,6 +726,7 @@ pub fn register_api(
                   h: rhai::INT,
                   d: Dynamic|
                   -> Result<(), Box<rhai::EvalAltResult>> {
+                net_format::check_grid_dims([w, h, 1]).map_err(s_err)?;
                 invalidate(&s, &v);
                 let cancelled = builders::create_2d_grid_checked(
                     &mut n.borrow_mut(),
@@ -680,6 +756,7 @@ pub fn register_api(
                   dep: rhai::INT,
                   d: Dynamic|
                   -> Result<(), Box<rhai::EvalAltResult>> {
+                net_format::check_grid_dims([w, h, dep]).map_err(s_err)?;
                 invalidate(&s, &v);
                 let cancelled = builders::create_3d_grid_checked(
                     &mut n.borrow_mut(),
@@ -1100,13 +1177,13 @@ pub fn register_api(
         });
     }
     {
-        let dd = data_dir.clone();
+        let (dd, q) = (data_dir.clone(), quota_bytes.clone());
         engine.register_fn(
             "save",
             move |n: &mut NetHandle, path: &str| -> Result<(), Box<rhai::EvalAltResult>> {
-                let p = rdir(&dd, path)?;
-                net_format::io::save(&n.borrow(), &p)
+                let bytes = net_format::io::to_bytes(&n.borrow())
                     .map_err(|e| s_err(format!("save {path}: {e}")))?;
+                checked_write(&dd, &q, path, &bytes)?;
                 Ok(())
             },
         );
@@ -1146,37 +1223,37 @@ pub fn register_api(
 
     // ---- sim methods ----
     {
-        let (s, n, c) = (sim.clone(), net.clone(), cfg.clone());
+        let (s, n, c, lim) = (sim.clone(), net.clone(), cfg.clone(), sim_limits.clone());
         let b = backend.clone();
         let (p, pc) = (progress.clone(), progress_chunk.clone());
         engine.register_fn(
             "run",
             move |_: &mut SimSlot, ms: Dynamic| -> Result<(), Box<rhai::EvalAltResult>> {
-                let h = ensure_sim(&s, &n, &c, &b)?;
+                let h = ensure_sim(&s, &n, &c, &b, &lim)?;
                 let steps = (d_f64(&ms) as f32 / c.borrow().dt_ms).round().max(0.0) as usize;
                 run_chunked(&h, steps, &p, &pc).map_err(s_err)
             },
         );
     }
     {
-        let (s, n, c) = (sim.clone(), net.clone(), cfg.clone());
+        let (s, n, c, lim) = (sim.clone(), net.clone(), cfg.clone(), sim_limits.clone());
         let b = backend.clone();
         let (p, pc) = (progress.clone(), progress_chunk.clone());
         engine.register_fn(
             "run_steps",
             move |_: &mut SimSlot, steps: rhai::INT| -> Result<(), Box<rhai::EvalAltResult>> {
-                let h = ensure_sim(&s, &n, &c, &b)?;
+                let h = ensure_sim(&s, &n, &c, &b, &lim)?;
                 run_chunked(&h, steps.max(0) as usize, &p, &pc).map_err(s_err)
             },
         );
     }
     {
-        let (s, n, c) = (sim.clone(), net.clone(), cfg.clone());
+        let (s, n, c, lim) = (sim.clone(), net.clone(), cfg.clone(), sim_limits.clone());
         let b = backend.clone();
         engine.register_fn(
             "build",
             move |_: &mut SimSlot| -> Result<(), Box<rhai::EvalAltResult>> {
-                ensure_sim(&s, &n, &c, &b)?;
+                ensure_sim(&s, &n, &c, &b, &lim)?;
                 Ok(())
             },
         );
@@ -1288,7 +1365,7 @@ pub fn register_api(
             .unwrap_or_default()
     });
     {
-        let (s, n, c) = (sim.clone(), net.clone(), cfg.clone());
+        let (s, n, c, lim) = (sim.clone(), net.clone(), cfg.clone(), sim_limits.clone());
         let b = backend.clone();
         engine.register_fn(
             "set_input",
@@ -1300,14 +1377,14 @@ pub fn register_api(
                     Some(i) => i,
                     None => return Ok(()),
                 };
-                let h = ensure_sim(&s, &n, &c, &b)?;
+                let h = ensure_sim(&s, &n, &c, &b, &lim)?;
                 h.borrow_mut().set_input_constant(idx, d_f64(&x) as f32);
                 Ok(())
             },
         );
     }
     {
-        let (s, n, c) = (sim.clone(), net.clone(), cfg.clone());
+        let (s, n, c, lim) = (sim.clone(), net.clone(), cfg.clone(), sim_limits.clone());
         let b = backend.clone();
         engine.register_fn(
             "play_input",
@@ -1320,14 +1397,14 @@ pub fn register_api(
                     None => return Ok(()),
                 };
                 let series: Vec<f32> = arr.iter().map(|d| d_f64(d) as f32).collect();
-                let h = ensure_sim(&s, &n, &c, &b)?;
+                let h = ensure_sim(&s, &n, &c, &b, &lim)?;
                 h.borrow_mut().play_input(idx, series);
                 Ok(())
             },
         );
     }
     {
-        let (s, n, c) = (sim.clone(), net.clone(), cfg.clone());
+        let (s, n, c, lim) = (sim.clone(), net.clone(), cfg.clone(), sim_limits.clone());
         let b = backend.clone();
         engine.register_fn(
             "set_external",
@@ -1335,7 +1412,7 @@ pub fn register_api(
                   id: rhai::INT,
                   amps: Dynamic|
                   -> Result<(), Box<rhai::EvalAltResult>> {
-                let h = ensure_sim(&s, &n, &c, &b)?;
+                let h = ensure_sim(&s, &n, &c, &b, &lim)?;
                 let n_len = h.borrow().v().len();
                 h.borrow_mut()
                     .set_external(nid(id, n_len)? as usize, d_f64(&amps) as f32);
@@ -1372,8 +1449,17 @@ pub fn register_api(
     {
         let (c, s) = (cfg.clone(), sim.clone());
         engine.register_fn("set_dt", move |_: &mut SimSlot, dt: Dynamic| {
-            c.borrow_mut().dt_ms = d_f64(&dt) as f32;
+            let d = d_f64(&dt) as f32;
+            if !crate::valid_dt_ms(d) {
+                return Err(s_err(format!(
+                    "dt {d} out of range {}..{} ms",
+                    crate::MIN_DT_MS,
+                    crate::MAX_DT_MS
+                )));
+            }
+            c.borrow_mut().dt_ms = d;
             *s.borrow_mut() = None; // ring depth depends on dt
+            Ok(())
         });
     }
     {
@@ -1385,9 +1471,15 @@ pub fn register_api(
     }
 
     // ---- readouts ----
-    engine.register_fn("delta_new", |n: rhai::INT| -> DeltaReadout {
-        DeltaReadout::new(n as usize)
-    });
+    engine.register_fn(
+        "delta_new",
+        |n: rhai::INT| -> Result<DeltaReadout, Box<rhai::EvalAltResult>> {
+            if !(0..=10_000_000).contains(&n) {
+                return Err(s_err(format!("delta_new({n}): units must be 0..10M")));
+            }
+            Ok(DeltaReadout::new(n as usize))
+        },
+    );
     {
         let r = rng.clone();
         engine.register_fn(
@@ -1479,8 +1571,20 @@ pub fn register_api(
     // ---- RNG bit-stream generator (hidden-signal source) ----
     engine.register_fn(
         "rng_stream",
-        |seed: rhai::INT, n_src: rhai::INT, p: Dynamic| -> RngStream {
-            RngStream::new(seed as u64, n_src as usize, d_f64(&p) as f32)
+        |seed: rhai::INT,
+         n_src: rhai::INT,
+         p: Dynamic|
+         -> Result<RngStream, Box<rhai::EvalAltResult>> {
+            if !(0..=10_000_000).contains(&n_src) {
+                return Err(s_err(format!(
+                    "rng_stream(…, {n_src}, …): sources must be 0..10M"
+                )));
+            }
+            Ok(RngStream::new(
+                seed as u64,
+                n_src as usize,
+                d_f64(&p) as f32,
+            ))
         },
     );
     engine.register_fn(
@@ -1490,7 +1594,10 @@ pub fn register_api(
          label: rhai::INT,
          pairs: rhai::Array,
          strength: Dynamic|
-         -> rhai::Array {
+         -> Result<rhai::Array, Box<rhai::EvalAltResult>> {
+            if !(0..=100_000_000).contains(&steps) {
+                return Err(s_err(format!("window steps {steps}: must be 0..100M")));
+            }
             let mut pair_idx = Vec::new();
             for p in pairs {
                 if let Some(a) = p.try_cast::<rhai::Array>() {
@@ -1505,14 +1612,14 @@ pub fn register_api(
                 &pair_idx,
                 d_f64(&strength) as f32,
             );
-            m.iter()
+            Ok(m.iter()
                 .map(|row| {
                     row.iter()
                         .map(|&v| dyn_f64(v as f64))
                         .collect::<rhai::Array>()
                         .into()
                 })
-                .collect()
+                .collect())
         },
     );
 
@@ -1533,20 +1640,16 @@ pub fn register_api(
         );
     }
     {
-        let (v, dd) = (net_version.clone(), data_dir.clone());
+        let (v, dd, q) = (net_version.clone(), data_dir.clone(), quota_bytes.clone());
         engine.register_fn(
             "samples_save",
             move |n: &mut NetHandle, name: &str, path: &str| {
                 bump(&v);
                 let b = n.borrow();
                 if let Some(s) = b.samples(name) {
-                    match rdir(&dd, path) {
-                        Ok(p) => {
-                            if let Err(e) = net_format::io::save_samples(s, &p) {
-                                eprintln!("samples_save {path}: {e}");
-                            }
-                        }
-                        Err(e) => eprintln!("samples_save {path}: {e}"),
+                    let text = net_format::io::samples_to_string(s);
+                    if let Err(e) = checked_write(&dd, &q, path, text.as_bytes()) {
+                        eprintln!("samples_save {path}: {e}");
                     }
                 }
             },
@@ -1585,19 +1688,14 @@ pub fn register_api(
             .unwrap_or_default()
     });
     {
-        let dd = data_dir.clone();
+        let (dd, q) = (data_dir.clone(), quota_bytes.clone());
         engine.register_fn("write_to_file", move |path: &str, values: rhai::Array| {
             let mut out = String::new();
             for v in values {
                 out.push_str(&format!("{}\n", d_f64(&v)));
             }
-            match rdir(&dd, path) {
-                Ok(p) => {
-                    if let Err(e) = std::fs::write(&p, out) {
-                        eprintln!("write_to_file {path}: {e}");
-                    }
-                }
-                Err(e) => eprintln!("write_to_file {path}: {e}"),
+            if let Err(e) = checked_write(&dd, &q, path, out.as_bytes()) {
+                eprintln!("write_to_file {path}: {e}");
             }
         });
     }
@@ -1632,13 +1730,41 @@ pub fn register_api(
                 crate::dataset::Dataset::load(&root, name).map_err(s_err)
             },
         );
-        let dd = data_dir.clone();
+        let (dd, q) = (data_dir.clone(), quota_bytes.clone());
         engine.register_fn(
             "dataset_gen",
             move |spec: rhai::Map| -> Result<crate::dataset::Dataset, Box<rhai::EvalAltResult>> {
                 let spec = crate::dataset::GenSpec::from_map(&spec).map_err(s_err)?;
                 let root = std::path::PathBuf::from(rdir(&dd, "datasets")?);
-                crate::dataset::Dataset::generate_or_load(&root, &spec).map_err(s_err)
+                let quota = *q.borrow();
+                if quota > 0 {
+                    // Post-check: generated size isn't known up front —
+                    // measure the delta the call wrote and roll it back
+                    // if it pushed the sandbox over quota.
+                    let dir = crate::dataset::Dataset::dir_under(&root, &spec.name);
+                    let existed = dir.exists();
+                    let before = crate::serve::dir_size(&root);
+                    let d =
+                        crate::dataset::Dataset::generate_or_load(&root, &spec).map_err(s_err)?;
+                    let added = crate::serve::dir_size(&root).saturating_sub(before);
+                    let used = dd
+                        .borrow()
+                        .as_ref()
+                        .map(|d| crate::serve::dir_size(d))
+                        .unwrap_or(0);
+                    if added > 0 && used > quota {
+                        if !existed {
+                            let _ = std::fs::remove_dir_all(&dir);
+                        }
+                        return Err(s_err(format!(
+                            "over quota: dataset '{}' needs {added} B past the {quota} B limit",
+                            spec.name
+                        )));
+                    }
+                    Ok(d)
+                } else {
+                    crate::dataset::Dataset::generate_or_load(&root, &spec).map_err(s_err)
+                }
             },
         );
         let dd = data_dir.clone();

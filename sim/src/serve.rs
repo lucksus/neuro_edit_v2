@@ -64,8 +64,17 @@ pub struct ServeOpts {
     /// quota; 0 = unlimited — local mode). Checked on every protocol
     /// write: `WriteFile`, `UploadDataset`, `UploadStart`/`UploadChunk`.
     pub quota_bytes: u64,
-    /// Shared stop flag — UI Stop button / server shutdown.
+    /// Shared stop flag — UI Stop button / server shutdown. Cleared by
+    /// the next `Eval`, so a queued eval can override a pending stop.
     pub abort: std::sync::Arc<AtomicBool>,
+    /// Hard shutdown — set once (by `UserRun::stop`), never cleared.
+    /// Once set the worker terminates whatever it is doing (eval hooks,
+    /// run chunks, builders poll it alongside `abort`) and exits its
+    /// command loop without draining further messages.
+    pub shutdown: std::sync::Arc<AtomicBool>,
+    /// Sim-size ceiling enforced before every build (server flags in
+    /// hosted mode; `SimLimits::default()` = unlimited for local).
+    pub sim_limits: crate::SimLimits,
 }
 
 /// Recursive byte count of `dir` (0 on missing/inaccessible) — used
@@ -104,12 +113,13 @@ fn con(s: impl AsRef<str>) -> ServerMsg {
 
 fn trunc(s: &str) -> String {
     if s.len() > MAX_CONSOLE {
-        let mut t = s[..MAX_CONSOLE].to_string();
-        while !t.is_char_boundary(t.len()) {
-            t.pop();
+        // slice only on a char boundary — MAX_CONSOLE can land inside a
+        // multi-byte char, and a direct s[..MAX_CONSOLE] would panic.
+        let mut end = MAX_CONSOLE;
+        while !s.is_char_boundary(end) {
+            end -= 1;
         }
-        t.push_str(&format!(" … ({} chars truncated)", s.len() - t.len()));
-        t
+        format!("{} … ({} chars truncated)", &s[..end], s.len() - end)
     } else {
         s.to_string()
     }
@@ -127,12 +137,18 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
         max_upload_bytes,
         quota_bytes,
         abort,
+        shutdown,
+        sim_limits,
     } = opts;
+    // `SetQuota` (admin push) adjusts this live — hence `mut`.
+    let mut quota_bytes = quota_bytes;
     let mut env = Env::with_print(net, backend, seed, {
         let e = emit.clone();
         Rc::new(move |s: &str| emit_b(&e, con(s)))
     });
     *env.data_dir.borrow_mut() = data_dir.clone();
+    *env.sim_limits.borrow_mut() = sim_limits;
+    *env.quota_bytes.borrow_mut() = quota_bytes;
     // Confine `import` too — Rhai's default module resolver reads from
     // the process cwd/absolute paths unchecked.
     if let Some(d) = &data_dir {
@@ -155,11 +171,12 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
     // returning false aborts the rest of the run (Stop pressed).
     {
         let (abp, pr, ep) = (abort.clone(), pub_rc.clone(), emit.clone());
+        let shut = shutdown.clone();
         let (neth, nver) = (env.net.clone(), env.net_version.clone());
         let cb: ProgressFn = Rc::new(std::cell::RefCell::new(move |sim: &mut Sim| -> bool {
             let mut p = pr.borrow_mut();
             publish_sim(&neth, nver.get(), sim, &mut p, &ep);
-            !abp.load(Ordering::Relaxed)
+            !(abp.load(Ordering::Relaxed) || shut.load(Ordering::Relaxed))
         }));
         env.set_progress(200, cb);
     }
@@ -167,8 +184,10 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
     // Stop also lands inside slow native builders (create_connections,
     // grid builders) — they poll this every few thousand rows.
     {
-        let ab = abort.clone();
-        env.set_cancel(Rc::new(move || ab.load(Ordering::Relaxed)));
+        let (ab, shut) = (abort.clone(), shutdown.clone());
+        env.set_cancel(Rc::new(move || {
+            ab.load(Ordering::Relaxed) || shut.load(Ordering::Relaxed)
+        }));
     }
 
     // Rhai op-level abort: the chunked `sim.run` hook only fires between
@@ -176,9 +195,9 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
     // abort flag. on_progress runs inside the eval loop — a `Some` return
     // terminates the script with ErrorTerminated.
     {
-        let ab = abort.clone();
+        let (ab, shut) = (abort.clone(), shutdown.clone());
         env.engine.on_progress(move |ops| {
-            if ops % 64 == 0 && ab.load(Ordering::Relaxed) {
+            if ops % 64 == 0 && (ab.load(Ordering::Relaxed) || shut.load(Ordering::Relaxed)) {
                 Some(rhai::Dynamic::UNIT)
             } else {
                 None
@@ -191,6 +210,12 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
     let mut published_geo_version = u64::MAX;
     let mut chunk = 200usize;
     let mut quit = false;
+    // Open chunked uploads: path → (bytes so far, declared size). Only
+    // `UploadStart` opens one; `UploadChunk` without an entry is an
+    // error, and the running count enforces the declared size — so the
+    // per-file cap can't be dodged by lying in `size`.
+    let mut open_uploads: std::collections::HashMap<String, (u64, u64)> =
+        std::collections::HashMap::new();
     // Last-emitted Status — changes only.
     let mut last_status: Option<ServerMsg> = None;
     let mut status_busy = false;
@@ -216,6 +241,12 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
     }
 
     while !quit {
+        // Hard shutdown outranks queued work: nothing clears the flag,
+        // so a queued Eval can't clear `abort` and stall `stop()` for
+        // minutes. (Bye also becomes unnecessary — the loop just ends.)
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
         // ---- geometry republish on version bump ----
         let gv = env.net_version.get();
         if gv != published_geo_version {
@@ -271,140 +302,48 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
             pending.push(c);
         }
         for (client, c) in pending {
-            match c {
-                ClientMsg::Hello { .. } | ClientMsg::Subscribe => {
-                    let geo = geo_snap(&env);
-                    let (seq, grids) = {
-                        let mut p = pub_rc.borrow_mut();
-                        (p.seq, p.trace_snapshot(&geo))
-                    };
-                    emit_to(
-                        &emit,
-                        client,
-                        ServerMsg::Hello {
-                            proto: proto::PROTO_VERSION,
-                            net_version: env.net_version.get(),
-                            net_gen: env.net_gen.get(),
-                        },
-                    );
-                    emit_to(&emit, client, ServerMsg::Geo(Box::new(geo)));
-                    emit_to(
-                        &emit,
-                        client,
-                        ServerMsg::GridTraces {
-                            base_seq: seq,
-                            grids,
-                        },
-                    );
-                    // force a status re-send to this client
-                    let msg = ServerMsg::Status {
-                        running,
-                        busy: status_busy,
-                        sim_built: pub_rc.borrow().sim_built,
-                        backend: match env.backend.get() {
-                            BackendKind::Cpu => Backend::Cpu,
-                            BackendKind::Cuda => Backend::Cuda,
-                        },
-                        cfg: cfg_wire(&env.cfg.borrow()),
-                        notice: None,
-                    };
-                    emit_to(&emit, client, msg);
-                    published_geo_version = env.net_version.get();
-                }
-                ClientMsg::Bye => quit = true,
-                ClientMsg::Abort => {
-                    abort.store(true, Ordering::Relaxed);
-                    running = false;
-                }
-                ClientMsg::Eval { code } => {
-                    abort.store(false, Ordering::Relaxed);
-                    status_busy = true;
-                    status!();
-                    emit_b(&emit, con(format!("> {code}")));
-                    // catch_unwind so a panic inside a script fn (or a CUDA
-                    // call) can't kill the worker thread silently.
-                    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        env.eval_str(&code)
-                    }));
-                    match res {
-                        Ok(Ok(d)) if !d.is_unit() => emit_b(&emit, con(format!("= {d}"))),
-                        Ok(Ok(_)) => {}
-                        Ok(Err(e)) => emit_b(&emit, con(format!("! {e}"))),
-                        Err(_) => emit_b(&emit, con("! script panicked (worker survived)")),
-                    }
-                    status_busy = false;
-                    status!();
-                    // sim.* calls inside the eval (set_input, set_noise…)
-                    // leave state the UI shows — push one snapshot, but
-                    // only when a sim exists (don't build one for a
-                    // read-only `net.*` eval). The rate limiter may have
-                    // skipped the run's tail — force the window closed.
-                    if env.existing_sim().is_some() {
-                        let mut p = pub_rc.borrow_mut();
-                        publish_env(&env, &mut p, &emit);
-                    }
-                }
-                ClientMsg::LoadNet { path } => {
-                    match resolve(&env, &path)
-                        .and_then(|p| net_format::io::load(&p).map_err(|e| e.to_string()))
-                    {
-                        Ok(n) => {
-                            *env.net.borrow_mut() = n;
-                            env.net_gen.set(env.net_gen.get() + 1);
-                            bump(&env);
-                            emit_b(&emit, con(format!("loaded {path}")));
+            // Once shutdown is set the worker drops everything queued
+            // behind Bye — an Eval here would clear `abort` and stall a
+            // `stop()` that is trying to join this thread.
+            if shutdown.load(Ordering::Relaxed) && !matches!(c, ClientMsg::Bye) {
+                continue;
+            }
+            // One bad message must not kill the worker: a panic anywhere
+            // in dispatch (edit apply, file op, snapshot) is reported and
+            // the loop continues with the next command.
+            let client_proto = match &c {
+                ClientMsg::Hello { proto } => Some(*proto),
+                _ => None,
+            };
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match c {
+                    ClientMsg::Hello { .. } | ClientMsg::Subscribe => {
+                        if let Some(p) = client_proto {
+                            if p != proto::PROTO_VERSION {
+                                emit_to(
+                                    &emit,
+                                    client,
+                                    ServerMsg::Error(format!(
+                                        "protocol mismatch: client {p}, server {}",
+                                        proto::PROTO_VERSION
+                                    )),
+                                );
+                            }
                         }
-                        Err(e) => emit_b(&emit, con(format!("load {path}: {e}"))),
-                    }
-                }
-                ClientMsg::NewNet => {
-                    *env.net.borrow_mut() = Network::new();
-                    env.net_gen.set(env.net_gen.get() + 1);
-                    bump(&env);
-                }
-                ClientMsg::AutoRun(b) => {
-                    // Only a fresh start clears abort — stopping must not
-                    // erase a flag an in-flight eval is about to see.
-                    if b {
-                        abort.store(false, Ordering::Relaxed);
-                    }
-                    running = b;
-                }
-                ClientMsg::SetSpeed(s) => speed = s.max(0.01),
-                ClientMsg::RunMs(ms) => {
-                    abort.store(false, Ordering::Relaxed);
-                    if let Ok(h) = env.sim_handle() {
-                        let dt = env.cfg.borrow().dt_ms;
-                        let steps = (ms / dt).round().max(0.0) as usize;
-                        run_published(&env, &h, steps, &pub_rc, &abort, &emit);
-                    }
-                }
-                ClientMsg::Reset => {
-                    if let Ok(h) = env.sim_handle() {
-                        h.borrow_mut().reset_state();
-                    }
-                    pub_rc.borrow_mut().prev_step = 0;
-                    let mut p = pub_rc.borrow_mut();
-                    publish_env(&env, &mut p, &emit);
-                }
-                ClientMsg::Watch(ids) => {
-                    pub_rc.borrow_mut().watch = ids;
-                }
-                ClientMsg::Edit { base, edit } => {
-                    let cur = env.net_version.get();
-                    if base != cur {
-                        emit_to(
-                            &emit,
-                            client,
-                            ServerMsg::Error(format!(
-                                "edit against stale net version {base} (worker is at {cur}) — resyncing"
-                            )),
-                        );
                         let geo = geo_snap(&env);
                         let (seq, grids) = {
                             let mut p = pub_rc.borrow_mut();
                             (p.seq, p.trace_snapshot(&geo))
                         };
+                        emit_to(
+                            &emit,
+                            client,
+                            ServerMsg::Hello {
+                                proto: proto::PROTO_VERSION,
+                                net_version: env.net_version.get(),
+                                net_gen: env.net_gen.get(),
+                            },
+                        );
                         emit_to(&emit, client, ServerMsg::Geo(Box::new(geo)));
                         emit_to(
                             &emit,
@@ -414,403 +353,591 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                                 grids,
                             },
                         );
-                    } else {
-                        // Scope the net borrow: the Delta arm needs fresh
-                        // reads (non_grid, geo_snap) — a match scrutinee
-                        // RefMut would live across the arms.
-                        let applied = {
-                            let mut n = env.net.borrow_mut();
-                            let dt = env.cfg.borrow().dt_ms;
-                            apply_edit(&mut n, dt, &edit)
+                        // force a status re-send to this client
+                        let msg = ServerMsg::Status {
+                            running,
+                            busy: status_busy,
+                            sim_built: pub_rc.borrow().sim_built,
+                            backend: match env.backend.get() {
+                                BackendKind::Cpu => Backend::Cpu,
+                                BackendKind::Cuda => Backend::Cuda,
+                            },
+                            cfg: cfg_wire(&env.cfg.borrow()),
+                            notice: None,
                         };
-                        match applied {
-                            Ok(applied) => {
+                        emit_to(&emit, client, msg);
+                        published_geo_version = env.net_version.get();
+                    }
+                    ClientMsg::Bye => quit = true,
+                    ClientMsg::Abort => {
+                        abort.store(true, Ordering::Relaxed);
+                        running = false;
+                    }
+                    ClientMsg::Eval { code } => {
+                        abort.store(false, Ordering::Relaxed);
+                        status_busy = true;
+                        status!();
+                        emit_b(&emit, con(format!("> {code}")));
+                        // catch_unwind so a panic inside a script fn (or a CUDA
+                        // call) can't kill the worker thread silently.
+                        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            env.eval_str(&code)
+                        }));
+                        match res {
+                            Ok(Ok(d)) if !d.is_unit() => emit_b(&emit, con(format!("= {d}"))),
+                            Ok(Ok(_)) => {}
+                            Ok(Err(e)) => emit_b(&emit, con(format!("! {e}"))),
+                            Err(_) => emit_b(&emit, con("! script panicked (worker survived)")),
+                        }
+                        status_busy = false;
+                        status!();
+                        // sim.* calls inside the eval (set_input, set_noise…)
+                        // leave state the UI shows — push one snapshot, but
+                        // only when a sim exists (don't build one for a
+                        // read-only `net.*` eval). The rate limiter may have
+                        // skipped the run's tail — force the window closed.
+                        if env.existing_sim().is_some() {
+                            let mut p = pub_rc.borrow_mut();
+                            publish_env(&env, &mut p, &emit);
+                        }
+                    }
+                    ClientMsg::LoadNet { path } => {
+                        match resolve(&env, &path)
+                            .and_then(|p| net_format::io::load(&p).map_err(|e| e.to_string()))
+                        {
+                            Ok(n) => {
+                                *env.net.borrow_mut() = n;
+                                env.net_gen.set(env.net_gen.get() + 1);
                                 bump(&env);
-                                let gen = env.net_gen.get();
-                                let ver = env.net_version.get();
-                                match applied {
-                                    Applied::Full => {
-                                        published_geo_version = ver;
-                                        let geo = geo_snap(&env);
-                                        let (seq, grids) = {
-                                            let mut p = pub_rc.borrow_mut();
-                                            (p.seq, p.trace_snapshot(&geo))
-                                        };
-                                        emit_ev(
-                                            &emit,
-                                            ServerEvent::broadcast(ServerMsg::Geo(Box::new(geo))),
-                                        );
-                                        emit_ev(
-                                            &emit,
-                                            ServerEvent::broadcast(ServerMsg::GridTraces {
-                                                base_seq: seq,
-                                                grids,
-                                            }),
-                                        );
+                                emit_b(&emit, con(format!("loaded {path}")));
+                            }
+                            Err(e) => emit_b(&emit, con(format!("load {path}: {e}"))),
+                        }
+                    }
+                    ClientMsg::NewNet => {
+                        *env.net.borrow_mut() = Network::new();
+                        env.net_gen.set(env.net_gen.get() + 1);
+                        bump(&env);
+                    }
+                    ClientMsg::AutoRun(b) => {
+                        // Only a fresh start clears abort — stopping must not
+                        // erase a flag an in-flight eval is about to see.
+                        if b {
+                            abort.store(false, Ordering::Relaxed);
+                        }
+                        running = b;
+                    }
+                    ClientMsg::SetSpeed(s) => speed = s.max(0.01),
+                    ClientMsg::RunMs(ms) => {
+                        abort.store(false, Ordering::Relaxed);
+                        if let Ok(h) = env.sim_handle() {
+                            let dt = env.cfg.borrow().dt_ms;
+                            let steps = (ms / dt).round().max(0.0) as usize;
+                            run_published(&env, &h, steps, &pub_rc, &abort, &emit);
+                        }
+                    }
+                    ClientMsg::Reset => {
+                        if let Ok(h) = env.sim_handle() {
+                            h.borrow_mut().reset_state();
+                        }
+                        pub_rc.borrow_mut().prev_step = 0;
+                        let mut p = pub_rc.borrow_mut();
+                        publish_env(&env, &mut p, &emit);
+                    }
+                    ClientMsg::Watch(ids) => {
+                        pub_rc.borrow_mut().watch = ids;
+                    }
+                    ClientMsg::Edit { base, edit } => {
+                        let cur = env.net_version.get();
+                        if base != cur {
+                            emit_to(
+                            &emit,
+                            client,
+                            ServerMsg::Error(format!(
+                                "edit against stale net version {base} (worker is at {cur}) — resyncing"
+                            )),
+                        );
+                            let geo = geo_snap(&env);
+                            let (seq, grids) = {
+                                let mut p = pub_rc.borrow_mut();
+                                (p.seq, p.trace_snapshot(&geo))
+                            };
+                            emit_to(&emit, client, ServerMsg::Geo(Box::new(geo)));
+                            emit_to(
+                                &emit,
+                                client,
+                                ServerMsg::GridTraces {
+                                    base_seq: seq,
+                                    grids,
+                                },
+                            );
+                        } else {
+                            // Scope the net borrow: the Delta arm needs fresh
+                            // reads (non_grid, geo_snap) — a match scrutinee
+                            // RefMut would live across the arms.
+                            let applied = {
+                                let mut n = env.net.borrow_mut();
+                                let dt = env.cfg.borrow().dt_ms;
+                                apply_edit(&mut n, dt, &edit)
+                            };
+                            match applied {
+                                Ok(applied) => {
+                                    bump(&env);
+                                    let gen = env.net_gen.get();
+                                    let ver = env.net_version.get();
+                                    match applied {
+                                        Applied::Full => {
+                                            published_geo_version = ver;
+                                            let geo = geo_snap(&env);
+                                            let (seq, grids) = {
+                                                let mut p = pub_rc.borrow_mut();
+                                                (p.seq, p.trace_snapshot(&geo))
+                                            };
+                                            emit_ev(
+                                                &emit,
+                                                ServerEvent::broadcast(ServerMsg::Geo(Box::new(
+                                                    geo,
+                                                ))),
+                                            );
+                                            emit_ev(
+                                                &emit,
+                                                ServerEvent::broadcast(ServerMsg::GridTraces {
+                                                    base_seq: seq,
+                                                    grids,
+                                                }),
+                                            );
+                                        }
+                                        Applied::Delta(mut d) => {
+                                            published_geo_version = ver;
+                                            d.version = ver;
+                                            d.gen = gen;
+                                            d.dt_ms = env.cfg.borrow().dt_ms;
+                                            d.non_grid = non_grid(&env.net.borrow());
+                                            emit_ev(
+                                                &emit,
+                                                ServerEvent::broadcast(ServerMsg::GeoDelta(
+                                                    Box::new(d),
+                                                )),
+                                            );
+                                        }
+                                        Applied::Noop => {}
                                     }
-                                    Applied::Delta(mut d) => {
-                                        published_geo_version = ver;
-                                        d.version = ver;
-                                        d.gen = gen;
-                                        d.dt_ms = env.cfg.borrow().dt_ms;
-                                        d.non_grid = non_grid(&env.net.borrow());
-                                        emit_ev(
-                                            &emit,
-                                            ServerEvent::broadcast(ServerMsg::GeoDelta(Box::new(
-                                                d,
-                                            ))),
-                                        );
-                                    }
-                                    Applied::Noop => {}
                                 }
+                                Err(e) => emit_to(
+                                    &emit,
+                                    client,
+                                    ServerMsg::Error(format!("edit refused: {e}")),
+                                ),
+                            }
+                        }
+                    }
+                    ClientMsg::CopySubnet { ids } => {
+                        let set: HashSet<u32> = ids.into_iter().collect();
+                        let sub = env.net.borrow().subnet(&set);
+                        match net_format::io::to_json(&sub) {
+                            Ok(txt) => emit_to(&emit, client, ServerMsg::Clipboard(txt)),
+                            Err(e) => emit_to(
+                                &emit,
+                                client,
+                                ServerMsg::Error(format!("copy failed: {e}")),
+                            ),
+                        }
+                    }
+                    ClientMsg::SetBackend(b) => {
+                        env.set_backend(match b {
+                            Backend::Cpu => BackendKind::Cpu,
+                            Backend::Cuda => BackendKind::Cuda,
+                        });
+                        env.invalidate_sim();
+                    }
+                    ClientMsg::SetQuota(q) => {
+                        quota_bytes = q;
+                        *env.quota_bytes.borrow_mut() = q;
+                    }
+                    ClientMsg::SetDtMs(dt) => {
+                        if crate::valid_dt_ms(dt) {
+                            env.cfg.borrow_mut().dt_ms = dt;
+                            env.invalidate_sim();
+                        } else {
+                            emit_to(
+                                &emit,
+                                client,
+                                ServerMsg::Error(format!(
+                                    "dt {dt} out of range {}..{} ms",
+                                    crate::MIN_DT_MS,
+                                    crate::MAX_DT_MS
+                                )),
+                            );
+                        }
+                    }
+                    ClientMsg::SetNoise { hz, kick } => {
+                        env.cfg.borrow_mut().noise_rate_hz = hz;
+                        env.cfg.borrow_mut().noise_kick_mv = kick;
+                        if let Ok(h) = env.sim_handle() {
+                            h.borrow_mut().set_noise(hz, kick);
+                        }
+                    }
+                    ClientMsg::SetInputConst { name, value } => {
+                        let idx = env.net.borrow().input_index(&name);
+                        if let (Some(i), Ok(h)) = (idx, env.sim_handle()) {
+                            h.borrow_mut().set_input_constant(i, value);
+                        }
+                        let mut p = pub_rc.borrow_mut();
+                        publish_env(&env, &mut p, &emit);
+                    }
+                    ClientMsg::PlayInput { name, series } => {
+                        let idx = env.net.borrow().input_index(&name);
+                        if let (Some(i), Ok(h)) = (idx, env.sim_handle()) {
+                            h.borrow_mut().play_input(i, series);
+                        }
+                    }
+                    ClientMsg::SetExternal { neuron, amps } => {
+                        if let Ok(h) = env.sim_handle() {
+                            h.borrow_mut().set_external(neuron as usize, amps);
+                        }
+                    }
+                    // UI file pickers/read/write — confined to --data-dir by
+                    // `resolve` (or verbatim in local mode) so the UI never
+                    // needs its own std::fs.
+                    ClientMsg::ListFiles { path } => {
+                        let r = resolve(&env, &path).and_then(|p| {
+                            let mut entries: Vec<proto::FileEntry> = std::fs::read_dir(&p)
+                                .map_err(|e| e.to_string())?
+                                .filter_map(|e| e.ok())
+                                .filter_map(|e| {
+                                    let md = e.metadata().ok()?;
+                                    Some(proto::FileEntry {
+                                        name: e.file_name().to_string_lossy().into_owned(),
+                                        is_dir: md.is_dir(),
+                                        size: md.len(),
+                                        mtime_ms: md
+                                            .modified()
+                                            .ok()
+                                            .and_then(|t| {
+                                                t.duration_since(std::time::UNIX_EPOCH).ok()
+                                            })
+                                            .map(|d| d.as_millis() as u64)
+                                            .unwrap_or(0),
+                                    })
+                                })
+                                .collect();
+                            entries
+                                .sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+                            Ok(entries)
+                        });
+                        match r {
+                            Ok(entries) => {
+                                emit_to(&emit, client, ServerMsg::FileList { path, entries })
+                            }
+                            Err(e) => {
+                                emit_to(&emit, client, ServerMsg::Error(format!("ls {path}: {e}")))
+                            }
+                        }
+                    }
+                    ClientMsg::ReadFile { path } => {
+                        match resolve(&env, &path)
+                            .and_then(|p| std::fs::read(&p).map_err(|e| e.to_string()))
+                        {
+                            Ok(data) => emit_to(&emit, client, ServerMsg::FileData { path, data }),
+                            Err(e) => emit_to(
+                                &emit,
+                                client,
+                                ServerMsg::Error(format!("read {path}: {e}")),
+                            ),
+                        }
+                    }
+                    ClientMsg::WriteFile { path, data } => {
+                        let r = resolve(&env, &path).and_then(|p| {
+                            quota_check(
+                                &env,
+                                quota_bytes,
+                                data.len() as u64,
+                                std::path::Path::new(&p),
+                            )?;
+                            std::fs::write(&p, &data).map_err(|e| e.to_string())
+                        });
+                        match r {
+                            Ok(()) => emit_to(&emit, client, ServerMsg::FileWritten { path }),
+                            Err(e) => emit_to(
+                                &emit,
+                                client,
+                                ServerMsg::Error(format!("write {path}: {e}")),
+                            ),
+                        }
+                    }
+                    // A dataset push: bytes land under `datasets/<name>/`
+                    // through the same resolve rules; the server caps the
+                    // signal size (`--max-upload-mb`).
+                    ClientMsg::UploadDataset {
+                        name,
+                        signal_ext,
+                        signal,
+                        meta_json,
+                        labels_json,
+                    } => {
+                        let ext = if signal_ext == "npy" { "npy" } else { "f32" };
+                        let r = if let Err(e) = crate::dataset::Dataset::check_name(&name) {
+                            Err(e)
+                        } else if signal.len() > max_upload_bytes {
+                            Err(format!(
+                                "upload {}: {} B over the {} B limit",
+                                name,
+                                signal.len(),
+                                max_upload_bytes
+                            ))
+                        } else if serde_json::from_str::<serde_json::Value>(&meta_json).is_err()
+                            || serde_json::from_str::<serde_json::Value>(&labels_json).is_err()
+                        {
+                            Err(format!("upload {name}: meta/labels not JSON"))
+                        } else {
+                            resolve(&env, &format!("datasets/{name}")).and_then(|dir| {
+                                let dir = std::path::PathBuf::from(dir);
+                                quota_check(
+                                    &env,
+                                    quota_bytes,
+                                    (signal.len() + meta_json.len() + labels_json.len()) as u64,
+                                    &dir,
+                                )?;
+                                std::fs::create_dir_all(&dir)
+                                    .and_then(|()| {
+                                        std::fs::write(dir.join(format!("signal.{ext}")), &signal)?;
+                                        std::fs::write(dir.join("meta.json"), &meta_json)?;
+                                        std::fs::write(dir.join("labels.json"), &labels_json)
+                                    })
+                                    .map_err(|e| e.to_string())
+                                    // sanity: the file must load as a dataset
+                                    .and_then(|()| {
+                                        crate::dataset::Dataset::load(
+                                            dir.parent().unwrap_or(&dir),
+                                            &name,
+                                        )
+                                        .map(|_| ())
+                                    })
+                            })
+                        };
+                        match r {
+                            Ok(()) => emit_to(
+                                &emit,
+                                client,
+                                ServerMsg::FileWritten {
+                                    path: format!("datasets/{name}"),
+                                },
+                            ),
+                            Err(e) => {
+                                emit_to(&emit, client, ServerMsg::Error(format!("upload: {e}")))
+                            }
+                        }
+                    }
+                    ClientMsg::Mkdir { path } => {
+                        let r = resolve(&env, &path).and_then(|p| {
+                            // Directories consume quota too (inode space) —
+                            // the check is the same helper as file writes.
+                            quota_check(&env, quota_bytes, 4096, std::path::Path::new(&p))?;
+                            std::fs::create_dir_all(&p).map_err(|e| e.to_string())
+                        });
+                        match r {
+                            Ok(()) => emit_to(&emit, client, ServerMsg::DirCreated { path }),
+                            Err(e) => emit_to(
+                                &emit,
+                                client,
+                                ServerMsg::Error(format!("mkdir {path}: {e}")),
+                            ),
+                        }
+                    }
+                    ClientMsg::DeleteFile { path } => {
+                        let r = resolve(&env, &path).and_then(|p| {
+                            if is_sandbox_root(&env, &p) {
+                                // `DeleteFile ""`/`"."` resolves to the user
+                                // root — removing it breaks every later file
+                                // op until the run restarts. Refuse outright.
+                                return Err("refusing to delete the root directory".into());
+                            }
+                            let p = std::path::PathBuf::from(&p);
+                            if p.is_dir() {
+                                std::fs::remove_dir_all(&p).map_err(|e| e.to_string())
+                            } else {
+                                std::fs::remove_file(&p).map_err(|e| e.to_string())
+                            }
+                        });
+                        match r {
+                            Ok(()) => emit_to(&emit, client, ServerMsg::FileDeleted { path }),
+                            Err(e) => emit_to(
+                                &emit,
+                                client,
+                                ServerMsg::Error(format!("delete {path}: {e}")),
+                            ),
+                        }
+                    }
+                    ClientMsg::RenameFile { from, to } => {
+                        let r = resolve(&env, &from).and_then(|f| {
+                            if is_sandbox_root(&env, &f) {
+                                return Err("refusing to rename the root directory".into());
+                            }
+                            resolve(&env, &to)
+                                .and_then(|t| std::fs::rename(&f, &t).map_err(|e| e.to_string()))
+                        });
+                        match r {
+                            Ok(()) => emit_to(&emit, client, ServerMsg::FileRenamed { from, to }),
+                            Err(e) => emit_to(
+                                &emit,
+                                client,
+                                ServerMsg::Error(format!("rename {from} → {to}: {e}")),
+                            ),
+                        }
+                    }
+                    ClientMsg::FileUsage => {
+                        let used = env
+                            .data_dir
+                            .borrow()
+                            .as_ref()
+                            .map(|d| dir_size(d))
+                            .unwrap_or(0);
+                        emit_to(
+                            &emit,
+                            client,
+                            ServerMsg::Usage {
+                                used,
+                                quota: quota_bytes,
+                            },
+                        );
+                    }
+                    ClientMsg::UploadStart { path, size } => {
+                        let r = resolve(&env, &path).and_then(|p| {
+                            if size > max_upload_bytes as u64 {
+                                return Err(format!(
+                                    "{size} B over the {} B per-file limit",
+                                    max_upload_bytes
+                                ));
+                            }
+                            let p = std::path::PathBuf::from(&p);
+                            quota_check(&env, quota_bytes, size, &p)?;
+                            // Fresh upload: replace any stale part file.
+                            let _ = std::fs::remove_file(part_path(&p));
+                            if let Some(parent) = p.parent() {
+                                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                            }
+                            Ok(())
+                        });
+                        match r {
+                            Ok(()) => {
+                                open_uploads.insert(path.clone(), (0, size));
+                                emit_to(&emit, client, ServerMsg::UploadReady { path });
                             }
                             Err(e) => emit_to(
                                 &emit,
                                 client,
-                                ServerMsg::Error(format!("edit refused: {e}")),
+                                ServerMsg::Error(format!("upload {path}: {e}")),
                             ),
                         }
                     }
-                }
-                ClientMsg::CopySubnet { ids } => {
-                    let set: HashSet<u32> = ids.into_iter().collect();
-                    let sub = env.net.borrow().subnet(&set);
-                    match net_format::io::to_json(&sub) {
-                        Ok(txt) => emit_to(&emit, client, ServerMsg::Clipboard(txt)),
-                        Err(e) => {
-                            emit_to(&emit, client, ServerMsg::Error(format!("copy failed: {e}")))
-                        }
-                    }
-                }
-                ClientMsg::SetBackend(b) => {
-                    env.set_backend(match b {
-                        Backend::Cpu => BackendKind::Cpu,
-                        Backend::Cuda => BackendKind::Cuda,
-                    });
-                    env.invalidate_sim();
-                }
-                ClientMsg::SetDtMs(dt) => {
-                    env.cfg.borrow_mut().dt_ms = dt;
-                    env.invalidate_sim();
-                }
-                ClientMsg::SetNoise { hz, kick } => {
-                    env.cfg.borrow_mut().noise_rate_hz = hz;
-                    env.cfg.borrow_mut().noise_kick_mv = kick;
-                    if let Ok(h) = env.sim_handle() {
-                        h.borrow_mut().set_noise(hz, kick);
-                    }
-                }
-                ClientMsg::SetInputConst { name, value } => {
-                    let idx = env.net.borrow().input_index(&name);
-                    if let (Some(i), Ok(h)) = (idx, env.sim_handle()) {
-                        h.borrow_mut().set_input_constant(i, value);
-                    }
-                    let mut p = pub_rc.borrow_mut();
-                    publish_env(&env, &mut p, &emit);
-                }
-                ClientMsg::PlayInput { name, series } => {
-                    let idx = env.net.borrow().input_index(&name);
-                    if let (Some(i), Ok(h)) = (idx, env.sim_handle()) {
-                        h.borrow_mut().play_input(i, series);
-                    }
-                }
-                ClientMsg::SetExternal { neuron, amps } => {
-                    if let Ok(h) = env.sim_handle() {
-                        h.borrow_mut().set_external(neuron as usize, amps);
-                    }
-                }
-                // UI file pickers/read/write — confined to --data-dir by
-                // `resolve` (or verbatim in local mode) so the UI never
-                // needs its own std::fs.
-                ClientMsg::ListFiles { path } => {
-                    let r = resolve(&env, &path).and_then(|p| {
-                        let mut entries: Vec<proto::FileEntry> = std::fs::read_dir(&p)
-                            .map_err(|e| e.to_string())?
-                            .filter_map(|e| e.ok())
-                            .filter_map(|e| {
-                                let md = e.metadata().ok()?;
-                                Some(proto::FileEntry {
-                                    name: e.file_name().to_string_lossy().into_owned(),
-                                    is_dir: md.is_dir(),
-                                    size: md.len(),
-                                    mtime_ms: md
-                                        .modified()
-                                        .ok()
-                                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                                        .map(|d| d.as_millis() as u64)
-                                        .unwrap_or(0),
-                                })
+                    ClientMsg::UploadChunk { path, data, last } => {
+                        let r = open_uploads
+                            .get_mut(&path)
+                            .ok_or_else(|| format!("no UploadStart for {path}"))
+                            .and_then(|(got, declared)| {
+                                *got += data.len() as u64;
+                                if *got > *declared {
+                                    return Err(format!(
+                                        "{} B exceeds the declared {} B",
+                                        *got, declared
+                                    ));
+                                }
+                                resolve(&env, &path)
                             })
-                            .collect();
-                        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
-                        Ok(entries)
-                    });
-                    match r {
-                        Ok(entries) => {
-                            emit_to(&emit, client, ServerMsg::FileList { path, entries })
-                        }
-                        Err(e) => {
-                            emit_to(&emit, client, ServerMsg::Error(format!("ls {path}: {e}")))
-                        }
-                    }
-                }
-                ClientMsg::ReadFile { path } => {
-                    match resolve(&env, &path)
-                        .and_then(|p| std::fs::read(&p).map_err(|e| e.to_string()))
-                    {
-                        Ok(data) => emit_to(&emit, client, ServerMsg::FileData { path, data }),
-                        Err(e) => {
-                            emit_to(&emit, client, ServerMsg::Error(format!("read {path}: {e}")))
-                        }
-                    }
-                }
-                ClientMsg::WriteFile { path, data } => {
-                    let r = resolve(&env, &path).and_then(|p| {
-                        quota_check(
-                            &env,
-                            quota_bytes,
-                            data.len() as u64,
-                            std::path::Path::new(&p),
-                        )?;
-                        std::fs::write(&p, &data).map_err(|e| e.to_string())
-                    });
-                    match r {
-                        Ok(()) => emit_to(&emit, client, ServerMsg::FileWritten { path }),
-                        Err(e) => emit_to(
-                            &emit,
-                            client,
-                            ServerMsg::Error(format!("write {path}: {e}")),
-                        ),
-                    }
-                }
-                // A dataset push: bytes land under `datasets/<name>/`
-                // through the same resolve rules; the server caps the
-                // signal size (`--max-upload-mb`).
-                ClientMsg::UploadDataset {
-                    name,
-                    signal_ext,
-                    signal,
-                    meta_json,
-                    labels_json,
-                } => {
-                    let ext = if signal_ext == "npy" { "npy" } else { "f32" };
-                    let r = if let Err(e) = crate::dataset::Dataset::check_name(&name) {
-                        Err(e)
-                    } else if signal.len() > max_upload_bytes {
-                        Err(format!(
-                            "upload {}: {} B over the {} B limit",
-                            name,
-                            signal.len(),
-                            max_upload_bytes
-                        ))
-                    } else if serde_json::from_str::<serde_json::Value>(&meta_json).is_err()
-                        || serde_json::from_str::<serde_json::Value>(&labels_json).is_err()
-                    {
-                        Err(format!("upload {name}: meta/labels not JSON"))
-                    } else {
-                        resolve(&env, &format!("datasets/{name}")).and_then(|dir| {
-                            let dir = std::path::PathBuf::from(dir);
-                            quota_check(
-                                &env,
-                                quota_bytes,
-                                (signal.len() + meta_json.len() + labels_json.len()) as u64,
-                                &dir,
-                            )?;
-                            std::fs::create_dir_all(&dir)
-                                .and_then(|()| {
-                                    std::fs::write(dir.join(format!("signal.{ext}")), &signal)?;
-                                    std::fs::write(dir.join("meta.json"), &meta_json)?;
-                                    std::fs::write(dir.join("labels.json"), &labels_json)
-                                })
-                                .map_err(|e| e.to_string())
-                                // sanity: the file must load as a dataset
-                                .and_then(|()| {
-                                    crate::dataset::Dataset::load(
-                                        dir.parent().unwrap_or(&dir),
-                                        &name,
-                                    )
-                                    .map(|_| ())
-                                })
-                        })
-                    };
-                    match r {
-                        Ok(()) => emit_to(
-                            &emit,
-                            client,
-                            ServerMsg::FileWritten {
-                                path: format!("datasets/{name}"),
-                            },
-                        ),
-                        Err(e) => emit_to(&emit, client, ServerMsg::Error(format!("upload: {e}"))),
-                    }
-                }
-                ClientMsg::Mkdir { path } => {
-                    let r = resolve(&env, &path)
-                        .and_then(|p| std::fs::create_dir_all(&p).map_err(|e| e.to_string()));
-                    match r {
-                        Ok(()) => emit_to(&emit, client, ServerMsg::DirCreated { path }),
-                        Err(e) => emit_to(
-                            &emit,
-                            client,
-                            ServerMsg::Error(format!("mkdir {path}: {e}")),
-                        ),
-                    }
-                }
-                ClientMsg::DeleteFile { path } => {
-                    let r = resolve(&env, &path).and_then(|p| {
-                        let p = std::path::PathBuf::from(&p);
-                        if p.is_dir() {
-                            std::fs::remove_dir_all(&p).map_err(|e| e.to_string())
-                        } else {
-                            std::fs::remove_file(&p).map_err(|e| e.to_string())
-                        }
-                    });
-                    match r {
-                        Ok(()) => emit_to(&emit, client, ServerMsg::FileDeleted { path }),
-                        Err(e) => emit_to(
-                            &emit,
-                            client,
-                            ServerMsg::Error(format!("delete {path}: {e}")),
-                        ),
-                    }
-                }
-                ClientMsg::RenameFile { from, to } => {
-                    let r = resolve(&env, &from).and_then(|f| {
-                        resolve(&env, &to)
-                            .and_then(|t| std::fs::rename(&f, &t).map_err(|e| e.to_string()))
-                    });
-                    match r {
-                        Ok(()) => emit_to(&emit, client, ServerMsg::FileRenamed { from, to }),
-                        Err(e) => emit_to(
-                            &emit,
-                            client,
-                            ServerMsg::Error(format!("rename {from} → {to}: {e}")),
-                        ),
-                    }
-                }
-                ClientMsg::FileUsage => {
-                    let used = env
-                        .data_dir
-                        .borrow()
-                        .as_ref()
-                        .map(|d| dir_size(d))
-                        .unwrap_or(0);
-                    emit_to(
-                        &emit,
-                        client,
-                        ServerMsg::Usage {
-                            used,
-                            quota: quota_bytes,
-                        },
-                    );
-                }
-                ClientMsg::UploadStart { path, size } => {
-                    let r = resolve(&env, &path).and_then(|p| {
-                        if size > max_upload_bytes as u64 {
-                            return Err(format!(
-                                "{size} B over the {} B per-file limit",
-                                max_upload_bytes
-                            ));
-                        }
-                        let p = std::path::PathBuf::from(&p);
-                        quota_check(&env, quota_bytes, size, &p)?;
-                        // Fresh upload: replace any stale part file.
-                        let _ = std::fs::remove_file(part_path(&p));
-                        if let Some(parent) = p.parent() {
-                            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                        }
-                        Ok(())
-                    });
-                    match r {
-                        Ok(()) => emit_to(&emit, client, ServerMsg::UploadReady { path }),
-                        Err(e) => emit_to(
-                            &emit,
-                            client,
-                            ServerMsg::Error(format!("upload {path}: {e}")),
-                        ),
-                    }
-                }
-                ClientMsg::UploadChunk { path, data, last } => {
-                    let r = resolve(&env, &path).and_then(|p| {
-                        let p = std::path::PathBuf::from(&p);
-                        let part = part_path(&p);
-                        quota_check(&env, quota_bytes, data.len() as u64, &p)?;
-                        use std::io::Write;
-                        let mut f = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&part)
-                            .map_err(|e| e.to_string())?;
-                        f.write_all(&data).map_err(|e| e.to_string())?;
-                        drop(f);
-                        if last {
-                            std::fs::rename(&part, &p).map_err(|e| e.to_string())?;
-                        }
-                        Ok(())
-                    });
-                    match r {
-                        Ok(()) if last => emit_to(&emit, client, ServerMsg::FileWritten { path }),
-                        Ok(()) => {}
-                        Err(e) => {
-                            // No partial file: drop the part on any error.
-                            if let Ok(p) = resolve(&env, &path) {
-                                let _ = std::fs::remove_file(part_path(std::path::Path::new(&p)));
+                            .and_then(|p| {
+                                let p = std::path::PathBuf::from(&p);
+                                let part = part_path(&p);
+                                use std::io::Write;
+                                let mut f = std::fs::OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open(&part)
+                                    .map_err(|e| e.to_string())?;
+                                f.write_all(&data).map_err(|e| e.to_string())?;
+                                drop(f);
+                                if last {
+                                    std::fs::rename(&part, &p).map_err(|e| e.to_string())?;
+                                }
+                                Ok(())
+                            });
+                        match r {
+                            Ok(()) if last => {
+                                open_uploads.remove(&path);
+                                emit_to(&emit, client, ServerMsg::FileWritten { path });
                             }
-                            emit_to(
-                                &emit,
-                                client,
-                                ServerMsg::Error(format!("upload {path}: {e}")),
-                            )
+                            Ok(()) => {}
+                            Err(e) => {
+                                // No partial file: drop the part on any error.
+                                open_uploads.remove(&path);
+                                if let Ok(p) = resolve(&env, &path) {
+                                    let _ =
+                                        std::fs::remove_file(part_path(std::path::Path::new(&p)));
+                                }
+                                emit_to(
+                                    &emit,
+                                    client,
+                                    ServerMsg::Error(format!("upload {path}: {e}")),
+                                )
+                            }
                         }
                     }
-                }
-                ClientMsg::DownloadFile { path } => {
-                    match resolve(&env, &path)
-                        .and_then(|p| std::fs::read(&p).map_err(|e| e.to_string()))
-                    {
-                        Ok(data) => {
-                            const CHUNK: usize = 256 * 1024;
-                            let mut i = 0;
-                            while i < data.len() {
-                                let end = (i + CHUNK).min(data.len());
+                    ClientMsg::DownloadFile { path } => {
+                        match resolve(&env, &path)
+                            .and_then(|p| std::fs::read(&p).map_err(|e| e.to_string()))
+                        {
+                            Ok(data) => {
+                                const CHUNK: usize = 256 * 1024;
+                                let mut i = 0;
+                                while i < data.len() {
+                                    let end = (i + CHUNK).min(data.len());
+                                    emit_to(
+                                        &emit,
+                                        client,
+                                        ServerMsg::FileChunk {
+                                            path: path.clone(),
+                                            data: data[i..end].to_vec(),
+                                            done: false,
+                                        },
+                                    );
+                                    i = end;
+                                }
                                 emit_to(
                                     &emit,
                                     client,
                                     ServerMsg::FileChunk {
-                                        path: path.clone(),
-                                        data: data[i..end].to_vec(),
-                                        done: false,
+                                        path,
+                                        data: Vec::new(),
+                                        done: true,
                                     },
                                 );
-                                i = end;
                             }
-                            emit_to(
+                            Err(e) => emit_to(
                                 &emit,
                                 client,
-                                ServerMsg::FileChunk {
-                                    path,
-                                    data: Vec::new(),
-                                    done: true,
-                                },
-                            );
+                                ServerMsg::Error(format!("download {path}: {e}")),
+                            ),
                         }
-                        Err(e) => emit_to(
-                            &emit,
-                            client,
-                            ServerMsg::Error(format!("download {path}: {e}")),
-                        ),
                     }
+                    // Jobs are a `server` feature — they need a shared
+                    // broadcast fan-out the local transport doesn't have.
+                    ClientMsg::StartJob { .. }
+                    | ClientMsg::CancelJob { .. }
+                    | ClientMsg::ListJobs
+                    | ClientMsg::OpenJob { .. } => emit_to(
+                        &emit,
+                        client,
+                        ServerMsg::Error("jobs run on a `server` — connect with --connect".into()),
+                    ),
                 }
-                // Jobs are a `server` feature — they need a shared
-                // broadcast fan-out the local transport doesn't have.
-                ClientMsg::StartJob { .. }
-                | ClientMsg::CancelJob { .. }
-                | ClientMsg::ListJobs
-                | ClientMsg::OpenJob { .. } => emit_to(
+            }));
+            if res.is_err() {
+                // The panic may have left a half-updated state — clear the
+                // busy flag so clients don't sit on a stale "working".
+                status_busy = false;
+                emit_b(
                     &emit,
-                    client,
-                    ServerMsg::Error("jobs run on a `server` — connect with --connect".into()),
-                ),
+                    con("! internal error handling that command (worker survived)"),
+                );
             }
         }
         status!();
@@ -1129,6 +1256,17 @@ fn run_published(
 /// Refuses `..` components and absolute paths outright.
 pub fn resolve(env: &Env, p: &str) -> Result<String, String> {
     env.resolve_path(p)
+}
+
+/// `resolved` is the sandbox root itself — `""` and `"."` both land
+/// there; deleting/renaming it would wipe the user's whole directory
+/// (every later file op then fails until the run restarts).
+fn is_sandbox_root(env: &Env, resolved: &str) -> bool {
+    let Some(d) = env.data_dir.borrow().clone() else {
+        return false;
+    };
+    let root = d.canonicalize().unwrap_or(d);
+    std::path::Path::new(resolved) == root
 }
 
 /// `.upload` staging name next to the target — committed by rename on
@@ -1491,6 +1629,7 @@ fn apply_edit(net: &mut Network, dt: f32, e: &NetEdit) -> Result<Applied, String
             spacing,
             origin,
         } => {
+            net_format::check_grid_dims([*w as i64, *h as i64, 1])?;
             let (n0, g0) = (net.neurons.len(), net.groups.len());
             net_format::builders::create_2d_grid(
                 net,
@@ -1517,6 +1656,7 @@ fn apply_edit(net: &mut Network, dt: f32, e: &NetEdit) -> Result<Applied, String
             spacing,
             origin,
         } => {
+            net_format::check_grid_dims([*w as i64, *h as i64, *depth as i64])?;
             let (n0, g0) = (net.neurons.len(), net.groups.len());
             net_format::builders::create_3d_grid(
                 net,

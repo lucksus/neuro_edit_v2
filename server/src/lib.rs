@@ -22,33 +22,55 @@ pub mod runs;
 use jobs::{Bcast, JobCtx, JobRegistry};
 
 /// One connected client's outbound channel (encoded WS frames).
-type ClientTx = mpsc::Sender<Vec<u8>>;
+/// `SyncSender` so a slow reader can't grow the queue without bound —
+/// a full queue drops the client instead of the server's memory.
+type ClientTx = mpsc::SyncSender<Vec<u8>>;
 /// Live client sinks, keyed by connection id (per-run in multi mode).
 pub type Clients = Arc<Mutex<HashMap<u64, ClientTx>>>;
+/// Per-client outbound queue depth — ~512 encoded frames is far more
+/// than any healthy editor needs (a stalled reader hits this fast).
+const CLIENT_QUEUE: usize = 512;
+/// Inbound commands per run — a socket that out-sends the worker gets
+/// dropped rather than queueing unboundedly (S13).
+pub const CMD_QUEUE: usize = 256;
+
+/// Validity probe for a live connection — multi-user mode rechecks the
+/// account+session here (throttled) so CLI `admin disable`/delete and
+/// session revocation cut open sockets on their next inbound frame.
+/// `None` (single-run mode) means always valid.
+pub type ValidCheck = Option<Arc<dyn Fn() -> bool + Send + Sync>>;
 
 pub struct Server {
-    cmd_tx: mpsc::Sender<(u64, ClientMsg)>,
+    cmd_tx: mpsc::SyncSender<(u64, ClientMsg)>,
     clients: Clients,
     next_id: Arc<AtomicU64>,
     worker: JoinHandle<()>,
     jobs: Arc<JobRegistry>,
     /// Shared stop flag (same one the worker watches).
     pub abort: Arc<AtomicBool>,
+    /// Hard shutdown for `shutdown()` — same flag the worker watches.
+    pub shutdown: Arc<AtomicBool>,
 }
 
 impl Server {
     /// Start the worker; call `accept` on a listener to serve clients.
     pub fn start(net: Network, opts: ServeOpts) -> Server {
-        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (cmd_tx, cmd_rx) = mpsc::sync_channel(CMD_QUEUE);
         let clients: Clients = Arc::new(Mutex::new(HashMap::new()));
         let next_id = Arc::new(AtomicU64::new(1));
 
         let abort = opts.abort.clone();
+        let shutdown = opts.shutdown.clone();
         let jobs = Arc::new(JobRegistry::new(JobCtx {
             backend: opts.backend,
             seed: opts.seed,
             cfg: opts.cfg.clone(),
             data_dir: opts.data_dir.clone(),
+            // shared-run mode: local/unlimited, same spirit as its quota.
+            quota_bytes: 0,
+            sim_limits: opts.sim_limits,
+            max_jobs: 0,
+            wall: std::time::Duration::MAX,
         }));
         let cls = clients.clone();
         let worker = std::thread::Builder::new()
@@ -58,19 +80,8 @@ impl Server {
                 let emit: Emit =
                     std::rc::Rc::new(std::cell::RefCell::new(move |ev: ServerEvent| {
                         let bytes = proto::encode(&ev.msg);
-                        let cls = cls.lock().unwrap();
-                        match ev.to {
-                            Some(id) => {
-                                if let Some(tx) = cls.get(&id) {
-                                    let _ = tx.send(bytes);
-                                }
-                            }
-                            None => {
-                                for tx in cls.values() {
-                                    let _ = tx.send(bytes.clone());
-                                }
-                            }
-                        }
+                        let mut cls = cls.lock().unwrap();
+                        fanout(&mut cls, ev.to, &bytes);
                     }));
                 sim::serve::run(net, opts, cmd_rx, emit);
             })
@@ -82,6 +93,7 @@ impl Server {
             worker,
             jobs,
             abort,
+            shutdown,
         }
     }
 
@@ -112,8 +124,9 @@ impl Server {
             let clients = self.clients.clone();
             let dir = web_dir.clone();
             let jobs = self.jobs.clone();
+            let abort = self.abort.clone();
             std::thread::spawn(move || {
-                if let Err(e) = handle_client(stream, id, cmd_tx, clients, dir, jobs) {
+                if let Err(e) = handle_client(stream, id, cmd_tx, clients, dir, jobs, abort) {
                     eprintln!("client {id}: {e}");
                 }
             });
@@ -137,6 +150,7 @@ impl Server {
         let clients = self.clients.clone();
         let next_id = self.next_id.clone();
         let jobs = self.jobs.clone();
+        let abort = self.abort.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let stream = match stream {
@@ -151,8 +165,9 @@ impl Server {
                 let clients = clients.clone();
                 let dir = web_dir.clone();
                 let jobs = jobs.clone();
+                let abort = abort.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = handle_client(stream, id, cmd_tx, clients, dir, jobs) {
+                    if let Err(e) = handle_client(stream, id, cmd_tx, clients, dir, jobs, abort) {
                         eprintln!("client {id}: {e}");
                     }
                 });
@@ -162,13 +177,14 @@ impl Server {
     }
 
     pub fn send(&self, m: ClientMsg) {
-        let _ = self.cmd_tx.send((0, m));
+        let _ = self.cmd_tx.try_send((0, m));
     }
 
     /// Stop the worker (clients stay connected to a dead backend — used
     /// by tests; normal shutdown is just process exit).
     pub fn shutdown(self) {
-        let _ = self.cmd_tx.send((0, ClientMsg::Bye));
+        self.shutdown.store(true, Ordering::Relaxed);
+        let _ = self.cmd_tx.try_send((0, ClientMsg::Bye));
         let _ = self.worker.join();
     }
 }
@@ -319,11 +335,29 @@ fn serve_http(
     Ok(())
 }
 
+/// Queue `bytes` for `to` (or everyone): `try_send` only — a full
+/// queue means a stalled reader, and the stalled reader must not grow
+/// server memory without bound. Dropped clients are removed so later
+/// events skip them entirely.
+pub fn fanout(cls: &mut HashMap<u64, ClientTx>, to: Option<u64>, bytes: &[u8]) {
+    match to {
+        Some(id) => {
+            let full = cls
+                .get(&id)
+                .map(|tx| tx.try_send(bytes.to_vec()).is_err())
+                .unwrap_or(false);
+            if full {
+                cls.remove(&id);
+            }
+        }
+        None => cls.retain(|_, tx| tx.try_send(bytes.to_vec()).is_ok()),
+    }
+}
+
 /// Reply to one client (its outbound queue → writer thread).
 fn send_to(clients: &Clients, id: u64, m: ServerMsg) {
-    if let Some(tx) = clients.lock().unwrap().get(&id) {
-        let _ = tx.send(proto::encode(&m));
-    }
+    let mut cls = clients.lock().unwrap();
+    fanout(&mut cls, Some(id), &proto::encode(&m));
 }
 
 /// Broadcast a `ServerMsg` to every connected client — the fan-out job
@@ -332,9 +366,8 @@ fn bcast_fn(clients: &Clients) -> Bcast {
     let cls = clients.clone();
     Arc::new(move |m: ServerMsg| {
         let bytes = proto::encode(&m);
-        for tx in cls.lock().unwrap().values() {
-            let _ = tx.send(bytes.clone());
-        }
+        let mut c = cls.lock().unwrap();
+        fanout(&mut c, None, &bytes);
     })
 }
 
@@ -349,8 +382,10 @@ fn handle_job_msg(m: &ClientMsg, id: u64, jobs: &JobRegistry, clients: &Clients)
             } else {
                 name.clone()
             };
-            let jid = jobs.start(name.clone(), script.clone(), bcast_fn(clients));
-            bcast_fn(clients)(ServerMsg::JobStarted { id: jid, name });
+            match jobs.start(name.clone(), script.clone(), bcast_fn(clients)) {
+                Ok(jid) => bcast_fn(clients)(ServerMsg::JobStarted { id: jid, name }),
+                Err(e) => send_to(clients, id, ServerMsg::Error(e)),
+            }
         }
         ClientMsg::CancelJob { id: jid } => {
             if let Err(e) = jobs.cancel(*jid) {
@@ -385,10 +420,11 @@ fn handle_job_msg(m: &ClientMsg, id: u64, jobs: &JobRegistry, clients: &Clients)
 fn handle_client(
     stream: std::net::TcpStream,
     id: u64,
-    cmd_tx: mpsc::Sender<(u64, ClientMsg)>,
+    cmd_tx: mpsc::SyncSender<(u64, ClientMsg)>,
     clients: Clients,
     web_dir: Option<std::path::PathBuf>,
     jobs: Arc<JobRegistry>,
+    abort: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     stream.set_nodelay(true).ok();
     // Every client starts with an HTTP head: `Upgrade: websocket` is
@@ -416,22 +452,42 @@ fn handle_client(
                 )
                 .as_bytes(),
             )?;
-            tungstenite::WebSocket::from_raw_socket(s, tungstenite::protocol::Role::Server, None)
+            tungstenite::WebSocket::from_raw_socket(
+                s,
+                tungstenite::protocol::Role::Server,
+                Some(server_ws_config()),
+            )
         }
     };
-    ws_client_loop(ws, id, cmd_tx, clients, jobs)
+    ws_client_loop(ws, id, cmd_tx, clients, jobs, abort, None)
+}
+
+/// Inbound WS frame cap for the server side: upload chunks travel at
+/// 256 KiB and nothing else a client legitimately sends approaches a
+/// megabyte, so 16 MiB is generous headroom — while still killing the
+/// "inflate a 64 MiB frame of zeroes" bomb upstream of `proto::decode`.
+pub fn server_ws_config() -> tungstenite::protocol::WebSocketConfig {
+    let mut c = tungstenite::protocol::WebSocketConfig::default();
+    c.max_message_size = Some(16 << 20);
+    c.max_frame_size = Some(16 << 20);
+    c
 }
 
 /// The post-upgrade client loop, shared by the single-run acceptor
 /// (`handle_client`) and multi-user mode's per-user runs: outbound
-/// mpsc queue → writer thread; inbound bincode → the run's cmd channel
-/// (job messages stay with the registry).
+/// bounded mpsc queue → writer thread; inbound bincode → the run's cmd
+/// channel (job messages stay with the registry). `abort` is the run's
+/// own flag so `ClientMsg::Abort` lands immediately — a queued Abort
+/// could never reach a worker stuck inside `loop {}`. `valid`, when
+/// given, is rechecked per inbound frame; false drops the connection.
 pub fn ws_client_loop(
     ws: tungstenite::WebSocket<std::net::TcpStream>,
     id: u64,
-    cmd_tx: mpsc::Sender<(u64, ClientMsg)>,
+    cmd_tx: mpsc::SyncSender<(u64, ClientMsg)>,
     clients: Clients,
     jobs: Arc<JobRegistry>,
+    abort: Arc<AtomicBool>,
+    valid: ValidCheck,
 ) -> anyhow::Result<()> {
     // One socket → reader + writer halves via two WebSockets on dup'd fds.
     let mut w_read = ws;
@@ -442,8 +498,11 @@ pub fn ws_client_loop(
         None,
     );
 
-    // outbound: this client's queue → the write half
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    // outbound: this client's BOUNDED queue → the write half. When the
+    // queue fills the fan-out removes this client and drops the sender,
+    // ending `for bytes in rx`; the writer then sends a WS Close so the
+    // peer's read unblocks instead of hanging on a silent half-close.
+    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(CLIENT_QUEUE);
     clients.lock().unwrap().insert(id, tx);
     let cls2 = clients.clone();
     let writer = std::thread::spawn(move || {
@@ -452,9 +511,10 @@ pub fn ws_client_loop(
                 .send(tungstenite::Message::Binary(bytes.into()))
                 .is_err()
             {
-                break;
+                return;
             }
         }
+        let _ = w_write.send(tungstenite::Message::Close(None));
     });
 
     // inbound: bincode frames → the worker, except job messages (owned
@@ -462,20 +522,44 @@ pub fn ws_client_loop(
     // shared worker — `Server::shutdown` injects Bye straight into
     // cmd_tx; the socket close cleans this client up either way).
     let r = (|| -> anyhow::Result<()> {
+        // A few undecodable frames is corruption; a stream of them is a
+        // journal flood — close rather than log forever.
+        let mut bad_frames = 0u32;
         loop {
             match w_read.read() {
                 Ok(tungstenite::Message::Binary(b)) => match proto::decode::<ClientMsg>(&b) {
                     Ok(ClientMsg::Bye) => {}
                     Ok(m) if handle_job_msg(&m, id, &jobs, &clients) => {}
+                    Ok(ClientMsg::Abort) => {
+                        // Direct flag set first — a queued copy would sit
+                        // behind the very eval it is meant to interrupt.
+                        abort.store(true, Ordering::Relaxed);
+                        if cmd_tx.try_send((id, ClientMsg::Abort)).is_err() {
+                            return Ok(());
+                        }
+                    }
                     Ok(m) => {
-                        if cmd_tx.send((id, m)).is_err() {
+                        if cmd_tx.try_send((id, m)).is_err() {
                             return Ok(()); // worker gone
                         }
                     }
-                    Err(e) => eprintln!("client {id}: bad frame: {e}"),
+                    Err(e) => {
+                        bad_frames += 1;
+                        eprintln!("client {id}: bad frame ({bad_frames}): {e}");
+                        if bad_frames >= 8 {
+                            anyhow::bail!("client {id}: too many bad frames");
+                        }
+                    }
                 },
                 Ok(tungstenite::Message::Close(_)) | Err(_) => return Ok(()),
                 Ok(_) => {} // pings/text ignored
+            }
+            // CLI disable/delete and session revocation reach live
+            // sockets here — checked once per inbound frame.
+            if let Some(v) = &valid {
+                if !v() {
+                    return Ok(());
+                }
             }
         }
     })();
@@ -523,6 +607,7 @@ impl ClientConn {
         }
         match self.ws.read() {
             Ok(tungstenite::Message::Binary(b)) => Ok(Some(proto::decode::<ServerMsg>(&b)?)),
+            Ok(tungstenite::Message::Close(_)) => Err(anyhow::anyhow!("ws closed")),
             Ok(_) => Ok(None),
             Err(tungstenite::Error::Io(e))
                 if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
@@ -609,6 +694,35 @@ pub fn first_password_line(mut r: impl std::io::BufRead) -> std::io::Result<Stri
 #[cfg(test)]
 mod tests {
     use super::first_password_line;
+
+    /// S13: a client whose bounded queue is full is removed by the
+    /// fan-out — a stalled reader can't grow server memory and stops
+    /// receiving immediately.
+    #[test]
+    fn fanout_drops_stalled_client() {
+        use super::{fanout, CLIENT_QUEUE};
+        use std::collections::HashMap;
+        use std::sync::mpsc;
+        let mut cls: HashMap<u64, mpsc::SyncSender<Vec<u8>>> = HashMap::new();
+        let (tx, _rx) = mpsc::sync_channel(CLIENT_QUEUE);
+        for _ in 0..CLIENT_QUEUE {
+            tx.try_send(vec![1]).unwrap();
+        }
+        cls.insert(1, tx);
+        fanout(&mut cls, Some(1), b"x");
+        assert!(cls.is_empty(), "full client must be dropped");
+        // broadcast path too: live client stays, stalled one goes
+        let (tx2, _rx2) = mpsc::sync_channel(CLIENT_QUEUE);
+        for _ in 0..CLIENT_QUEUE {
+            tx2.try_send(vec![1]).unwrap();
+        }
+        let (tx3, _rx3) = mpsc::sync_channel(CLIENT_QUEUE);
+        cls.insert(2, tx2);
+        cls.insert(3, tx3);
+        fanout(&mut cls, None, b"x");
+        assert!(!cls.contains_key(&2));
+        assert!(cls.contains_key(&3));
+    }
 
     #[test]
     fn piped_password_reads_first_line_only() {

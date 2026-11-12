@@ -118,6 +118,8 @@ fn main() {
                 max_upload_bytes: usize::MAX,
                 quota_bytes: 0,
                 abort: Arc::new(AtomicBool::new(false)),
+                shutdown: Arc::new(AtomicBool::new(false)),
+                sim_limits: sim::SimLimits::default(),
             },
             rx,
             emit,

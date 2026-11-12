@@ -186,6 +186,10 @@ fn start(tag: &str, f: impl FnOnce(&mut MultiOpts)) -> Fixture {
         max_runs: 4,
         idle: Duration::from_secs(900),
         default_quota_bytes: 4 << 20,
+        sim_limits: sim::SimLimits::default(),
+        max_jobs: 0,
+        job_wall: Duration::MAX,
+        max_connections: 512,
     };
     f(&mut opts);
     let multi = Arc::new(Multi::new(accounts, opts));
@@ -567,7 +571,8 @@ fn admin_gated_and_post_checks() {
         .multi
         .accounts
         .create_admin("root@x.dev", "Root", "correct horse 12")
-        .unwrap();
+        .unwrap()
+        .0;
     let _u = mkuser(&fx, "n@x.dev", "Non");
     let admin_tok = token_of(&fx, "root@x.dev");
     let user_tok = token_of(&fx, "n@x.dev");
@@ -746,21 +751,24 @@ fn trust_proxy_gates_xff() {
         let r = login(&fx.addr, "x@x.dev", "nope nope nope");
         let _ = (r, i);
     }
-    // the email bucket is full → 429 even with the right password
+    // the (ip,email) pair bucket is full → 429 even with the right password
     let r = login(&fx.addr, "x@x.dev", "correct horse 12");
     assert_eq!(429, r.status);
-    // …and a DIFFERENT forwarded IP doesn't dodge it (same email bucket)
+    // S9 fix: a DIFFERENT forwarded IP is a different pair — the email's
+    // high ceiling (30) isn't hit, so the victim isn't locked out from
+    // other networks (the old flat email bucket gave a 429 here).
     let r = http(
         &fx.addr,
         "POST",
         "/login",
         &[
             ("content-type", "application/x-www-form-urlencoded"),
+            ("origin", &origin_for(&fx.addr)),
             ("x-forwarded-for", "9.9.9.9"),
         ],
         &form(&[("email", "x@x.dev"), ("password", "correct horse 12")]),
     );
-    assert_eq!(429, r.status);
+    assert_eq!(303, r.status, "S9: pair-limit only, not email lockout");
     // Untrusted XFF can't poison a victim IP's bucket either: without
     // trust, XFF "1.2.3.4" must not have accumulated fails — the fixture
     // below proves peer-vs-header handling by re-running with no trust.
@@ -773,6 +781,7 @@ fn trust_proxy_gates_xff() {
             "/login",
             &[
                 ("content-type", "application/x-www-form-urlencoded"),
+                ("origin", &origin_for(&fx2.addr)),
                 ("x-forwarded-for", "8.8.8.8"),
             ],
             &form(&[("email", "zz@x.dev"), ("password", "nope nope nope")]),
@@ -782,4 +791,290 @@ fn trust_proxy_gates_xff() {
     // a different email on the same peer is now ip-limited.
     let r = login(&fx2.addr, "y@x.dev", "correct horse 12");
     assert_eq!(429, r.status);
+}
+
+// ---------------------------------------------------------------------------
+// Stage 16 — security + crash fixes
+// ---------------------------------------------------------------------------
+
+/// S1: cookie-authenticated WS upgrades must pass the Origin check —
+/// a cross-site upgrade is WS-CSRF. Bearer clients (native editor)
+/// carry no ambient credentials, so no-Origin is fine for them.
+#[test]
+fn ws_cookie_requires_our_origin() {
+    let fx = start("s1", |_| {});
+    let _u = mkuser(&fx, "o@x.dev", "Ori");
+    let tok = token_of(&fx, "o@x.dev");
+    let cookie = format!("ne_session={tok}");
+
+    // cookie + foreign Origin → 403
+    let bad = ClientConn::connect_url(
+        &format!("ws://{}/ws", fx.addr),
+        &[("cookie", &cookie), ("origin", "https://evil.example")],
+    );
+    assert!(bad.is_err(), "cookie+foreign Origin must be refused");
+
+    // cookie + no Origin → 403 (browsers always send Origin on WS)
+    let none = ClientConn::connect_url(&format!("ws://{}/ws", fx.addr), &[("cookie", &cookie)]);
+    assert!(none.is_err(), "cookie+missing Origin must be refused");
+
+    // cookie + our Origin → connects
+    let good = ClientConn::connect_url(
+        &format!("ws://{}/ws", fx.addr),
+        &[("cookie", &cookie), ("origin", &origin_for(&fx.addr))],
+    );
+    assert!(good.is_ok(), "cookie+own Origin must connect");
+
+    // Bearer + no Origin → connects (native client)
+    let bearer = ws_addr(&fx.addr, Some(&tok));
+    assert!(bearer.is_ok(), "bearer without Origin must connect");
+}
+
+/// S11: `admin disable` runs in a second process — simulate it with a
+/// second Accounts handle on the same state dir. The live socket dies
+/// on its next inbound frame (the validity recheck hits the DB).
+#[test]
+fn cli_disable_drops_live_ws() {
+    let fx = start("s11", |_| {});
+    let u = mkuser(&fx, "d@x.dev", "Dot");
+    let tok = token_of(&fx, "d@x.dev");
+    let mut c = ws_addr(&fx.addr, Some(&tok)).unwrap();
+    c.send(&ClientMsg::Hello {
+        proto: proto::PROTO_VERSION,
+    })
+    .unwrap();
+    recv_until(&mut c, Duration::from_secs(5), |m| {
+        matches!(m, ServerMsg::Hello { .. })
+    });
+
+    // the CLI path: a *second* Accounts handle — the running server
+    // can only notice through the DB.
+    let cli = Accounts::open(&fx.root.join("state")).unwrap();
+    cli.set_status(u.id, "disabled").unwrap();
+    cli.delete_user_sessions(u.id);
+    assert!(
+        fx.multi.accounts.session(&tok).is_none(),
+        "server should see the session gone"
+    );
+
+    // next inbound frame trips the recheck → socket closes. The check
+    // is throttled to 500ms per socket (a frame storm shouldn't hammer
+    // the DB), so wait out the window before poking.
+    std::thread::sleep(Duration::from_millis(600));
+    c.send(&ClientMsg::Eval {
+        code: "print(\"poke\")".into(),
+    })
+    .unwrap();
+    let mut dead = false;
+    for _ in 0..40 {
+        if c.recv_opt(Duration::from_millis(200)).is_err() {
+            dead = true;
+            break;
+        }
+    }
+    assert!(dead, "ws stayed alive after CLI disable");
+}
+
+/// S2/S3: `drop_user` while an eval is running must return promptly —
+/// the whole point is that a stuck script can't stall admin actions
+/// or the HTTP front door.
+#[test]
+fn drop_user_during_eval_is_fast() {
+    let fx = start("s2", |_| {});
+    let u = mkuser(&fx, "s@x.dev", "Sal");
+    let tok = token_of(&fx, "s@x.dev");
+    let mut c = ws_addr(&fx.addr, Some(&tok)).unwrap();
+    c.send(&ClientMsg::Hello {
+        proto: proto::PROTO_VERSION,
+    })
+    .unwrap();
+    recv_until(&mut c, Duration::from_secs(5), |m| {
+        matches!(m, ServerMsg::Hello { .. })
+    });
+    // two long evals queued: the first runs, the second waits
+    c.send(&ClientMsg::Eval {
+        code: "while true {}".into(),
+    })
+    .unwrap();
+    c.send(&ClientMsg::Eval {
+        code: "print(\"never\")".into(),
+    })
+    .unwrap();
+    recv_until(&mut c, Duration::from_secs(5), |m| {
+        matches!(m, ServerMsg::Status { busy: true, .. })
+    });
+
+    let t = Instant::now();
+    fx.multi.runs.drop_user(u.id);
+    assert!(
+        t.elapsed() < Duration::from_secs(10),
+        "drop_user stalled {:?}",
+        t.elapsed()
+    );
+    // and the HTTP front door still answers
+    let r = http(&fx.addr, "GET", "/", &[], "");
+    assert_eq!(200, r.status);
+}
+
+/// S2/S3: Abort over the socket ends an endless eval — the flag is
+/// set on the run directly, not queued behind the very eval it kills.
+#[test]
+fn abort_over_socket_ends_loop_eval() {
+    let fx = start("s3", |_| {});
+    let _u = mkuser(&fx, "ab@x.dev", "Abe");
+    let tok = token_of(&fx, "ab@x.dev");
+    let mut c = ws_addr(&fx.addr, Some(&tok)).unwrap();
+    c.send(&ClientMsg::Hello {
+        proto: proto::PROTO_VERSION,
+    })
+    .unwrap();
+    recv_until(&mut c, Duration::from_secs(5), |m| {
+        matches!(m, ServerMsg::Hello { .. })
+    });
+    c.send(&ClientMsg::Eval {
+        code: "while true {}".into(),
+    })
+    .unwrap();
+    recv_until(&mut c, Duration::from_secs(5), |m| {
+        matches!(m, ServerMsg::Status { busy: true, .. })
+    });
+    c.send(&ClientMsg::Abort).unwrap();
+    // the eval dies; the worker still answers
+    c.send(&ClientMsg::Eval {
+        code: "print(\"alive\")".into(),
+    })
+    .unwrap();
+    let m = recv_until(
+        &mut c,
+        Duration::from_secs(10),
+        |m| matches!(m, ServerMsg::Console(s) if s == "alive"),
+    );
+    assert!(m.is_some(), "worker never recovered from Abort");
+}
+
+/// S18: admin POSTs refuse self-disable/self-delete, and unknown ids
+/// report "no such user" instead of "activated".
+#[test]
+fn admin_post_guards() {
+    let fx = start("s18", |_| {});
+    let admin = fx
+        .multi
+        .accounts
+        .create_admin("root@x.dev", "Root", "correct horse 12")
+        .unwrap()
+        .0;
+    let _v = mkuser(&fx, "victim@x.dev", "Vic");
+    let admin_tok = token_of(&fx, "root@x.dev");
+    let r = http(
+        &fx.addr,
+        "GET",
+        "/admin",
+        &[("cookie", &format!("ne_session={admin_tok}"))],
+        "",
+    );
+    let csrf = r
+        .text()
+        .split("name=csrf value=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("no csrf")
+        .to_string();
+
+    let post = |act: &str, pairs: &[(&str, String)]| -> Resp {
+        let mut body = format!("csrf={}", urlenc(&csrf));
+        for (k, v) in pairs {
+            body.push_str(&format!("&{k}={}", urlenc(v)));
+        }
+        http(
+            &fx.addr,
+            "POST",
+            &format!("/admin/{act}"),
+            &[
+                ("cookie", &format!("ne_session={admin_tok}")),
+                ("content-type", "application/x-www-form-urlencoded"),
+                ("origin", &origin_for(&fx.addr)),
+            ],
+            &body,
+        )
+    };
+
+    // unknown id → "no such user", not "activated"
+    let r = post("activate", &[("id", "424242".to_string())]);
+    assert_eq!(303, r.status);
+    assert!(
+        r.header("location").unwrap().contains("no+such+user"),
+        "{}",
+        r.header("location").unwrap()
+    );
+
+    // self-disable refused (also the last-admin case with one admin)
+    let r = post("disable", &[("id", admin.id.to_string())]);
+    assert_eq!(303, r.status);
+    assert!(
+        r.header("location").unwrap().contains("cannot"),
+        "{}",
+        r.header("location").unwrap()
+    );
+
+    // self-delete refused too
+    let r = post(
+        "delete",
+        &[
+            ("id", admin.id.to_string()),
+            ("confirm", "root@x.dev".to_string()),
+        ],
+    );
+    assert!(r.header("location").unwrap().contains("cannot"));
+
+    // a real disable still works
+    let v = fx.multi.accounts.by_email("victim@x.dev").unwrap();
+    let r = post("disable", &[("id", v.id.to_string())]);
+    assert!(
+        r.header("location").unwrap().contains("disabled"),
+        "{}",
+        r.header("location").unwrap()
+    );
+}
+
+/// S10: per-IP signup limit — five hits and the sixth is a 429, so a
+/// loop can't bury real signups or burn argon2 hashes forever.
+#[test]
+fn signup_rate_limited() {
+    let fx = start("s10", |_| {});
+    for i in 0..5 {
+        let r = signup(
+            &fx.addr,
+            &format!("s{i}@x.dev"),
+            "Su",
+            "correct horse 12",
+            "hi",
+        );
+        assert!(
+            r.status != 429,
+            "signup {i} rate-limited too early: {}",
+            r.status
+        );
+    }
+    let r = signup(&fx.addr, "s5@x.dev", "Su", "correct horse 12", "hi");
+    assert_eq!(429, r.status);
+}
+
+/// S16: past --max-connections the front door answers 503 instead of
+/// spawning unbounded threads.
+#[test]
+fn conn_cap_answers_503() {
+    let fx = start("s16", |o| o.max_connections = 3);
+    // three idle sockets pin the cap — the handlers wait on their read
+    let _held: Vec<TcpStream> = (0..3)
+        .map(|_| TcpStream::connect(&fx.addr).unwrap())
+        .collect();
+    std::thread::sleep(Duration::from_millis(400));
+    // read_to_end may race the RST when the server drops the socket
+    // after its 503 — the status line is what matters.
+    let mut s = TcpStream::connect(&fx.addr).unwrap();
+    s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    let mut buf = Vec::new();
+    let _ = s.read_to_end(&mut buf);
+    let head = String::from_utf8_lossy(&buf);
+    assert!(head.starts_with("HTTP/1.1 503"), "{head}");
 }

@@ -110,13 +110,30 @@ impl RateLimiter {
             fails: Mutex::new(HashMap::new()),
         }
     }
-    /// True once `key` already has 10 failures inside the window.
-    pub fn limited(&self, key: &str) -> bool {
+    /// True once `key` already has `limit` failures inside the window.
+    /// Lookup does not insert — a flood of unique keys can't grow the
+    /// map; a periodic sweep clears the ones that do get written.
+    pub fn limited_n(&self, key: &str, limit: usize) -> bool {
         let mut m = self.fails.lock().unwrap();
         let now = Instant::now();
-        let v = m.entry(key.to_string()).or_default();
-        v.retain(|t| now.duration_since(*t) < Duration::from_secs(600));
-        v.len() >= 10
+        if m.len() > 50_000 {
+            m.retain(|_, v| {
+                v.iter()
+                    .any(|t| now.duration_since(*t) < Duration::from_secs(600))
+            });
+        }
+        m.get(key)
+            .map(|v| {
+                v.iter()
+                    .filter(|t| now.duration_since(**t) < Duration::from_secs(600))
+                    .count()
+            })
+            .map(|n| n >= limit)
+            .unwrap_or(false)
+    }
+    /// The login default: 10 failures per key per 10 minutes.
+    pub fn limited(&self, key: &str) -> bool {
+        self.limited_n(key, 10)
     }
     pub fn record_fail(&self, key: &str) {
         let mut m = self.fails.lock().unwrap();
@@ -201,6 +218,15 @@ impl Accounts {
         if name.is_empty() {
             return Err("display name is required".into());
         }
+        if name.chars().count() > 80 {
+            return Err("display name is too long (80 characters max)".into());
+        }
+        if note.chars().count() > 500 {
+            return Err("note is too long (500 characters max)".into());
+        }
+        if email.len() > 254 {
+            return Err("email is too long".into());
+        }
         if password.len() < MIN_PASSWORD_LEN {
             return Err(format!(
                 "password needs at least {MIN_PASSWORD_LEN} characters"
@@ -226,21 +252,38 @@ impl Accounts {
         }
     }
 
-    /// Operator path (`server admin add`): creates an already-active admin.
-    pub fn create_admin(&self, email: &str, name: &str, password: &str) -> anyhow::Result<User> {
+    /// Operator path (`server admin add`): creates an already-active
+    /// admin. On an existing email it *replaces* the account: new
+    /// password and name, admin+active forced, all prior sessions
+    /// deleted — re-running `admin add` is the password-reset path.
+    /// Returns `(user, replaced)`.
+    pub fn create_admin(
+        &self,
+        email: &str,
+        name: &str,
+        password: &str,
+    ) -> anyhow::Result<(User, bool)> {
         let email = email.trim().to_lowercase();
         if password.len() < MIN_PASSWORD_LEN {
             anyhow::bail!("password needs at least {MIN_PASSWORD_LEN} characters");
         }
         let hash = hash_password(password)?;
         let conn = self.conn.lock().unwrap();
+        let replaced = self.by_email_locked(&conn, &email).is_ok();
         conn.execute(
             "INSERT INTO users(email,name,pass_hash,status,is_admin,created_ms,quota_bytes,note)
              VALUES(?1,?2,?3,'active',1,?4,0,'')
-             ON CONFLICT(email) DO UPDATE SET status='active', is_admin=1",
+             ON CONFLICT(email) DO UPDATE SET
+                 pass_hash=excluded.pass_hash,
+                 name=excluded.name,
+                 status='active',
+                 is_admin=1",
             params![email, name, hash, now_ms() as i64],
         )?;
-        Ok(self.by_email_locked(&conn, &email)?)
+        let u = self.by_email_locked(&conn, &email)?;
+        // Whatever sessions the old account held die with its password.
+        conn.execute("DELETE FROM sessions WHERE user_id=?1", params![u.id])?;
+        Ok((u, replaced))
     }
 
     fn by_email_locked(&self, conn: &Connection, email: &str) -> rusqlite::Result<User> {
@@ -273,9 +316,11 @@ impl Accounts {
     /// which emails exist.
     pub fn verify_login(&self, email: &str, password: &str) -> Login {
         let email = email.trim().to_lowercase();
-        let conn = self.conn.lock().unwrap();
-        let row: Option<(String, User)> = conn
-            .query_row(
+        // Read the row under the lock, verify outside it — argon2 takes
+        // tens of ms and every other request needs this same lock.
+        let row: Option<(String, User)> = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row(
                 &format!(
                     "SELECT {}, pass_hash FROM users WHERE email=?1",
                     Self::USER_COLS
@@ -287,7 +332,8 @@ impl Accounts {
                     Ok((r.get::<_, String>(3)?, Self::row_to_user(r)?))
                 },
             )
-            .ok();
+            .ok()
+        };
         match row {
             Some((phc, u)) => {
                 if !verify_password(password, &phc) {
@@ -408,6 +454,42 @@ impl Accounts {
             .unwrap()
             .execute("DELETE FROM sessions WHERE user_id=?1", params![user_id]);
     }
+
+    /// Housekeeping: expired sessions are deleted lazily here — called
+    /// on `open` and once in a while by the server.
+    pub fn sweep_expired_sessions(&self) {
+        let _ = self.conn.lock().unwrap().execute(
+            "DELETE FROM sessions WHERE expires_ms<=?1",
+            params![now_ms() as i64],
+        );
+    }
+
+    /// Pending-account count (signup cap — S10).
+    pub fn pending_count(&self) -> i64 {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE status='pending'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0)
+    }
+
+    /// Admins other than `except_id` — the last-admin guard (S18).
+    pub fn has_other_admin(&self, except_id: i64) -> bool {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE is_admin=1 AND status='active' AND id!=?1",
+                params![except_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
@@ -435,5 +517,57 @@ mod tests {
         a.delete_session(&tok);
         assert!(a.session(&tok).is_none());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// S4: `admin add` on an existing email replaces the account —
+    /// new password + name, old sessions dead, `replaced` reported.
+    #[test]
+    fn admin_add_replaces_existing_account() {
+        let dir = std::env::temp_dir().join(format!("acct_s4_{}", std::process::id()));
+        let a = Accounts::open(&dir).unwrap();
+        let u = a
+            .create_user("v@x.dev", "Old Name", "old password 123", "", 0)
+            .unwrap();
+        a.set_status(u.id, "active").unwrap();
+        let (tok, _) = a.create_session(u.id).unwrap();
+        assert!(a.session(&tok).is_some());
+
+        let (u2, replaced) = a
+            .create_admin("v@x.dev", "New Name", "new password 456")
+            .unwrap();
+        assert!(replaced);
+        assert_eq!(u2.id, u.id);
+        assert_eq!(u2.name, "New Name");
+        assert!(u2.is_admin);
+        // old password dead, new password works, old session gone
+        assert_eq!(Login::Bad, a.verify_login("v@x.dev", "old password 123"));
+        assert!(matches!(
+            a.verify_login("v@x.dev", "new password 456"),
+            Login::Ok(_)
+        ));
+        assert!(a.session(&tok).is_none());
+        // a fresh email reports not-replaced
+        let (_u3, replaced) = a.create_admin("n@x.dev", "N", "fresh password 1").unwrap();
+        assert!(!replaced);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// S9: `limited`/`limited_n` don't insert keys on lookup — a flood
+    /// of unique keys can't grow the map.
+    #[test]
+    fn rate_limiter_lookup_does_not_insert() {
+        let lim = RateLimiter::new();
+        for i in 0..10_000 {
+            assert!(!lim.limited(&format!("k{i}")));
+        }
+        assert!(lim.fails.lock().unwrap().is_empty());
+        // recorded failures still count
+        for _ in 0..10 {
+            lim.record_fail("victim");
+        }
+        assert!(lim.limited("victim"));
+        assert!(lim.limited_n("victim2", 1) == false);
+        lim.record_fail("victim2");
+        assert!(lim.limited_n("victim2", 1));
     }
 }

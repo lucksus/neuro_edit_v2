@@ -28,26 +28,30 @@ fn start(net: Network, data_dir: Option<std::path::PathBuf>) -> Rig {
 }
 
 fn start_limit(net: Network, data_dir: Option<std::path::PathBuf>, max_upload_bytes: usize) -> Rig {
+    start_opts(
+        net,
+        ServeOpts {
+            backend: BackendKind::Cpu,
+            seed: 1,
+            cfg: SimConfig::default(),
+            data_dir,
+            max_upload_bytes,
+            quota_bytes: 0,
+            abort: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            sim_limits: sim::SimLimits::default(),
+        },
+    )
+}
+
+fn start_opts(net: Network, opts: ServeOpts) -> Rig {
     let (tx, rx) = mpsc::channel::<(u64, ClientMsg)>();
     let (etx, erx) = mpsc::channel::<ServerEvent>();
     let handle = std::thread::spawn(move || {
         let emit: sim::serve::Emit = Rc::new(RefCell::new(move |ev| {
             let _ = etx.send(ev);
         }));
-        sim::serve::run(
-            net,
-            ServeOpts {
-                backend: BackendKind::Cpu,
-                seed: 1,
-                cfg: SimConfig::default(),
-                data_dir,
-                max_upload_bytes,
-                quota_bytes: 0,
-                abort: Arc::new(AtomicBool::new(false)),
-            },
-            rx,
-            emit,
-        );
+        sim::serve::run(net, opts, rx, emit);
     });
     Rig {
         tx,
@@ -669,4 +673,331 @@ fn per_synapse_tau_over_wire() {
     let n: i64 = sp.unwrap().trim_start_matches("b_spikes=").parse().unwrap();
     assert!(n >= 2, "expected prolonged firing, got {n}");
     rig.stop();
+}
+
+// ---------- Stage 16: crash + security fixes (fable-review-1112) ----------
+
+/// Q1/Q10: a >400-byte Eval whose echo truncation lands inside a
+/// multi-byte char must not panic the worker — the line truncates on a
+/// char boundary and the worker still answers the next command.
+#[test]
+fn eval_echo_truncates_on_char_boundary() {
+    let rig = start(Network::new(), None);
+    rig.send(ClientMsg::Subscribe);
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+
+    // Pad to just over 400 bytes with the umlaut straddling byte 400:
+    // 399 ASCII bytes + 'ü' (2 bytes, at index 399..401) + more text.
+    let pad = "x".repeat(392); // `print("` = 7 bytes → umlaut starts at byte 399
+    let code = format!("print(\"{}ü-abcdef\")", pad);
+    assert_eq!(code.as_bytes()[399], 0xC3, "umlaut straddles the cut");
+    rig.send(ClientMsg::Eval { code });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Console(s) if s.contains("truncated")));
+    assert!(
+        evs.iter().any(|e| matches!(
+            &e.msg,
+            ServerMsg::Console(s) if s.contains("truncated")
+        )),
+        "expected a truncated echo: {evs:?}"
+    );
+
+    // the worker lives on — the follow-up eval answers
+    rig.send(ClientMsg::Eval {
+        code: "print(\"still-here\")".into(),
+    });
+    rig.until(|m| matches!(m, ServerMsg::Console(s) if s == "still-here"));
+    rig.stop();
+}
+
+/// Q2: InsertSubnetJson carrying a grid with axes [2,1,7] is refused
+/// by validate() instead of panicking in `GridShape::world`.
+#[test]
+fn paste_grid_bad_axes_refused_not_panic() {
+    let mut net = Network::new();
+    net_format::builders::create_2d_grid(&mut net, "g", 2, 2, 10.0, [0.0; 3]);
+    let mut json = net_format::io::to_json(&net).unwrap();
+    json = json.replacen("[2,1,0]", "[2,1,7]", 1);
+    assert!(json.contains("[2,1,7]"), "grid axes mutated in json");
+
+    let rig = start(net, None);
+    rig.send(ClientMsg::Subscribe);
+    let evs = rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+    let base = first_geo(&evs).version;
+    rig.send(ClientMsg::Edit {
+        base,
+        edit: NetEdit::InsertSubnetJson {
+            json,
+            offset: [0.0; 3],
+        },
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Error(_)));
+    assert!(
+        evs.iter().any(
+            |e| matches!(&e.msg, ServerMsg::Error(s) if s.contains("refused") || s.contains("axes"))
+        ),
+        "expected an edit refusal, not a dead worker: {evs:?}"
+    );
+    // worker still alive
+    rig.send(ClientMsg::Eval {
+        code: "print(\"alive\")".into(),
+    });
+    rig.until(|m| matches!(m, ServerMsg::Console(s) if s == "alive"));
+    rig.stop();
+}
+
+/// Q3: SetDtMs and script `sim.set_dt` refuse 0, negative, NaN,
+/// infinite and absurd values with an Error — not a silent NaN state.
+#[test]
+fn set_dt_validated_both_paths() {
+    let rig = start(Network::new(), None);
+    rig.send(ClientMsg::Subscribe);
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+
+    for bad in [0.0f32, -0.1, f32::NAN, f32::INFINITY, 10_000.0] {
+        rig.send(ClientMsg::SetDtMs(bad));
+        let evs = rig.until(|m| matches!(m, ServerMsg::Error(s) if s.contains("dt")));
+        assert!(!evs.is_empty(), "SetDtMs({bad}) must error");
+    }
+    rig.send(ClientMsg::Eval {
+        code: "sim.set_dt(-1)".into(),
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Console(s) if s.contains("!")));
+    assert!(
+        evs.iter().any(|e| matches!(
+            &e.msg,
+            ServerMsg::Console(s) if s.contains("dt")
+        )),
+        "script set_dt must error too: {evs:?}"
+    );
+    // a legal value still works
+    rig.send(ClientMsg::SetDtMs(0.5));
+    rig.send(ClientMsg::Eval {
+        code: "print(\"dt-ok\")".into(),
+    });
+    rig.until(|m| matches!(m, ServerMsg::Console(s) if s == "dt-ok"));
+    rig.stop();
+}
+
+/// S5: grid builders reject negative dims as errors (not giant usize
+/// casts) and refuse texel counts past MAX_GRID_TEXELS.
+#[test]
+fn grid_dims_validated() {
+    let rig = start(Network::new(), None);
+    rig.send(ClientMsg::Subscribe);
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+
+    for code in [
+        "net.create_2d_grid(\"g\", -1, 4, 10.0)",
+        "net.create_3d_grid(\"g\", 2, -4, 2, 10.0)",
+        "net.create_2d_grid(\"g\", 10000, 10000, 1.0)", // 1e8 > 1<<26
+    ] {
+        rig.send(ClientMsg::Eval { code: code.into() });
+        let evs = rig.until(|m| matches!(m, ServerMsg::Console(s) if s.contains("!")));
+        assert!(
+            evs.iter().any(|e| matches!(
+                &e.msg,
+                ServerMsg::Console(s) if s.contains("dims") || s.contains("texels")
+            )),
+            "{code} must error: {evs:?}"
+        );
+    }
+    rig.send(ClientMsg::Eval {
+        code: "print(\"grid-done\")".into(),
+    });
+    rig.until(|m| matches!(m, ServerMsg::Console(s) if s == "grid-done"));
+    rig.stop();
+}
+
+/// S5: a net over the server's SimLimits fails the pre-build check
+/// with a clear error — no allocation is attempted.
+#[test]
+fn sim_limits_refuse_oversized_build() {
+    let rig = start_opts(
+        Network::new(),
+        ServeOpts {
+            backend: BackendKind::Cpu,
+            seed: 1,
+            cfg: SimConfig::default(),
+            data_dir: None,
+            max_upload_bytes: usize::MAX,
+            quota_bytes: 0,
+            abort: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            sim_limits: sim::SimLimits {
+                max_neurons: 16,
+                max_synapses: 0,
+                max_ring_bytes: 0,
+            },
+        },
+    );
+    rig.send(ClientMsg::Subscribe);
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+    rig.send(ClientMsg::Eval {
+        code: "net.create_2d_grid(\"g\", 8, 8, 10.0); sim.run(1)".into(),
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Console(s) if s.contains("!")));
+    assert!(
+        evs.iter().any(|e| matches!(
+            &e.msg,
+            ServerMsg::Console(s) if s.contains("server limit")
+        )),
+        "expected a size-limit error: {evs:?}"
+    );
+    rig.stop();
+}
+
+/// S7: every write path counts against the quota — WriteFile, script
+/// `net.save`, and even Mkdir's directory entry.
+#[test]
+fn quota_covers_all_write_paths() {
+    let dir = std::env::temp_dir().join(format!("serve_q16_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rig = start_opts(
+        Network::new(),
+        ServeOpts {
+            backend: BackendKind::Cpu,
+            seed: 1,
+            cfg: SimConfig::default(),
+            data_dir: Some(dir.clone()),
+            max_upload_bytes: usize::MAX,
+            quota_bytes: 3000, // one small file fits; a 100-neuron .ne2 or a dir doesn't
+            abort: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            sim_limits: sim::SimLimits::default(),
+        },
+    );
+    rig.send(ClientMsg::Subscribe);
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+
+    // WriteFile over quota → refused.
+    rig.send(ClientMsg::WriteFile {
+        path: "big.txt".into(),
+        data: vec![b'x'; 5000],
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Error(s) if s.contains("quota")));
+    assert!(!evs.is_empty());
+    assert!(!dir.join("big.txt").exists());
+
+    // script save over quota → refused the same way (a 10x10 grid
+    // serializes past 3 KB).
+    rig.send(ClientMsg::Eval {
+        code: "net.create_2d_grid(\"g\", 10, 10, 10.0); net.save(\"n.ne2\")".into(),
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Console(s) if s.contains("!")));
+    assert!(
+        evs.iter().any(|e| matches!(
+            &e.msg,
+            ServerMsg::Console(s) if s.contains("quota")
+        )),
+        "script save must hit the quota too: {evs:?}"
+    );
+    assert!(!dir.join("n.ne2").exists());
+
+    // even an empty directory costs its entry.
+    rig.send(ClientMsg::Mkdir {
+        path: "a/b/c".into(),
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Error(s) if s.contains("quota")));
+    assert!(!evs.is_empty());
+
+    // a write that fits is still fine
+    rig.send(ClientMsg::WriteFile {
+        path: "small.txt".into(),
+        data: b"hi".to_vec(),
+    });
+    rig.until(|m| matches!(m, ServerMsg::FileWritten { .. }));
+    assert!(dir.join("small.txt").exists());
+    rig.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// S21: `DeleteFile ""`/`"."` must refuse to remove the sandbox root,
+/// and `RenameFile` of the root likewise. One bad client call must not
+/// wipe the user's whole directory.
+#[test]
+fn sandbox_root_cannot_be_deleted_or_renamed() {
+    let dir = std::env::temp_dir().join(format!("serve_root_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("keep.txt"), b"k").unwrap();
+    let rig = start(Network::new(), Some(dir.clone()));
+    rig.send(ClientMsg::Subscribe);
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+
+    for p in ["", "."] {
+        rig.send(ClientMsg::DeleteFile { path: p.into() });
+        let evs = rig.until(|m| matches!(m, ServerMsg::Error(_)));
+        assert!(
+            evs.iter()
+                .any(|e| matches!(&e.msg, ServerMsg::Error(s) if s.contains("root"))),
+            "DeleteFile {p:?} must be refused: {evs:?}"
+        );
+    }
+    rig.send(ClientMsg::RenameFile {
+        from: "".into(),
+        to: "moved".into(),
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Error(s) if s.contains("root")));
+    assert!(!evs.is_empty());
+    // root + contents intact, file ops still work
+    assert!(dir.join("keep.txt").exists());
+    rig.send(ClientMsg::DeleteFile {
+        path: "keep.txt".into(),
+    });
+    rig.until(|m| matches!(m, ServerMsg::FileDeleted { .. }));
+    assert!(!dir.join("keep.txt").exists());
+    rig.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// S22: `UploadChunk` without a prior `UploadStart` is an error, and
+/// chunks beyond the declared size are refused — the per-file cap
+/// can't be bypassed by lying in `size`.
+#[test]
+fn upload_chunks_need_start_and_count_bytes() {
+    let dir = std::env::temp_dir().join(format!("serve_up16_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rig = start(Network::new(), Some(dir.clone()));
+    rig.send(ClientMsg::Subscribe);
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+
+    // chunk with no open upload
+    rig.send(ClientMsg::UploadChunk {
+        path: "sneaky.bin".into(),
+        data: vec![1; 8],
+        last: false,
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Error(s) if s.contains("UploadStart")));
+    assert!(!evs.is_empty());
+    assert!(!dir.join("sneaky.bin").exists());
+    assert!(!dir.join("sneaky.bin.upload").exists());
+
+    // declare 8 bytes, send 16 — the running count catches it
+    rig.send(ClientMsg::UploadStart {
+        path: "honest.bin".into(),
+        size: 8,
+    });
+    rig.until(|m| matches!(m, ServerMsg::UploadReady { .. }));
+    rig.send(ClientMsg::UploadChunk {
+        path: "honest.bin".into(),
+        data: vec![2; 16],
+        last: false,
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Error(s) if s.contains("declared")));
+    assert!(!evs.is_empty(), "{evs:?}");
+
+    // a correct upload still lands
+    rig.send(ClientMsg::UploadStart {
+        path: "ok.bin".into(),
+        size: 8,
+    });
+    rig.until(|m| matches!(m, ServerMsg::UploadReady { .. }));
+    rig.send(ClientMsg::UploadChunk {
+        path: "ok.bin".into(),
+        data: vec![3; 8],
+        last: true,
+    });
+    rig.until(|m| matches!(m, ServerMsg::FileWritten { .. }));
+    assert!(dir.join("ok.bin").exists());
+    rig.stop();
+    let _ = std::fs::remove_dir_all(&dir);
 }

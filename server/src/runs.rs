@@ -25,7 +25,7 @@ use crate::Clients;
 
 /// One user's live run — mirrors `Server`'s pieces.
 pub struct UserRun {
-    pub cmd_tx: mpsc::Sender<(u64, ClientMsg)>,
+    pub cmd_tx: mpsc::SyncSender<(u64, ClientMsg)>,
     pub clients: Clients,
     pub jobs: Arc<JobRegistry>,
     /// Live client sockets — `stop` shuts them down so a disabled user's
@@ -33,21 +33,45 @@ pub struct UserRun {
     /// half-closes; the reader side would sit on read forever).
     pub socks: Mutex<Vec<std::net::TcpStream>>,
     abort: Arc<AtomicBool>,
+    /// Hard kill — set once by `stop`, never cleared, watched by every
+    /// eval/run/build hook so the worker exits promptly even when the
+    /// cmd queue holds an `Eval` that would re-clear `abort`.
+    shutdown: Arc<AtomicBool>,
     /// Last time a client was attached (or the run started).
     last_active: Mutex<Instant>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
+
+/// How long `stop()` waits for the worker before detaching — a run
+/// whose hooks are all armed exits within a few ms; this bound only
+/// covers a pathological case and keeps `stop()` itself from stalling
+/// the admin action (or reaper) that called it.
+const STOP_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 impl UserRun {
     /// Attached clients right now.
     pub fn client_count(&self) -> usize {
         self.clients.lock().unwrap().len()
     }
+    /// The run's soft-abort flag — `ws_client_loop` sets it directly on
+    /// `ClientMsg::Abort` so Stop reaches a worker busy in an eval
+    /// (a queued Abort would wait behind the eval it means to kill).
+    pub fn abort_flag(&self) -> Arc<AtomicBool> {
+        self.abort.clone()
+    }
     pub fn touch(&self) {
         *self.last_active.lock().unwrap() = Instant::now();
     }
     fn idle_for(&self) -> Duration {
         self.last_active.lock().unwrap().elapsed()
+    }
+    /// Worker exited on its own (panic or finished) — a dead run must
+    /// be replaced, not left in the map to soak up client connections.
+    pub fn dead(&self) -> bool {
+        match self.worker.lock().unwrap().as_ref() {
+            Some(w) => w.is_finished(),
+            None => true,
+        }
     }
     fn has_live_job(&self) -> bool {
         self.jobs
@@ -58,15 +82,32 @@ impl UserRun {
     /// Stop the worker and every client socket. `&self` because live
     /// connections hold `Arc`s — `Arc::try_unwrap` would fail exactly
     /// when it matters (a connected client being disabled).
+    ///
+    /// Order matters: `shutdown` first (unconditional), then `abort`,
+    /// then Bye (redundant — the loop also breaks on `shutdown`), then
+    /// close the transports, then a BOUNDED join. Everything is
+    /// fire-and-forget so `stop()` itself can never block.
     fn stop(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
         self.abort.store(true, Ordering::Relaxed);
-        let _ = self.cmd_tx.send((0, ClientMsg::Bye));
+        self.jobs.cancel_all();
+        let _ = self.cmd_tx.try_send((0, ClientMsg::Bye));
         self.clients.lock().unwrap().clear();
         for s in self.socks.lock().unwrap().drain(..) {
             let _ = s.shutdown(std::net::Shutdown::Both);
         }
         if let Some(w) = self.worker.lock().unwrap().take() {
-            let _ = w.join();
+            let deadline = Instant::now() + STOP_JOIN_TIMEOUT;
+            while !w.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if w.is_finished() {
+                let _ = w.join();
+            } else {
+                // Detach: the shutdown flag is still armed, so the worker
+                // exits at its next hook poll. We simply stop waiting.
+                eprintln!("run worker slow to die — detaching (shutdown armed)");
+            }
         }
     }
 }
@@ -80,6 +121,15 @@ pub struct RunsOpts {
     pub max_upload_bytes: usize,
     pub max_runs: usize,
     pub idle: Duration,
+    /// `user_id → status` lookup for the reaper: a user whose account is
+    /// no longer `active` (CLI `admin disable` runs in another process,
+    /// so only the DB tells us) loses their run on the next tick.
+    pub user_status: Option<Arc<dyn Fn(i64) -> Option<String> + Send + Sync>>,
+    /// Sim-size ceiling per run (server flags `--max-neurons` &c.).
+    pub sim_limits: sim::SimLimits,
+    /// Live-job caps per user + the wall-clock limit each job gets.
+    pub max_jobs: usize,
+    pub job_wall: Duration,
 }
 
 /// Registry of live runs. Shared between the HTTP/WS handler threads
@@ -108,39 +158,60 @@ impl Runs {
 
     /// The user's run — started on demand. `Err("full")` when
     /// `--max-runs` is reached; the WS/landing text explains politely.
+    /// A run whose worker died (panic) is replaced instead of handed
+    /// out — without this, clients attach to a dead cmd channel and the
+    /// run only clears at the next idle reap (up to `--idle-minutes`).
     pub fn get_or_start(
         &self,
         user_id: i64,
         quota_bytes: u64,
     ) -> Result<Arc<UserRun>, &'static str> {
-        let mut runs = self.runs.lock().unwrap();
-        if let Some(r) = runs.get(&user_id) {
-            r.touch();
-            return Ok(r.clone());
+        // A worker that dies instantly after spawn would loop forever —
+        // bound the replacements.
+        for _ in 0..4 {
+            let mut runs = self.runs.lock().unwrap();
+            if let Some(r) = runs.get(&user_id) {
+                if r.dead() {
+                    eprintln!("user {user_id}: worker died — replacing the run");
+                    let dead = runs.remove(&user_id).unwrap();
+                    // Release the map before stop(): it can take seconds.
+                    drop(runs);
+                    dead.stop();
+                    continue;
+                }
+                r.touch();
+                return Ok(r.clone());
+            }
+            if runs.len() >= self.opts.max_runs {
+                return Err("full");
+            }
+            let dir = self.opts.users_root.join(user_id.to_string());
+            if std::fs::create_dir_all(&dir).is_err() {
+                return Err("fs");
+            }
+            let run = self.spawn(dir, quota_bytes);
+            run.touch();
+            let run = Arc::new(run);
+            runs.insert(user_id, run.clone());
+            return Ok(run);
         }
-        if runs.len() >= self.opts.max_runs {
-            return Err("full");
-        }
-        let dir = self.opts.users_root.join(user_id.to_string());
-        if std::fs::create_dir_all(&dir).is_err() {
-            return Err("fs");
-        }
-        let run = self.spawn(dir, quota_bytes);
-        run.touch();
-        let run = Arc::new(run);
-        runs.insert(user_id, run.clone());
-        Ok(run)
+        Err("fs")
     }
 
     fn spawn(&self, data_dir: PathBuf, quota_bytes: u64) -> UserRun {
-        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (cmd_tx, cmd_rx) = mpsc::sync_channel(crate::CMD_QUEUE);
         let clients: Clients = Arc::new(Mutex::new(HashMap::new()));
         let abort = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(AtomicBool::new(false));
         let jobs = Arc::new(JobRegistry::new(JobCtx {
             backend: self.opts.backend,
             seed: self.opts.seed,
             cfg: self.opts.cfg.clone(),
             data_dir: Some(data_dir.clone()),
+            quota_bytes,
+            sim_limits: self.opts.sim_limits,
+            max_jobs: self.opts.max_jobs,
+            wall: self.opts.job_wall,
         }));
         let opts = ServeOpts {
             backend: self.opts.backend,
@@ -150,6 +221,8 @@ impl Runs {
             max_upload_bytes: self.opts.max_upload_bytes,
             quota_bytes,
             abort: abort.clone(),
+            shutdown: shutdown.clone(),
+            sim_limits: self.opts.sim_limits,
         };
         let cls = clients.clone();
         let worker = std::thread::Builder::new()
@@ -158,19 +231,8 @@ impl Runs {
                 let emit: Emit =
                     std::rc::Rc::new(std::cell::RefCell::new(move |ev: ServerEvent| {
                         let bytes = proto::encode(&ev.msg);
-                        let cls = cls.lock().unwrap();
-                        match ev.to {
-                            Some(id) => {
-                                if let Some(tx) = cls.get(&id) {
-                                    let _ = tx.send(bytes);
-                                }
-                            }
-                            None => {
-                                for tx in cls.values() {
-                                    let _ = tx.send(bytes.clone());
-                                }
-                            }
-                        }
+                        let mut cls = cls.lock().unwrap();
+                        crate::fanout(&mut cls, ev.to, &bytes);
                     }));
                 sim::serve::run(Network::new(), opts, cmd_rx, emit);
             })
@@ -181,26 +243,41 @@ impl Runs {
             jobs,
             socks: Mutex::new(Vec::new()),
             abort,
+            shutdown,
             last_active: Mutex::new(Instant::now()),
             worker: Mutex::new(Some(worker)),
         }
     }
 
     /// Reap runs idle beyond `--idle-minutes` with no clients and no
-    /// live job. `pub` so tests/tools can force the tick.
+    /// live job; also runs whose account left `active` status (CLI
+    /// `admin disable`/delete in another process) and runs whose worker
+    /// already died. `pub` so tests/tools can force the tick.
     pub fn reap(&self) {
         let idle = self.opts.idle;
+        let status_of = &self.opts.user_status;
         let dead: Vec<i64> = self
             .runs
             .lock()
             .unwrap()
             .iter()
-            .filter(|(_, r)| r.client_count() == 0 && !r.has_live_job() && r.idle_for() > idle)
+            .filter(|(&id, r)| {
+                r.dead()
+                    || status_of
+                        .as_ref()
+                        .map(|f| f(id).as_deref() != Some("active"))
+                        .unwrap_or(false)
+                    || (r.client_count() == 0 && !r.has_live_job() && r.idle_for() > idle)
+            })
             .map(|(id, _)| *id)
             .collect();
         for id in dead {
-            if let Some(r) = self.runs.lock().unwrap().remove(&id) {
-                eprintln!("user {id}: run idle — stopping");
+            // Removal in its own statement: `stop()` may take seconds —
+            // holding the map lock across it stalls every other user's
+            // connect (that's the whole-server freeze from the review).
+            let run = self.runs.lock().unwrap().remove(&id);
+            if let Some(r) = run {
+                eprintln!("user {id}: run reaped — stopping");
                 r.stop();
             }
         }
@@ -209,7 +286,8 @@ impl Runs {
     /// Disable/delete path: the user's run stops and its client
     /// writers (and so their sockets) close at once.
     pub fn drop_user(&self, user_id: i64) {
-        if let Some(r) = self.runs.lock().unwrap().remove(&user_id) {
+        let run = self.runs.lock().unwrap().remove(&user_id);
+        if let Some(r) = run {
             r.stop();
         }
     }
@@ -219,7 +297,86 @@ impl Runs {
         self.runs.lock().unwrap().keys().copied().collect()
     }
 
+    /// The user's live run, if any — used by the admin quota action to
+    /// push `SetQuota` onto a running worker.
+    pub fn get(&self, user_id: i64) -> Option<Arc<UserRun>> {
+        self.runs.lock().unwrap().get(&user_id).cloned()
+    }
+
     pub fn count(&self) -> usize {
         self.runs.lock().unwrap().len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    fn opts(
+        users_root: PathBuf,
+        status: Option<Arc<dyn Fn(i64) -> Option<String> + Send + Sync>>,
+    ) -> RunsOpts {
+        RunsOpts {
+            backend: BackendKind::Cpu,
+            seed: 1,
+            cfg: SimConfig::default(),
+            users_root,
+            max_upload_bytes: usize::MAX,
+            max_runs: 4,
+            idle: Duration::from_secs(3600),
+            user_status: status,
+            sim_limits: sim::SimLimits::default(),
+            max_jobs: 0,
+            job_wall: Duration::MAX,
+        }
+    }
+
+    fn wait_dead(r: &Arc<UserRun>) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !r.dead() {
+            assert!(Instant::now() < deadline, "worker never exited");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// S12: a run whose worker died is replaced, not handed to the
+    /// next client (which would see a dead cmd channel and a silent
+    /// disconnect).
+    #[test]
+    fn dead_run_is_replaced() {
+        let dir = std::env::temp_dir().join(format!("runs_{}", std::process::id()));
+        let runs = Runs::new(opts(dir.clone(), None));
+        let r1 = runs.get_or_start(5, 0).unwrap();
+        // kill the worker politely — Bye returns from run()
+        r1.cmd_tx.try_send((0, ClientMsg::Bye)).unwrap();
+        wait_dead(&r1);
+        let r2 = runs.get_or_start(5, 0).unwrap();
+        assert!(!Arc::ptr_eq(&r1, &r2), "dead run must be replaced");
+        assert!(!r2.dead());
+        r2.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// S11: a user disabled from another process (CLI `admin
+    /// disable`) is dropped by the next reaper tick — the status
+    /// closure is the only channel into the live server.
+    #[test]
+    fn reaper_drops_disabled_user() {
+        let dir = std::env::temp_dir().join(format!("runs11_{}", std::process::id()));
+        let status = Arc::new(StdMutex::new("active".to_string()));
+        let st = status.clone();
+        let runs = Runs::new(opts(
+            dir.clone(),
+            Some(Arc::new(move |_: i64| Some(st.lock().unwrap().clone()))),
+        ));
+        let r = runs.get_or_start(7, 0).unwrap();
+        assert_eq!(runs.live(), vec![7]);
+        // CLI disable lands in the DB — the closure now reports it
+        *status.lock().unwrap() = "disabled".into();
+        runs.reap();
+        assert!(runs.live().is_empty(), "disabled user's run must drop");
+        wait_dead(&r);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -103,6 +103,11 @@ impl SimCtl {
                         max_upload_bytes: usize::MAX,
                         quota_bytes: 0,
                         abort: ab,
+                        // local worker: Stop uses `abort`; no one ever
+                        // sets hard shutdown — the process exit is the
+                        // teardown.
+                        shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        sim_limits: sim::SimLimits::default(),
                     },
                     rx,
                     emit,

@@ -31,6 +31,8 @@ fn start(net: Network, data_dir: Option<std::path::PathBuf>, seed: u64) -> Ws {
             max_upload_bytes: usize::MAX,
             quota_bytes: 0,
             abort: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            sim_limits: sim::SimLimits::default(),
         },
     );
     srv.spawn_acceptor(listener);
@@ -671,6 +673,8 @@ fn ws_local_remote_equivalent() {
                 max_upload_bytes: usize::MAX,
                 quota_bytes: 0,
                 abort: Arc::new(AtomicBool::new(false)),
+                shutdown: Arc::new(AtomicBool::new(false)),
+                sim_limits: sim::SimLimits::default(),
             },
             lrx,
             emit,
@@ -789,6 +793,8 @@ fn ws_web_serves_http_and_ws_on_one_port() {
             max_upload_bytes: usize::MAX,
             quota_bytes: 0,
             abort: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            sim_limits: sim::SimLimits::default(),
         },
     );
     srv.spawn_acceptor_web(listener, Some(dir.clone()));
@@ -847,6 +853,8 @@ fn ws_plain_http_gets_hint_without_web() {
             max_upload_bytes: usize::MAX,
             quota_bytes: 0,
             abort: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            sim_limits: sim::SimLimits::default(),
         },
     );
     srv.spawn_acceptor(listener);

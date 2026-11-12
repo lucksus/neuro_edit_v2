@@ -27,6 +27,64 @@ pub enum BackendKind {
     Cuda,
 }
 
+/// Accepted integration step range, ms — `SetDtMs`/`sim.set_dt` validate
+/// against it. A step of 0 makes `(ms / dt) as usize` allocate ~2^64
+/// steps; negative/NaN/huge values are likewise meaningless here.
+pub const MIN_DT_MS: f32 = 0.001;
+pub const MAX_DT_MS: f32 = 100.0;
+pub fn valid_dt_ms(dt: f32) -> bool {
+    dt.is_finite() && (MIN_DT_MS..=MAX_DT_MS).contains(&dt)
+}
+
+/// Server-side ceiling on sim memory, checked once before a sim build.
+/// All zeros = unlimited — the local desktop app has no server to
+/// protect, so it runs with the default (unlimited) limits.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SimLimits {
+    /// Neuron count cap (0 = unlimited).
+    pub max_neurons: usize,
+    /// Synapse count cap (0 = unlimited).
+    pub max_synapses: usize,
+    /// Delay-ring bytes cap: `ring_depth × neurons × 4` (0 = unlimited).
+    pub max_ring_bytes: u64,
+}
+
+impl SimLimits {
+    /// `Ok` when `net` fits at `dt_ms`; `Err` names the blown limit.
+    /// The ring check builds the CSR — same order of work as the build
+    /// itself, so it costs nothing extra to run it here once.
+    pub fn check(&self, net: &Network, dt_ms: f32) -> Result<(), String> {
+        let n = net.neurons.len();
+        if self.max_neurons > 0 && n > self.max_neurons {
+            return Err(format!(
+                "net has {n} neurons (server limit {})",
+                self.max_neurons
+            ));
+        }
+        let s = net.synapses.len();
+        if self.max_synapses > 0 && s > self.max_synapses {
+            return Err(format!(
+                "net has {s} synapses (server limit {})",
+                self.max_synapses
+            ));
+        }
+        if self.max_ring_bytes > 0 {
+            let csr = net.synapse_csr(dt_ms);
+            let depth = crate::state::ring_depth(&csr, dt_ms) as u64;
+            let bytes = depth.saturating_mul(n as u64).saturating_mul(4);
+            if bytes > self.max_ring_bytes {
+                return Err(format!(
+                    "delay ring needs {} MiB at dt {dt_ms} ms (server limit {} MiB) \
+                     — fewer neurons, shorter delays or a bigger dt",
+                    bytes >> 20,
+                    self.max_ring_bytes >> 20
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Facade that dispatches to the chosen backend.
 pub enum Sim {
     Cpu(Box<cpu::CpuSim>),
