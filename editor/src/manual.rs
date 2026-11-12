@@ -41,41 +41,111 @@ pub const PAGES: &[Page] = &[
     },
 ];
 
-/// Render one page. `**bold**` and `` `code` `` spans are honoured
-/// inline; everything else is plain wrapped text.
-pub fn render(ui: &mut egui::Ui, md: &str) {
+/// One rendered block — the reflowed unit `render` emits (U4).
+#[derive(Debug, PartialEq)]
+pub(crate) enum Block {
+    H(u8, String),
+    Para(String),
+    Bullet(String),
+    Code(String),
+}
+
+/// Collect markdown lines into renderable blocks (U4): consecutive
+/// plain lines join into one paragraph with spaces, so the sources'
+/// hard ~70-char wraps stop leaking into the UI. Indented lines
+/// continue the bullet above them instead of starting a new line.
+pub(crate) fn blocks(md: &str) -> Vec<Block> {
+    let mut out: Vec<Block> = Vec::new();
     let mut in_code = false;
+    let mut pending = String::new();
+    let mut bullet = false;
+    let mut open = false;
+    let mut flush =
+        |out: &mut Vec<Block>, pending: &mut String, bullet: &mut bool, open: &mut bool| {
+            if *open {
+                let text = std::mem::take(pending);
+                out.push(if *bullet {
+                    Block::Bullet(text)
+                } else {
+                    Block::Para(text)
+                });
+                *open = false;
+                *bullet = false;
+            }
+        };
     for raw in md.lines() {
         let line = raw.trim_end();
         if line.trim_start().starts_with("```") {
+            flush(&mut out, &mut pending, &mut bullet, &mut open);
             in_code = !in_code;
             continue;
         }
-        if line.is_empty() {
-            ui.add_space(6.0);
+        if in_code {
+            out.push(Block::Code(line.to_string()));
             continue;
         }
-        if in_code {
-            ui.add(egui::Label::new(egui::RichText::new(line).monospace()).wrap());
+        if line.is_empty() {
+            flush(&mut out, &mut pending, &mut bullet, &mut open);
             continue;
         }
         let (h, rest) = match line.strip_prefix('#') {
-            Some(l) if line.starts_with("### ") => (3, &l[2..]),
+            Some(l) if line.starts_with("### ") => (3u8, &l[2..]),
             Some(l) if line.starts_with("## ") => (2, &l[1..]),
             Some(l) if line.starts_with("# ") => (1, &l[0..]),
             _ => (0, line),
         };
-        let bullet = rest.strip_prefix("- ").or_else(|| rest.strip_prefix("* "));
-        let text = bullet.unwrap_or(rest);
-        match h {
-            1 => {
+        if h > 0 {
+            flush(&mut out, &mut pending, &mut bullet, &mut open);
+            out.push(Block::H(h, rest.to_string()));
+            continue;
+        }
+        if let Some(b) = rest.strip_prefix("- ").or_else(|| rest.strip_prefix("* ")) {
+            flush(&mut out, &mut pending, &mut bullet, &mut open);
+            pending = b.trim().to_string();
+            bullet = true;
+            open = true;
+            continue;
+        }
+        // Indented line continuing a bullet, or a plain text line:
+        // both append to the pending paragraph with a space.
+        if open {
+            if !pending.is_empty() {
+                pending.push(' ');
+            }
+            pending.push_str(line.trim());
+        } else {
+            pending = line.trim().to_string();
+            bullet = false;
+            open = true;
+        }
+    }
+    flush(&mut out, &mut pending, &mut bullet, &mut open);
+    out
+}
+
+/// Render one page. `**bold**` and `` `code` `` spans are honoured
+/// inline; everything else is plain wrapped text.
+pub fn render(ui: &mut egui::Ui, md: &str) {
+    for b in blocks(md) {
+        match b {
+            Block::H(1, text) => {
                 ui.add(egui::Label::new(egui::RichText::new(text).heading()).wrap());
             }
-            2 | 3 => {
-                ui.add(egui::Label::new(egui::RichText::new(text).strong()).wrap());
+            // U4: .strong() at the body size rendered *smaller* than
+            // the 14 px body — give section headings a real size.
+            Block::H(2, text) => {
+                ui.add(egui::Label::new(egui::RichText::new(text).strong().size(16.0)).wrap());
             }
-            _ => {
-                rich_line(ui, text, bullet.is_some());
+            Block::H(_, text) => {
+                ui.add(egui::Label::new(egui::RichText::new(text).strong().size(15.0)).wrap());
+            }
+            Block::Para(text) => {
+                ui.add_space(4.0);
+                rich_line(ui, &text, false);
+            }
+            Block::Bullet(text) => rich_line(ui, &text, true),
+            Block::Code(text) => {
+                ui.add(egui::Label::new(egui::RichText::new(text).monospace()).wrap());
             }
         }
     }
@@ -150,6 +220,37 @@ mod tests {
         let controls = PAGES.iter().find(|p| p.title == "Controls").unwrap();
         assert!(controls.md.contains("Shift"));
         assert!(controls.md.contains("X / Y / Z"));
+    }
+
+    /// U4: source lines reflow into paragraphs — no rendered
+    /// paragraph may end mid-clause just because the .md wrapped.
+    /// "when" is the reported example (getting-started.md:7).
+    #[test]
+    fn paragraphs_reflow_across_source_wraps() {
+        let gs = PAGES.iter().find(|p| p.title == "Getting started").unwrap();
+        let bs = blocks(gs.md);
+        assert!(bs.iter().any(|b| matches!(b, Block::Para(_))));
+        for b in &bs {
+            if let Block::Para(t) | Block::Bullet(t) = b {
+                assert!(!t.ends_with(" when"), "dangling clause: {t}");
+            }
+        }
+        // Indented bullet continuations join their bullet, not a
+        // new line.
+        let bs = blocks("- one\n  more\n- two");
+        assert_eq!(
+            bs,
+            vec![
+                Block::Bullet("one more".into()),
+                Block::Bullet("two".into())
+            ]
+        );
+        // Headings and blank lines still split paragraphs.
+        let bs = blocks("a b\nc d\n\ne f");
+        assert_eq!(
+            bs,
+            vec![Block::Para("a b c d".into()), Block::Para("e f".into())]
+        );
     }
 }
 
