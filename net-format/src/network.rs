@@ -453,18 +453,74 @@ impl Network {
             })
             .collect();
         for s in &src.synapses {
+            let (Some(a), Some(b)) = (
+                map.get(s.src as usize).copied(),
+                map.get(s.tgt as usize).copied(),
+            ) else {
+                continue; // malformed subnet: skip the dangling synapse
+            };
             self.synapses.push(Synapse {
-                src: map[s.src as usize],
-                tgt: map[s.tgt as usize],
+                src: a,
+                tgt: b,
                 ..*s
             });
         }
         for g in &src.groups {
             let i = self.add_group(&g.name);
-            let members: Vec<u32> = g.members.iter().map(|&m| map[m as usize]).collect();
+            let members: Vec<u32> = g
+                .members
+                .iter()
+                .filter_map(|&m| map.get(m as usize).copied())
+                .collect();
             self.groups[i].members.extend(members);
         }
         map
+    }
+
+    /// Structural integrity: every stored index must point at a real neuron.
+    /// Called after file deserialization — a corrupt or hand-edited file must
+    /// fail here rather than panic inside a sim build or an editor redraw.
+    pub fn validate(&self) -> Result<(), String> {
+        let n = self.neurons.len() as u32;
+        for (i, s) in self.synapses.iter().enumerate() {
+            if s.src >= n || s.tgt >= n {
+                return Err(format!(
+                    "synapse {i} references {} -> {} but only {n} neurons exist",
+                    s.src, s.tgt
+                ));
+            }
+        }
+        for g in &self.groups {
+            for &m in &g.members {
+                if m >= n {
+                    return Err(format!(
+                        "group '{}' references neuron {m} but only {n} exist",
+                        g.name
+                    ));
+                }
+            }
+        }
+        for inp in &self.inputs {
+            for &(t, _) in &inp.targets {
+                if t >= n {
+                    return Err(format!(
+                        "input '{}' targets neuron {t} but only {n} exist",
+                        inp.name
+                    ));
+                }
+            }
+        }
+        for r in &self.readouts {
+            for &u in &r.units {
+                if u >= n {
+                    return Err(format!(
+                        "readout '{}' references unit {u} but only {n} exist",
+                        r.name
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -501,5 +557,57 @@ mod tests {
         assert_eq!(net.neurons[map[0] as usize].pos[0], 110.0);
         let g2 = net.group("g").unwrap();
         assert_eq!(g2.members, vec![0, 1, 2, map[0], map[1]]);
+    }
+
+    #[test]
+    fn validate_rejects_each_dangling_kind() {
+        let mut base = Network::new();
+        base.add_neuron([0.0; 3], NeuronKind::Excitatory);
+        assert!(base.validate().is_ok());
+        base.connect(0, 0, 1.0);
+        assert!(base.validate().is_ok());
+
+        let mut n = base.clone();
+        n.synapses.push(Synapse {
+            src: 0,
+            tgt: 5,
+            w: 1.0,
+            delay_ms: 1.0,
+        });
+        assert!(n.validate().unwrap_err().contains("synapse"));
+
+        let mut n = base.clone();
+        let g = n.add_group("g");
+        n.groups[g].members.push(5);
+        assert!(n.validate().unwrap_err().contains("group"));
+
+        let mut n = base.clone();
+        n.add_input("i", vec![(5, 1.0)], [0.0; 3]);
+        assert!(n.validate().unwrap_err().contains("input"));
+
+        let mut n = base;
+        n.add_readout("r", vec![5]);
+        assert!(n.validate().unwrap_err().contains("readout"));
+    }
+
+    #[test]
+    fn insert_subnet_skips_dangling_refs() {
+        let mut net = Network::new();
+        net.add_neuron([0.0; 3], NeuronKind::Excitatory);
+        // subnet with a synapse + group member past its own neuron count
+        let mut sub = Network::new();
+        sub.add_neuron([0.0; 3], NeuronKind::Excitatory);
+        sub.synapses.push(Synapse {
+            src: 0,
+            tgt: 7,
+            w: 1.0,
+            delay_ms: 1.0,
+        });
+        let g = sub.add_group("g");
+        sub.groups[g].members = vec![0, 7];
+        net.insert_subnet(&sub, [0.0; 3]);
+        // dangling synapse dropped, valid group member kept
+        assert!(net.synapses.is_empty());
+        assert_eq!(net.group("g").unwrap().members, vec![1]);
     }
 }

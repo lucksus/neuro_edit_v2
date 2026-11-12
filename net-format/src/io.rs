@@ -59,7 +59,10 @@ pub fn load(path: impl AsRef<Path>) -> Result<Network, LoadError> {
     if version != FORMAT_VERSION {
         return Err(LoadError::UnsupportedVersion(version));
     }
-    bincode::deserialize_from(&mut r).map_err(|e| LoadError::Decode(e.to_string()))
+    let net: Network =
+        bincode::deserialize_from(&mut r).map_err(|e| LoadError::Decode(e.to_string()))?;
+    net.validate().map_err(LoadError::Decode)?;
+    Ok(net)
 }
 
 /// Debug-friendly JSON export/import (not the primary format).
@@ -70,7 +73,9 @@ pub fn save_json(net: &Network, path: impl AsRef<Path>) -> io::Result<()> {
 
 pub fn load_json(path: impl AsRef<Path>) -> Result<Network, LoadError> {
     let s = std::fs::read_to_string(path)?;
-    serde_json::from_str(&s).map_err(|e| LoadError::Decode(e.to_string()))
+    let net: Network = serde_json::from_str(&s).map_err(|e| LoadError::Decode(e.to_string()))?;
+    net.validate().map_err(LoadError::Decode)?;
+    Ok(net)
 }
 
 /// Serialize to a JSON string (clipboard, network transport).
@@ -80,7 +85,9 @@ pub fn to_json(net: &Network) -> io::Result<String> {
 
 /// Parse a JSON string produced by `to_json`.
 pub fn from_json(s: &str) -> Result<Network, LoadError> {
-    serde_json::from_str(s).map_err(|e| LoadError::Decode(e.to_string()))
+    let net: Network = serde_json::from_str(s).map_err(|e| LoadError::Decode(e.to_string()))?;
+    net.validate().map_err(LoadError::Decode)?;
+    Ok(net)
 }
 
 /// `.nsamples`: the original's samples file — one "time value" pair per line.
@@ -189,6 +196,66 @@ mod tests {
         assert_eq!(s.value_at(5.0), 50.0);
         assert_eq!(s.value_at(15.0), 50.0);
         assert_eq!(s.value_at(25.0), 0.0);
+    }
+
+    /// A net with one dangling reference of each kind — `validate` must
+    /// reject all of them on every load path.
+    fn malformed_nets() -> Vec<Network> {
+        let mut base = Network::new();
+        base.add_neuron([0.0; 3], crate::NeuronKind::Excitatory);
+        vec![
+            {
+                let mut n = base.clone();
+                n.synapses.push(crate::Synapse {
+                    src: 0,
+                    tgt: 9,
+                    w: 1.0,
+                    delay_ms: 1.0,
+                });
+                n
+            },
+            {
+                let mut n = base.clone();
+                let g = n.add_group("g");
+                n.groups[g].members.push(9);
+                n
+            },
+            {
+                let mut n = base.clone();
+                n.add_input("i", vec![(9, 1.0)], [0.0; 3]);
+                n
+            },
+            {
+                let mut n = base.clone();
+                n.add_readout("r", vec![9]);
+                n
+            },
+        ]
+    }
+
+    #[test]
+    fn load_rejects_dangling_refs() {
+        for (i, net) in malformed_nets().into_iter().enumerate() {
+            let path = tempdir().join(format!("bad{i}.ne2"));
+            save(&net, &path).unwrap(); // save doesn't validate; load must
+            match load(&path) {
+                Err(LoadError::Decode(e)) => assert!(e.contains("9"), "{e}"),
+                other => panic!("case {i}: expected Decode error, got {other:?}"),
+            }
+            std::fs::remove_file(&path).ok();
+        }
+    }
+
+    #[test]
+    fn json_load_rejects_dangling_refs() {
+        for (i, net) in malformed_nets().into_iter().enumerate() {
+            let s = to_json(&net).unwrap();
+            assert!(from_json(&s).is_err(), "from_json case {i}");
+            let path = tempdir().join(format!("bad{i}.json"));
+            std::fs::write(&path, &s).unwrap();
+            assert!(load_json(&path).is_err(), "load_json case {i}");
+            std::fs::remove_file(&path).ok();
+        }
     }
 
     #[test]
