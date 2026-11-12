@@ -3,7 +3,10 @@
 Rust + CUDA rewrite of the original C++/Qt4 `neuro_edit` (2011–2012): a
 spiking-network simulator (Izhikevich neurons, distance-based axonal delays,
 exponentially decaying synaptic currents) with Rhai scripting and a 3D egui/wgpu
-editor. GPL-3.0, same as the original.
+editor. GPL-3.0, same as the original — the editor reuses the original
+toolbar artwork.
+
+![editor: LSM liquid with selection, v(t) plot and Rhai console](docs/screenshots/editor_lsm.png)
 
 ## Layout
 
@@ -100,5 +103,17 @@ editor --screenshot big.png --net big.ne2 --no-synapses --width 1920 --height 10
 - Measured: 97,336 neurons + 1.1 M synapses ≈ 4.4 ms/frame on an RTX 3090
   (see `docs/screenshots/liquid_97k.png`).
 
-See `FEATURE-PARITY.md` for the original-editor parity checklist and
-`NOTES-for-data.md` for benchmark numbers, experiment results and open items.
+The editor does **not** spawn a simulator process — the sim is compiled in
+via the `sim` crate and runs on a worker thread; headless and GUI runs share
+the same code path.
+
+## Documentation
+
+- `docs/features.md` — full feature documentation (editor UI, headless `sim`,
+  file format).
+- `docs/scripting.md` — Rhai scripting reference: every `net`/`sim`/readout/
+  rng function, with examples.
+- `docs/tutorial.md` — step-by-step walkthrough of the LSM example.
+- `FEATURE-PARITY.md` — original-editor parity checklist (only items actually
+  exercised are ticked).
+- `NOTES-for-data.md` — benchmark numbers, experiment results and open items.

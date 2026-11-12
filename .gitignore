@@ -1,3 +1,5 @@
 /target
 *.swp
 docs/screenshots/*.png
+!docs/screenshots/editor_lsm.png
+!docs/screenshots/liquid_97k.png
