@@ -271,8 +271,11 @@ mod layout_tests {
         );
     }
 
+    /// Regression: the manual window must not grow wider frame over frame.
+    /// (Pre-fix the ScrollArea claimed the unbounded horizontal-row width and
+    /// the window chased it until hitting the screen edge.)
     #[test]
-    fn probe_window_widths() {
+    fn manual_window_width_is_stable() {
         let ctx = egui::Context::default();
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -281,13 +284,14 @@ mod layout_tests {
             )),
             ..Default::default()
         };
+        let mut prev_right = 0.0f32;
         for i in 0..3 {
             let out = ctx.run(input.clone(), |ctx| {
                 egui::Window::new("Manual")
                     .default_size([640.0, 520.0])
                     .default_pos([90.0, 60.0])
                     .show(ctx, |ui| {
-                        let body_w = (ui.clip_rect().width() - 150.0).clamp(80.0, 480.0);
+                        let body_w = (ui.clip_rect().width() - 110.0 - 40.0).clamp(80.0, 480.0);
                         let body_h = ui.available_height().max(60.0);
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
@@ -305,21 +309,28 @@ mod layout_tests {
                         });
                     });
             });
-            let mut widest = 0.0f32;
-            for shape in &out.shapes {
-                if let egui::epaint::Shape::Text(t) = &shape.shape {
-                    widest = widest.max(t.galley.size().x);
-                }
+            let right = out
+                .shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::epaint::Shape::Text(t) => Some(t.pos.x + t.galley.size().x),
+                    _ => None,
+                })
+                .fold(0.0f32, f32::max);
+            if i > 1 {
+                // frame 0 paints nothing (layout warmup), frame 1 sets baseline
+                assert!(
+                    right <= prev_right + 1.0,
+                    "window content still growing on frame {i}: {prev_right} -> {right}"
+                );
             }
-            let mut clipr = None;
-            for shape in &out.shapes {
-                if let egui::epaint::Shape::Text(t) = &shape.shape {
-                    if t.galley.size().x >= widest {
-                        clipr = Some(shape.clip_rect);
-                    }
-                }
+            if right > 0.0 {
+                prev_right = right;
             }
-            eprintln!("frame{i}: widest_text={widest:.0} clip={clipr:?}");
         }
+        assert!(
+            prev_right < 750.0,
+            "manual content spilled to {prev_right}px — wider than the 640px window"
+        );
     }
 }
