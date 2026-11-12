@@ -403,3 +403,31 @@ impl Accounts {
             .execute("DELETE FROM sessions WHERE user_id=?1", params![user_id]);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn login_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("acct_{}", std::process::id()));
+        let a = Accounts::open(&dir).unwrap();
+        let u = a
+            .create_user("a@x.dev", "Ann", "correct horse 12", "n", 1 << 20)
+            .unwrap();
+        a.set_status(u.id, "active").unwrap();
+        match a.verify_login("a@x.dev", "correct horse 12") {
+            Login::Ok(_) => {}
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(Login::Bad, a.verify_login("a@x.dev", "wrong wrong wrong"));
+        assert_eq!(
+            Login::Bad,
+            a.verify_login("nobody@x.dev", "correct horse 12")
+        );
+        let (tok, _csrf) = a.create_session(u.id).unwrap();
+        assert!(a.session(&tok).is_some());
+        a.delete_session(&tok);
+        assert!(a.session(&tok).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

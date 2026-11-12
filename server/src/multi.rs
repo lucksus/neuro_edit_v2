@@ -254,6 +254,11 @@ impl Multi {
         }
     }
 
+    /// `<root>` — users at `<root>/users/<id>/`.
+    pub fn opts_root(&self) -> &Path {
+        &self.opts.data_root
+    }
+
     /// Blocking accept loop — same shape as `Server::accept_web`.
     pub fn serve(self: &Arc<Self>, listener: TcpListener) -> anyhow::Result<()> {
         for stream in listener.incoming() {
@@ -664,6 +669,7 @@ impl Multi {
         };
         let key = req.header("sec-websocket-key").unwrap_or("").to_string();
         ws_accept(stream, &key)?;
+        run.socks.lock().unwrap().push(stream.try_clone()?);
         let ws = tungstenite::WebSocket::from_raw_socket(
             stream.try_clone()?,
             tungstenite::protocol::Role::Server,

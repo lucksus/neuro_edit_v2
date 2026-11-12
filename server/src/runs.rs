@@ -28,10 +28,14 @@ pub struct UserRun {
     pub cmd_tx: mpsc::Sender<(u64, ClientMsg)>,
     pub clients: Clients,
     pub jobs: Arc<JobRegistry>,
+    /// Live client sockets — `stop` shuts them down so a disabled user's
+    /// connections close at once (dropping writers alone only
+    /// half-closes; the reader side would sit on read forever).
+    pub socks: Mutex<Vec<std::net::TcpStream>>,
     abort: Arc<AtomicBool>,
     /// Last time a client was attached (or the run started).
     last_active: Mutex<Instant>,
-    worker: Option<JoinHandle<()>>,
+    worker: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl UserRun {
@@ -51,12 +55,17 @@ impl UserRun {
             .iter()
             .any(|j| j.status == "running" || j.status == "cancelling")
     }
-    /// Stop the worker and every client writer.
-    fn stop(mut self) {
+    /// Stop the worker and every client socket. `&self` because live
+    /// connections hold `Arc`s — `Arc::try_unwrap` would fail exactly
+    /// when it matters (a connected client being disabled).
+    fn stop(&self) {
         self.abort.store(true, Ordering::Relaxed);
         let _ = self.cmd_tx.send((0, ClientMsg::Bye));
         self.clients.lock().unwrap().clear();
-        if let Some(w) = self.worker.take() {
+        for s in self.socks.lock().unwrap().drain(..) {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
+        if let Some(w) = self.worker.lock().unwrap().take() {
             let _ = w.join();
         }
     }
@@ -170,15 +179,16 @@ impl Runs {
             cmd_tx,
             clients,
             jobs,
+            socks: Mutex::new(Vec::new()),
             abort,
             last_active: Mutex::new(Instant::now()),
-            worker: Some(worker),
+            worker: Mutex::new(Some(worker)),
         }
     }
 
     /// Reap runs idle beyond `--idle-minutes` with no clients and no
-    /// live job.
-    fn reap(&self) {
+    /// live job. `pub` so tests/tools can force the tick.
+    pub fn reap(&self) {
         let idle = self.opts.idle;
         let dead: Vec<i64> = self
             .runs
@@ -191,9 +201,7 @@ impl Runs {
         for id in dead {
             if let Some(r) = self.runs.lock().unwrap().remove(&id) {
                 eprintln!("user {id}: run idle — stopping");
-                if let Ok(r) = Arc::try_unwrap(r) {
-                    r.stop();
-                }
+                r.stop();
             }
         }
     }
@@ -202,9 +210,7 @@ impl Runs {
     /// writers (and so their sockets) close at once.
     pub fn drop_user(&self, user_id: i64) {
         if let Some(r) = self.runs.lock().unwrap().remove(&user_id) {
-            if let Ok(r) = Arc::try_unwrap(r) {
-                r.stop();
-            }
+            r.stop();
         }
     }
 
@@ -215,10 +221,5 @@ impl Runs {
 
     pub fn count(&self) -> usize {
         self.runs.lock().unwrap().len()
-    }
-
-    #[cfg(test)]
-    pub fn _force_reap(&self) {
-        self.reap();
     }
 }

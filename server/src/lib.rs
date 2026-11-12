@@ -491,7 +491,20 @@ pub struct ClientConn {
 
 impl ClientConn {
     pub fn connect(addr: &str) -> anyhow::Result<Self> {
-        let (ws, _resp) = tungstenite::connect(format!("ws://{addr}"))?;
+        Self::connect_url(&format!("ws://{addr}"), &[])
+    }
+    /// Full-URL connect (`ws://`/`wss://`) with extra request headers —
+    /// multi-user mode's `/ws` path and `Authorization: Bearer` auth.
+    pub fn connect_url(url: &str, headers: &[(&str, &str)]) -> anyhow::Result<Self> {
+        use tungstenite::client::IntoClientRequest;
+        let mut req = url.into_client_request()?;
+        for (k, v) in headers {
+            req.headers_mut().insert(
+                tungstenite::http::header::HeaderName::from_bytes(k.as_bytes())?,
+                v.parse()?,
+            );
+        }
+        let (ws, _resp) = tungstenite::client::connect(req)?;
         Ok(Self { ws })
     }
     pub fn send(&mut self, m: &ClientMsg) -> anyhow::Result<()> {
