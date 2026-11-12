@@ -42,6 +42,10 @@ struct Cli {
     /// this directory on the same port (`server --web editor/dist-web`).
     #[arg(long)]
     web: Option<std::path::PathBuf>,
+    /// Cap on `UploadDataset` signal bytes (MiB). Guards the shared
+    /// data_dir against huge pushes.
+    #[arg(long, default_value_t = 64)]
+    max_upload_mb: usize,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -85,6 +89,7 @@ fn main() -> anyhow::Result<()> {
                 ..Default::default()
             },
             data_dir: cli.data_dir.clone(),
+            max_upload_bytes: cli.max_upload_mb.saturating_mul(1024 * 1024),
             abort: Arc::new(AtomicBool::new(false)),
         },
     );

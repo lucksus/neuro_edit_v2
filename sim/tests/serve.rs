@@ -37,6 +37,7 @@ fn start(net: Network, data_dir: Option<std::path::PathBuf>) -> Rig {
                 seed: 1,
                 cfg: SimConfig::default(),
                 data_dir,
+                max_upload_bytes: usize::MAX,
                 abort: Arc::new(AtomicBool::new(false)),
             },
             rx,

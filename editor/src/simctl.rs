@@ -97,6 +97,7 @@ impl SimCtl {
                         seed,
                         cfg,
                         data_dir: None,
+                        max_upload_bytes: usize::MAX,
                         abort: ab,
                     },
                     rx,

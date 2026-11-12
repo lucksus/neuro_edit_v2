@@ -57,6 +57,9 @@ pub struct ServeOpts {
     /// Sandbox for every file path scripts and load commands touch;
     /// `None` = local mode (paths used verbatim).
     pub data_dir: Option<PathBuf>,
+    /// `UploadDataset` refuses payloads over this many bytes (the
+    /// server's `--max-upload-mb`; local mode uses a large default).
+    pub max_upload_bytes: usize,
     /// Shared stop flag — UI Stop button / server shutdown.
     pub abort: std::sync::Arc<AtomicBool>,
 }
@@ -98,6 +101,7 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
         seed,
         cfg,
         data_dir,
+        max_upload_bytes,
         abort,
     } = opts;
     let mut env = Env::with_print(net, backend, seed, {
@@ -542,6 +546,69 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                         ),
                     }
                 }
+                // A dataset push: bytes land under `datasets/<name>/`
+                // through the same resolve rules; the server caps the
+                // signal size (`--max-upload-mb`).
+                ClientMsg::UploadDataset {
+                    name,
+                    signal_ext,
+                    signal,
+                    meta_json,
+                    labels_json,
+                } => {
+                    let ext = if signal_ext == "npy" { "npy" } else { "f32" };
+                    let r = if signal.len() > max_upload_bytes {
+                        Err(format!(
+                            "upload {}: {} B over the {} B limit",
+                            name,
+                            signal.len(),
+                            max_upload_bytes
+                        ))
+                    } else if serde_json::from_str::<serde_json::Value>(&meta_json).is_err()
+                        || serde_json::from_str::<serde_json::Value>(&labels_json).is_err()
+                    {
+                        Err(format!("upload {name}: meta/labels not JSON"))
+                    } else {
+                        resolve(&env, &format!("datasets/{name}")).and_then(|dir| {
+                            let dir = std::path::PathBuf::from(dir);
+                            std::fs::create_dir_all(&dir)
+                                .and_then(|()| {
+                                    std::fs::write(dir.join(format!("signal.{ext}")), &signal)?;
+                                    std::fs::write(dir.join("meta.json"), &meta_json)?;
+                                    std::fs::write(dir.join("labels.json"), &labels_json)
+                                })
+                                .map_err(|e| e.to_string())
+                                // sanity: the file must load as a dataset
+                                .and_then(|()| {
+                                    crate::dataset::Dataset::load(
+                                        dir.parent().unwrap_or(&dir),
+                                        &name,
+                                    )
+                                    .map(|_| ())
+                                })
+                        })
+                    };
+                    match r {
+                        Ok(()) => emit_to(
+                            &emit,
+                            client,
+                            ServerMsg::FileWritten {
+                                path: format!("datasets/{name}"),
+                            },
+                        ),
+                        Err(e) => emit_to(&emit, client, ServerMsg::Error(format!("upload: {e}"))),
+                    }
+                }
+                // Jobs are a `server` feature — they need a shared
+                // broadcast fan-out the local transport doesn't have.
+                ClientMsg::StartJob { .. }
+                | ClientMsg::CancelJob { .. }
+                | ClientMsg::ListJobs
+                | ClientMsg::OpenJob { .. } => emit_to(
+                    &emit,
+                    client,
+                    ServerMsg::Error("jobs run on a `server` — connect with --connect".into()),
+                ),
             }
         }
         status!();

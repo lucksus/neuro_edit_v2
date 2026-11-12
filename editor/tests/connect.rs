@@ -39,6 +39,7 @@ fn remote_ctl_hydrates_and_folds() {
             seed: 1,
             cfg: SimConfig::default(),
             data_dir: None,
+            max_upload_bytes: usize::MAX,
             abort: Arc::new(AtomicBool::new(false)),
         },
     );
