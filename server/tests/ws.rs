@@ -444,3 +444,73 @@ fn collect_k_ws(c: &mut server::ClientConn) -> Vec<String> {
     }
     out
 }
+
+fn http_get(addr: &str, target: &str) -> String {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(addr).unwrap();
+    write!(
+        s,
+        "GET {target} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    out
+}
+
+/// `server --web`: the same port answers plain GETs from `web_dir` and
+/// upgrades WS connections — and refuses to read outside `web_dir`.
+#[test]
+fn ws_web_serves_http_and_ws_on_one_port() {
+    let base = std::env::temp_dir().join(format!("ws_web_{}", std::process::id()));
+    let dir = base.join("web");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("index.html"), "<html>ne-web</html>").unwrap();
+    std::fs::write(dir.join("app.js"), "console.log(1)").unwrap();
+    std::fs::write(base.join("secret.txt"), "nope").unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let srv = server::Server::start(
+        Network::new(),
+        ServeOpts {
+            backend: BackendKind::Cpu,
+            seed: 7,
+            cfg: SimConfig::default(),
+            data_dir: None,
+            abort: Arc::new(AtomicBool::new(false)),
+        },
+    );
+    srv.spawn_acceptor_web(listener, Some(dir.clone()));
+
+    // plain HTTP: index at /, files by name, traversal refused
+    let index = http_get(&addr, "/");
+    assert!(index.starts_with("HTTP/1.1 200"), "{index:?}");
+    assert!(index.contains("<html>ne-web</html>"), "{index:?}");
+    let js = http_get(&addr, "/app.js");
+    assert!(js.contains("Content-Type: text/javascript"), "{js:?}");
+    assert!(js.contains("console.log(1)"), "{js:?}");
+    let escape = http_get(&addr, "/../secret.txt");
+    assert!(escape.starts_with("HTTP/1.1 404"), "{escape:?}");
+    let missing = http_get(&addr, "/nope.wasm");
+    assert!(missing.starts_with("HTTP/1.1 404"), "{missing:?}");
+
+    // same port: the wire protocol still works
+    let mut c = server::ClientConn::connect(&addr).unwrap();
+    c.send(&ClientMsg::Hello {
+        proto: proto::PROTO_VERSION,
+    })
+    .unwrap();
+    until(&mut c, |m| matches!(m, ServerMsg::Hello { .. }));
+    c.send(&ClientMsg::Eval {
+        code: "print(\"web-ok\")".into(),
+    })
+    .unwrap();
+    until(
+        &mut c,
+        |m| matches!(m, ServerMsg::Console(s) if s == "web-ok"),
+    );
+
+    srv.shutdown();
+    let _ = std::fs::remove_dir_all(&base);
+}

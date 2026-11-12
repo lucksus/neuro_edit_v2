@@ -38,6 +38,10 @@ struct Cli {
     /// Fixed-point synaptic ring (CUDA): bitwise reproducible runs.
     #[arg(long)]
     int_weights: bool,
+    /// Also serve the browser editor (index.html + wasm bundle) from
+    /// this directory on the same port (`server --web editor/dist-web`).
+    #[arg(long)]
+    web: Option<std::path::PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -92,15 +96,25 @@ fn main() -> anyhow::Result<()> {
         srv.send(proto::ClientMsg::Eval { code });
     }
 
+    if let Some(d) = &cli.web {
+        if !d.join("index.html").is_file() {
+            anyhow::bail!("--web dir {} has no index.html", d.display());
+        }
+    }
+
     let listener =
         std::net::TcpListener::bind(&cli.bind).with_context(|| format!("bind {}", cli.bind))?;
     eprintln!(
-        "listening on {}{}",
+        "listening on {}{}{}",
         cli.bind,
         cli.data_dir
             .as_ref()
             .map(|d| format!(" (data-dir {})", d.display()))
+            .unwrap_or_default(),
+        cli.web
+            .as_ref()
+            .map(|d| format!(" (web {})", d.display()))
             .unwrap_or_default()
     );
-    srv.accept(listener)
+    srv.accept_web(listener, cli.web)
 }
