@@ -31,6 +31,10 @@ pub struct EditorApp {
     /// Sliding-window/follow state shared by the v(t), raster and
     /// phase tabs.
     plot_win: crate::plot::PlotWindow,
+    /// Newest sim time seen in a snapshot — the window's right edge.
+    last_sim_t: f64,
+    /// `hist.resets` as of the last sync — a bump re-enables follow.
+    hist_resets_seen: usize,
 
     pub selection: HashSet<u32>, // instance ids
     pub mode: Mode,
@@ -476,6 +480,8 @@ impl EditorApp {
             particles: Particles::new(),
             hist: crate::plot::PlotHist::default(),
             plot_win: crate::plot::PlotWindow::default(),
+            last_sim_t: 0.0,
+            hist_resets_seen: 0,
             selection: HashSet::new(),
             mode: Mode::Navigate,
             plane: Plane::XZ,
@@ -886,6 +892,7 @@ impl EditorApp {
         }
         if snap.seq != self.last_snap_seq {
             self.last_snap_seq = snap.seq;
+            self.last_sim_t = snap.time_ms;
             self.speed_peak = self.speed_peak.max(snap.steps_per_sec);
             self.activity = snap.activity.to_vec();
             self.grid_traces = snap.grid_traces.clone();
@@ -910,6 +917,12 @@ impl EditorApp {
                 .collect();
             self.hist
                 .feed(snap.time_ms, fired, &watched, self.dt_ms as f64);
+            // A reset while the user was panned away snaps the plots
+            // back to live view — a rewind always wants "now".
+            if self.hist.resets != self.hist_resets_seen {
+                self.hist_resets_seen = self.hist.resets;
+                self.plot_win.follow = true;
+            }
         }
         self.running = running;
         self.sim_built = sim_built;
@@ -2496,11 +2509,25 @@ impl EditorApp {
                         ui.label(format!("{} job(s)", self.jobs.len()));
                     }
                     ui.separator();
+                    if matches!(self.plot_tab, PlotTab::Voltage | PlotTab::Raster) {
+                        ui.separator();
+                        ui.label("window");
+                        ui.add(
+                            egui::DragValue::new(&mut self.plot_win.len_ms)
+                                .range(20.0..=5000.0)
+                                .suffix("ms"),
+                        );
+                        if !self.plot_win.follow {
+                            if ui.button("Follow").clicked() {
+                                self.plot_win.follow = true;
+                            }
+                        }
+                        if self.plot_tab == PlotTab::Voltage {
+                            ui.checkbox(&mut self.plot_win.auto_y, "Auto Y");
+                        }
+                    }
                     if self.plot_tab == PlotTab::Voltage {
-                        ui.label(format!(
-                            "watching {} neuron(s) — select neurons to plot v(t)",
-                            self.watch_sent.len()
-                        ));
+                        ui.label(format!("watching {}", self.watch_sent.len()));
                     }
                     if self.plot_tab == PlotTab::Raster {
                         ui.label("height");
@@ -2513,13 +2540,41 @@ impl EditorApp {
                 });
                 match self.plot_tab {
                     PlotTab::Voltage => {
-                        egui_plot::Plot::new("vplot").height(100.0).show(ui, |ui| {
+                        // Sliding window ending at "now" while following;
+                        // the user's pan/zoom rules once follow is off.
+                        let win = self.plot_win.bounds(self.last_sim_t);
+                        let auto_y = self.plot_win.auto_y;
+                        let mut p = egui_plot::Plot::new("vplot").height(140.0);
+                        if win.is_none() || auto_y {
+                            // x (or y too when following) from the data.
+                            p = p.auto_bounds(egui::Vec2b::new(win.is_none(), auto_y));
+                        } else {
+                            p = p.auto_bounds(egui::Vec2b::new(false, false));
+                        }
+                        let pr = p.show(ui, |ui| {
                             for (&id, h) in &self.hist.v {
-                                let pts: PlotPoints =
-                                    h.iter().map(|(t, v)| [*t, *v as f64]).collect();
+                                let pts: PlotPoints = match win {
+                                    Some((lo, hi)) => h
+                                        .iter()
+                                        .filter(|(t, _)| (lo..=hi).contains(t))
+                                        .map(|(t, v)| [*t, *v as f64])
+                                        .collect(),
+                                    None => h.iter().map(|(t, v)| [*t, *v as f64]).collect(),
+                                };
                                 ui.line(Line::new(format!("n{id}"), pts));
                             }
+                            if let Some((lo, hi)) = win {
+                                ui.set_plot_bounds_x(lo..=hi);
+                                if !auto_y {
+                                    // Fixed Izhikevich span: spikes can't
+                                    // bounce the axis entering/leaving.
+                                    ui.set_plot_bounds_y(
+                                        crate::plot::V_Y_RANGE.0..=crate::plot::V_Y_RANGE.1,
+                                    );
+                                }
+                            }
                         });
+                        self.plot_follow(&pr, win);
                     }
                     PlotTab::Raster => {
                         // Raster strip: x = sim milliseconds. With watches
@@ -2536,12 +2591,14 @@ impl EditorApp {
                         } else {
                             watches.len() as f64 - 0.5
                         };
+                        let win = self.plot_win.bounds(self.last_sim_t);
                         let plot = egui_plot::Plot::new("raster")
                             .height(self.raster_h.max(40.0))
-                            .auto_bounds(egui::Vec2b::new(true, false))
+                            .auto_bounds(egui::Vec2b::new(win.is_none(), false))
                             .include_y(-0.5)
                             .include_y(y_hi);
-                        plot.x_axis_formatter(|x, _| format!("{:.0}ms", x.value))
+                        let pr = plot
+                            .x_axis_formatter(|x, _| format!("{:.0}ms", x.value))
                             .y_axis_formatter(move |y, _| {
                                 let k = y.value.round() as usize;
                                 if watches.is_empty() {
@@ -2557,6 +2614,11 @@ impl EditorApp {
                                 let mut pts = Vec::new();
                                 let watches = &self.watch_sent;
                                 for &(t, ref fired) in &self.hist.raster {
+                                    if let Some((lo, hi)) = win {
+                                        if !(lo..=hi).contains(&t) {
+                                            continue;
+                                        }
+                                    }
                                     if watches.is_empty() {
                                         let stride = (fired.len() / 200).max(1);
                                         for (k, &id) in fired.iter().enumerate() {
@@ -2577,7 +2639,11 @@ impl EditorApp {
                                         .radius(1.0_f32)
                                         .color(egui::Color32::LIGHT_BLUE),
                                 );
+                                if let Some((lo, hi)) = win {
+                                    ui.set_plot_bounds_x(lo..=hi);
+                                }
                             });
+                        self.plot_follow(&pr, win);
                     }
                     PlotTab::Readouts => self.plot_readouts(ui),
                     PlotTab::Samples => self.plot_samples(ui),
@@ -2585,6 +2651,30 @@ impl EditorApp {
                 }
             });
         self.show_plots = open;
+    }
+
+    /// Turn follow off when the user pans/zooms away from the imposed
+    /// window (bounds no longer match what we set), and back on when
+    /// they double-click — egui_plot's own "reset" gesture.
+    fn plot_follow(
+        &mut self,
+        pr: &egui_plot::PlotResponse<()>,
+        imposed: Option<(f64, f64)>,
+    ) {
+        if pr.response.double_clicked() {
+            self.plot_win.follow = true;
+            return;
+        }
+        if let Some((lo, hi)) = imposed {
+            let b = pr.transform.bounds();
+            let eps = (self.plot_win.len_ms * 1e-6).max(1e-6);
+            if pr.response.dragged()
+                || (b.min()[0] - lo).abs() > eps
+                || (b.max()[0] - hi).abs() > eps
+            {
+                self.plot_win.follow = false;
+            }
+        }
     }
 
     /// Bar chart of the selected readout's trained weights (original's
