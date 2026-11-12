@@ -24,7 +24,7 @@ fn one_neuron_net() -> Network {
 /// counts must equal the true spikes, not OR-ed stale bits.
 #[test]
 fn cpu_spike_bits_cleared_on_ring_wrap() {
-    let mut sim = CpuSim::new(&one_neuron_net(), rec_cfg(64));
+    let mut sim = CpuSim::new(&one_neuron_net(), rec_cfg(64)).unwrap();
     sim.set_external(0, 40.0);
     sim.run_steps(64 * 20).unwrap();
     sim.set_external(0, 0.0);
@@ -40,7 +40,7 @@ fn cpu_spike_bits_cleared_on_ring_wrap() {
 /// instead of silently capping at the ring depth.
 #[test]
 fn cpu_spike_counts_window_semantics() {
-    let mut sim = CpuSim::new(&one_neuron_net(), rec_cfg(64));
+    let mut sim = CpuSim::new(&one_neuron_net(), rec_cfg(64)).unwrap();
     sim.set_external(0, 40.0);
     sim.run_steps(300).unwrap(); // t = 300, ring = 64
 

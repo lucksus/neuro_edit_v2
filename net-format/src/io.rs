@@ -330,7 +330,7 @@ mod tests {
         net.connect(0, 1, 6.0);
         net.connect(0, 3, 7.0);
         net.connect(2, 3, 8.0);
-        let csr = net.synapse_csr(0.1);
+        let csr = net.synapse_csr(0.1).unwrap();
         // src order: 0->[1,3], 2->[0,3]
         assert_eq!(csr.tgt, vec![1, 3, 0, 3]);
         assert_eq!(csr.w, vec![6.0, 7.0, 5.0, 8.0]);
@@ -338,7 +338,7 @@ mod tests {
         assert_eq!(csr.delay_steps, vec![1, 3, 2, 1]);
         assert_eq!(csr.src_ptr, vec![0, 2, 2, 4, 4]);
         // dt=0.05 -> 2,6,4,2 steps
-        let csr2 = net.synapse_csr(0.05);
+        let csr2 = net.synapse_csr(0.05).unwrap();
         assert_eq!(csr2.delay_steps, vec![2, 6, 4, 2]);
     }
 

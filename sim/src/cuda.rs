@@ -118,7 +118,7 @@ pub struct CudaSim {
 impl CudaSim {
     pub fn new(net: &Network, cfg: SimConfig) -> Result<Self> {
         let n = net.neurons.len();
-        let csr = net.synapse_csr(cfg.dt_ms);
+        let csr = net.synapse_csr(cfg.dt_ms).map_err(anyhow::Error::msg)?;
         let d = ring_depth(&csr, cfg.dt_ms);
         let params = NeuronParams::from_network(net);
         let stim_map = crate::stim::StimMap::from_network(net);
@@ -172,7 +172,7 @@ impl CudaSim {
         for (j, &tau) in csr.tau_ms.iter().enumerate() {
             if tau > 0.0 {
                 xsyn_map[j] = n_xsyn as u32;
-                xdecay.push(1.0 - cfg.dt_ms / tau.max(1e-6));
+                xdecay.push((-cfg.dt_ms / tau.max(1e-6)).exp());
                 xt_rows[csr.tgt[j] as usize].push(xsyn_map[j]);
                 n_xsyn += 1;
             }
@@ -277,8 +277,8 @@ impl CudaSim {
         } else {
             0.0
         };
-        let decay_s = 1.0 - dt / self.cfg.synapse_tau_ms.max(1e-6);
-        let decay_t = 1.0 - dt / self.cfg.readout_tau_ms.max(1e-6);
+        let decay_s = (-dt / self.cfg.synapse_tau_ms.max(1e-6)).exp();
+        let decay_t = (-dt / self.cfg.readout_tau_ms.max(1e-6)).exp();
         let grid = (self.n as u32).div_ceil(BLOCK);
         let cfg_launch = LaunchConfig {
             grid_dim: (grid, 1, 1),

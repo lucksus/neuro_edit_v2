@@ -195,7 +195,8 @@ fn lsm_null_is_wide_single_draw_is_not_the_null() {
             record_spikes: true,
             ..Default::default()
         },
-    );
+    )
+    .unwrap();
 
     // main / signal-off / raw — same windows as the script (strength 0.8
     // for main+raw, 0.0 for off), generated in the script's order.

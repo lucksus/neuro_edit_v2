@@ -16,7 +16,7 @@ fn net() -> Network {
 
 #[test]
 fn watched_neurons_record_every_step() {
-    let mut sim = CpuSim::new(&net(), SimConfig::default());
+    let mut sim = CpuSim::new(&net(), SimConfig::default()).unwrap();
     sim.set_v_watch(&[0, 2]);
     sim.set_external(0, 40.0); // tonic drive -> spikes
     sim.run_steps(200).unwrap();
@@ -45,7 +45,7 @@ fn cuda_drain_matches_cpu() {
         return;
     }
     use sim::cuda::CudaSim;
-    let mut c = CpuSim::new(&net(), SimConfig::default());
+    let mut c = CpuSim::new(&net(), SimConfig::default()).unwrap();
     let mut g = CudaSim::new(&net(), SimConfig::default()).unwrap();
     c.set_v_watch(&[0, 2]);
     g.set_v_watch(&[0, 2]);

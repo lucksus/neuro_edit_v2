@@ -12,7 +12,13 @@ let PAIRS = [[0, 1], [2, 3]];
 let WIN = 30;                  // ms per window (1 ms steps)
 let TRAIN = 60;
 let TEST = 40;
-let W_IN = 9.0;
+// Coincidence-detector regime: Izhikevich RS fires only above ~4 mV of
+// sustained current, so a single stream at 2.8 stays sub-threshold but
+// the pair's shared bit arriving together (5.6) spikes the pool — the
+// planted correlation becomes a *firing* difference, not a rate hint.
+// (Stage 17 retune: with real Dale's-law inhibition + fast-spiking
+// inhibitory cells, the old W_IN=9 saturated the whole reservoir.)
+let W_IN = 2.8;
 
 net.clear();
 seed(SEED);
@@ -22,10 +28,11 @@ net.create_connections("res", 1.0, 2.5, 0.8);
 let res = net.neurons_of("res");
 let n_res = res.len();
 
-// Each pair shares a pool (so the planted common bit hits the SAME
-// reservoir neurons) plus a private pool per source.
-let SHARED = 12;
-let PRIV = 6;
+// Each pair shares a big pool (the planted common bit hits the SAME
+// reservoir neurons). Every feature neuron is on a shared pool — no
+// private pools, which only added signal-free dimensions.
+let SHARED = 80;
+let PRIV = 0;
 for p in PAIRS {
     let pool = [];
     for k in 0..SHARED {

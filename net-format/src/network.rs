@@ -402,8 +402,9 @@ impl Network {
             .map(|i| i as u32)
     }
 
-    /// Distance-based delay for a src→tgt pair in ms (min dt*0.5 so that a
-    /// same-site connection is still one step).
+    /// Distance-based delay for a src→tgt pair in ms. The floor is a flat
+    /// 1e-3 ms — `synapse_csr` rounds to whole steps with a min of 1, so a
+    /// same-site connection still delivers after one step.
     pub fn conduction_delay_ms(&self, src: u32, tgt: u32) -> f32 {
         let a = self.neuron(src).pos;
         let b = self.neuron(tgt).pos;
@@ -442,8 +443,10 @@ impl Network {
         }
     }
 
-    /// Source-sorted CSR for `dt` ms steps. Delay steps are rounded, min 1.
-    pub fn synapse_csr(&self, dt_ms: f32) -> SynCsr {
+    /// Source-sorted CSR for `dt` ms steps. Delay steps are rounded, min 1;
+    /// a delay over `u16::MAX` steps is an error — the ring is indexed by
+    /// u16, so silently clamping would deliver spikes early (M4).
+    pub fn synapse_csr(&self, dt_ms: f32) -> Result<SynCsr, String> {
         let n = self.neurons.len();
         let mut order: Vec<usize> = (0..self.synapses.len()).collect();
         order.sort_by_key(|&i| self.synapses[i].src);
@@ -464,13 +467,23 @@ impl Network {
             csr.w.push(if inh { -s.w.abs() } else { s.w.abs() });
             csr.tau_ms.push(s.tau_ms);
             let steps = (s.delay_ms / dt_ms).round().max(1.0);
-            csr.delay_steps.push(steps.min(u16::MAX as f32) as u16);
+            if !steps.is_finite() || steps > u16::MAX as f32 {
+                return Err(format!(
+                    "synapse {} -> {}: delay {} ms = {steps} steps at dt {dt_ms} \
+                     exceeds the {}-step ring",
+                    s.src,
+                    s.tgt,
+                    s.delay_ms,
+                    u16::MAX
+                ));
+            }
+            csr.delay_steps.push(steps as u16);
             csr.src_ptr[s.src as usize + 1] += 1;
         }
         for i in 0..n {
             csr.src_ptr[i + 1] += csr.src_ptr[i];
         }
-        csr
+        Ok(csr)
     }
 
     pub fn group_index(&self, name: &str) -> Option<usize> {

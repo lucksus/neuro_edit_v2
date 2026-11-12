@@ -91,9 +91,9 @@ pub struct GridWatch {
 }
 
 impl CpuSim {
-    pub fn new(net: &Network, cfg: SimConfig) -> Self {
+    pub fn new(net: &Network, cfg: SimConfig) -> Result<Self, String> {
         let n = net.neurons.len();
-        let csr = net.synapse_csr(cfg.dt_ms);
+        let csr = net.synapse_csr(cfg.dt_ms)?;
         let d = ring_depth(&csr, cfg.dt_ms);
         let params = NeuronParams::from_network(net);
         let words = n.div_ceil(64);
@@ -112,7 +112,7 @@ impl CpuSim {
             if tau > 0.0 {
                 xsyn_map[j] = xsyn.len() as u32;
                 xsyn.push(0.0);
-                xdecay.push(1.0 - cfg.dt_ms / tau.max(1e-6));
+                xdecay.push((-cfg.dt_ms / tau.max(1e-6)).exp());
                 xw.push(csr.w[j]);
                 xt_rows[csr.tgt[j] as usize].push(xsyn_map[j]);
             }
@@ -160,9 +160,9 @@ impl CpuSim {
         .init()
     }
 
-    fn init(mut self) -> Self {
+    fn init(mut self) -> Result<Self, String> {
         self.reset_state();
-        self
+        Ok(self)
     }
 
     /// Reset dynamical state (v, u, currents, ring, time). Keeps synapses,
@@ -210,8 +210,8 @@ impl CpuSim {
         } else {
             0.0
         };
-        let decay_s = 1.0 - dt / self.cfg.synapse_tau_ms.max(1e-6);
-        let decay_t = 1.0 - dt / self.cfg.readout_tau_ms.max(1e-6);
+        let decay_s = (-dt / self.cfg.synapse_tau_ms.max(1e-6)).exp();
+        let decay_t = (-dt / self.cfg.readout_tau_ms.max(1e-6)).exp();
         let record = self.cfg.record_spikes;
 
         // arrivals for custom-tau synapses: x += w at the arriving step

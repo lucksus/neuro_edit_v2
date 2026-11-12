@@ -1033,9 +1033,8 @@ fn sim_settings_persist_across_sessions() {
     });
     let evs = rig.until(|m| matches!(m, ServerMsg::Console(s) if s.trim() == "0.5"));
     assert!(
-        evs.iter().any(
-            |e| matches!(&e.msg, ServerMsg::Console(s) if s.trim() == "10.0")
-        ),
+        evs.iter()
+            .any(|e| matches!(&e.msg, ServerMsg::Console(s) if s.trim() == "10.0")),
         "loaded tau must become the live config: {evs:?}"
     );
     rig.stop();

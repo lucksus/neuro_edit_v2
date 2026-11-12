@@ -91,7 +91,7 @@ impl SimLimits {
             ));
         }
         if self.max_ring_bytes > 0 {
-            let csr = net.synapse_csr(dt_ms);
+            let csr = net.synapse_csr(dt_ms)?;
             let depth = crate::state::ring_depth(&csr, dt_ms) as u64;
             let bytes = depth.saturating_mul(n as u64).saturating_mul(4);
             if bytes > self.max_ring_bytes {
@@ -131,7 +131,9 @@ pub fn cuda_available() -> bool {
 impl Sim {
     pub fn new(net: &Network, cfg: SimConfig, kind: BackendKind) -> anyhow::Result<Sim> {
         match kind {
-            BackendKind::Cpu => Ok(Sim::Cpu(Box::new(cpu::CpuSim::new(net, cfg)))),
+            BackendKind::Cpu => Ok(Sim::Cpu(Box::new(
+                cpu::CpuSim::new(net, cfg).map_err(anyhow::Error::msg)?,
+            ))),
             #[cfg(feature = "cuda")]
             BackendKind::Cuda => Ok(Sim::Cuda(Box::new(cuda::CudaSim::new(net, cfg)?))),
             #[cfg(not(feature = "cuda"))]

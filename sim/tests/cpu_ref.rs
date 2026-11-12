@@ -17,7 +17,7 @@ fn net_with(n: usize) -> Network {
 fn single_neuron_step_matches_hand_computed() {
     // Izhikevich a=0.02 b=0.2 c=-65 d=8, v=-65, u=-13, dt=0.1, I=10
     let net = net_with(1);
-    let mut sim = CpuSim::new(&net, SimConfig::default());
+    let mut sim = CpuSim::new(&net, SimConfig::default()).unwrap();
     sim.set_external(0, 10.0);
     // step 1 (v=-65 < 30 so no reset):
     // v += 0.1*(0.04*4225 -325 +140 +13 +10) = 0.1*(169-162) = +0.7 -> -64.3
@@ -40,7 +40,7 @@ fn single_neuron_step_matches_hand_computed() {
 #[test]
 fn spike_resets_next_step() {
     let net = net_with(1);
-    let mut sim = CpuSim::new(&net, SimConfig::default());
+    let mut sim = CpuSim::new(&net, SimConfig::default()).unwrap();
     sim.set_external(0, 30.0);
     // run until first spike
     let mut spike_step = None;
@@ -72,7 +72,7 @@ fn synapse_arrives_after_delay_and_decays() {
         tau_ms: 0.0,
     });
     // dt=0.1 -> delay 2 steps
-    let mut sim = CpuSim::new(&net, SimConfig::default());
+    let mut sim = CpuSim::new(&net, SimConfig::default()).unwrap();
     // fire A exactly once: strong current until first spike then off
     sim.set_external(0, 25.0);
     let mut first_spike_t = None;
@@ -91,12 +91,12 @@ fn synapse_arrives_after_delay_and_decays() {
     assert_eq!(sim.s[1], 0.0, "s too early");
     sim.run_steps(1).unwrap(); // arrival step: s += w, neuron reads it, then decays
     assert!(
-        (sim.s[1] - 30.0 * (1.0 - 0.1 / 2.0)).abs() < 1e-3,
+        (sim.s[1] - 30.0 * (-0.1f32 / 2.0).exp()).abs() < 1e-3,
         "s={}",
         sim.s[1]
     );
     sim.run_steps(1).unwrap();
-    let expected = 30.0f32 * (1.0f32 - 0.05).powi(2);
+    let expected = 30.0f32 * (-0.05f32).exp().powi(2);
     assert!(
         (sim.s[1] - expected).abs() < 1e-2,
         "s={} vs {}",
@@ -118,7 +118,7 @@ fn custom_tau_synapse_arrives_then_decays_its_own_trace() {
         delay_ms: 0.2,
         tau_ms: 20.0,
     });
-    let mut sim = CpuSim::new(&net, SimConfig::default());
+    let mut sim = CpuSim::new(&net, SimConfig::default()).unwrap();
     assert_eq!(sim.xsyn.len(), 1, "one custom synapse expected");
     sim.set_external(0, 25.0);
     let mut first_spike_t = None;
@@ -169,7 +169,7 @@ fn slow_tau_keeps_target_firing_longer() {
             delay_ms: 0.2,
             tau_ms: tau,
         });
-        CpuSim::new(&net, SimConfig::default())
+        CpuSim::new(&net, SimConfig::default()).unwrap()
     };
     let mut def = make(0.0);
     let mut slow = make(50.0);
@@ -216,7 +216,7 @@ fn default_tau_is_bit_exact() {
         seed: 7,
         ..Default::default()
     };
-    let mut sim = CpuSim::new(&net, cfg);
+    let mut sim = CpuSim::new(&net, cfg).unwrap();
     sim.run_steps(400).unwrap();
     // fingerprint: spike bits + v for the whole recorded window
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -241,7 +241,7 @@ fn no_self_connection_and_csr_order() {
     net.connect(0, 1, 5.0);
     net.connect(0, 2, 6.0);
     net.connect(2, 0, 7.0);
-    let csr = net.synapse_csr(0.1);
+    let csr = net.synapse_csr(0.1).unwrap();
     assert_eq!(csr.src_ptr, vec![0, 2, 2, 3]);
     assert_eq!(csr.tgt, vec![1, 2, 0]);
 }
@@ -250,7 +250,7 @@ fn no_self_connection_and_csr_order() {
 fn stimulus_reaches_only_its_targets() {
     let mut net = net_with(3);
     net.add_input("drive", vec![(0, 1.0), (2, 2.0)], [0.0; 3]);
-    let mut sim = CpuSim::new(&net, SimConfig::default());
+    let mut sim = CpuSim::new(&net, SimConfig::default()).unwrap();
     sim.set_input_constant(0, 5.0);
     // single step: neuron1 untouched
     let s1 = sim.s[1];
@@ -266,7 +266,7 @@ fn stimulus_reaches_only_its_targets() {
 fn played_series_is_step_locked() {
     let mut net = net_with(1);
     net.add_input("x", vec![(0, 1.0)], [0.0; 3]);
-    let mut sim = CpuSim::new(&net, SimConfig::default());
+    let mut sim = CpuSim::new(&net, SimConfig::default()).unwrap();
     // 10 units of drive for exactly one step, then silence
     sim.play_input(0, vec![10.0, 0.0, 0.0]);
     sim.run_steps(1).unwrap();
@@ -293,9 +293,9 @@ fn noise_is_deterministic_per_seed() {
         noise_rate_hz: 500.0,
         ..Default::default()
     };
-    let mut a = CpuSim::new(&net, cfg.clone());
-    let mut b = CpuSim::new(&net, cfg.clone());
-    let mut c = CpuSim::new(&net, SimConfig { seed: 2, ..cfg });
+    let mut a = CpuSim::new(&net, cfg.clone()).unwrap();
+    let mut b = CpuSim::new(&net, cfg.clone()).unwrap();
+    let mut c = CpuSim::new(&net, SimConfig { seed: 2, ..cfg }).unwrap();
     a.run_steps(100).unwrap();
     b.run_steps(100).unwrap();
     c.run_steps(100).unwrap();
@@ -307,7 +307,7 @@ fn noise_is_deterministic_per_seed() {
 fn reset_clears_state() {
     let mut net = net_with(4);
     net.connect(0, 1, 5.0);
-    let mut sim = CpuSim::new(&net, SimConfig::default());
+    let mut sim = CpuSim::new(&net, SimConfig::default()).unwrap();
     sim.set_external(0, 30.0);
     sim.run_steps(50).unwrap();
     sim.reset_state();
@@ -345,7 +345,8 @@ fn inhibitory_source_suppresses_target() {
                 record_spikes: true,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         // source fires hard, target driven into a steady rhythm on its own
         sim.set_external(0, 30.0);
         sim.set_external(1, 12.0);
@@ -370,10 +371,10 @@ fn inhibitory_source_suppresses_target() {
     );
     // and the CSR itself carries the signed weight
     let (net, _, _) = pair(true, true);
-    let csr = net.synapse_csr(0.1);
+    let csr = net.synapse_csr(0.1).unwrap();
     assert!(csr.w.iter().all(|&w| w < 0.0), "inh src must emit -|w|");
     let (net, _, _) = pair(false, true);
-    assert!(net.synapse_csr(0.1).w.iter().all(|&w| w > 0.0));
+    assert!(net.synapse_csr(0.1).unwrap().w.iter().all(|&w| w > 0.0));
 }
 
 /// M1: set_kind flips the sign at the next build and swaps in
@@ -385,10 +386,13 @@ fn set_kind_reweights_and_defaults() {
     let a = net.add_neuron([0.0; 3], NeuronKind::Excitatory);
     let b = net.add_neuron([10.0, 0.0, 0.0], NeuronKind::Excitatory);
     net.connect(a, b, 6.0);
-    assert!(net.synapse_csr(0.1).w[0] > 0.0);
+    assert!(net.synapse_csr(0.1).unwrap().w[0] > 0.0);
 
     net.set_kind(a, NeuronKind::Inhibitory);
-    assert!(net.synapse_csr(0.1).w[0] < 0.0, "kind flip must re-sign");
+    assert!(
+        net.synapse_csr(0.1).unwrap().w[0] < 0.0,
+        "kind flip must re-sign"
+    );
     assert_eq!(
         net.neuron(a).model.params(),
         [0.1, 0.2, -65.0, 2.0],
@@ -418,11 +422,62 @@ fn tutorial_liquid_has_multiple_delay_steps() {
     let mut rng = Rng::new(1);
     builders::create_3d_grid(&mut net, "liquid", 6, 6, 6, 60.0, [0.0; 3]);
     builders::create_connections(&mut net, "liquid", 0.4, 400.0, 5.0, &mut rng);
-    let csr = net.synapse_csr(0.1);
+    let csr = net.synapse_csr(0.1).unwrap();
     let steps: std::collections::BTreeSet<u16> = csr.delay_steps.iter().copied().collect();
     assert!(
         steps.len() > 1,
         "expected several distinct delay steps, got {steps:?}"
     );
     assert!(steps.iter().max() > Some(&1));
+}
+
+/// M4: a delay past the u16 ring is an error, not a silent clamp that
+/// would deliver spikes early.
+#[test]
+fn delay_over_ring_is_an_error() {
+    let mut net = Network::new();
+    let a = net.add_neuron([0.0; 3], NeuronKind::Excitatory);
+    let b = net.add_neuron([10.0, 0.0, 0.0], NeuronKind::Excitatory);
+    net.synapses.push(net_format::Synapse {
+        src: a,
+        tgt: b,
+        w: 1.0,
+        delay_ms: 7000.0, // 70000 steps at dt 0.1
+        tau_ms: 0.0,
+    });
+    let err = net.synapse_csr(0.1).unwrap_err();
+    assert!(err.contains("exceeds"), "{err}");
+    assert!(CpuSim::new(&net, SimConfig::default()).is_err());
+}
+
+/// M4: tau < dt used to produce a NEGATIVE decay factor (1 - dt/tau),
+/// which flips the current's sign each step and can oscillate to
+/// infinity. exp(-dt/tau) stays in (0,1].
+#[test]
+fn tau_below_dt_decays_safely() {
+    let mut net = Network::new();
+    let a = net.add_neuron([0.0; 3], NeuronKind::Excitatory);
+    let b = net.add_neuron([10.0, 0.0, 0.0], NeuronKind::Excitatory);
+    net.synapses.push(net_format::Synapse {
+        src: a,
+        tgt: b,
+        w: 5.0,
+        delay_ms: 1.0,
+        tau_ms: 0.05, // half of dt — Euler decay would be -1.0
+    });
+    let mut sim = CpuSim::new(
+        &net,
+        SimConfig {
+            record_spikes: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    sim.set_external(0, 30.0);
+    sim.run_ms(30.0).unwrap();
+    assert!(sim.v[1].is_finite(), "v went non-finite: {}", sim.v[1]);
+    // current must not accumulate sign-flipped energy
+    for &x in &sim.s {
+        assert!(x.is_finite() && x >= 0.0, "negative synaptic current {x}");
+    }
 }

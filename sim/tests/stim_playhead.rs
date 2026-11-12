@@ -12,7 +12,7 @@ fn playing_one_input_does_not_restart_others() {
     net.add_neuron([0.0; 3], NeuronKind::Excitatory);
     net.add_input("a", vec![(0, 1.0)], [0.0; 3]);
     net.add_input("b", vec![(0, 1.0)], [0.0; 3]);
-    let mut sim = CpuSim::new(&net, SimConfig::default());
+    let mut sim = CpuSim::new(&net, SimConfig::default()).unwrap();
     let ramp: Vec<f32> = (0..100).map(|i| i as f32).collect();
     sim.play_input(0, ramp);
     sim.run_steps(50).unwrap();
@@ -30,7 +30,7 @@ fn staggered_playheads_run_independently() {
     net.add_neuron([0.0; 3], NeuronKind::Excitatory);
     net.add_input("a", vec![(0, 1.0)], [0.0; 3]);
     net.add_input("b", vec![(0, 1.0)], [0.0; 3]);
-    let mut sim = CpuSim::new(&net, SimConfig::default());
+    let mut sim = CpuSim::new(&net, SimConfig::default()).unwrap();
     sim.play_input(0, vec![1.0; 100]);
     sim.run_steps(10).unwrap();
     sim.play_input(1, vec![7.0; 100]);
