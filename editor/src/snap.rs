@@ -150,8 +150,11 @@ pub struct Shared {
     /// `Usage` reply — (used_bytes, quota_bytes); quota 0 = unlimited.
     pub usage: Option<(u64, u64)>,
     /// Completed file op that should trigger a list refresh
-    /// (`DirCreated`/`FileDeleted`/`FileRenamed`/`UploadReady` paths).
+    /// (`DirCreated`/`FileDeleted`/`FileRenamed` paths).
     pub file_op: Option<String>,
+    /// `UploadReady` carries the path through as a typed field —
+    /// string-matching on `file_op` is how "upload ready " got parsed.
+    pub upload_ready: Option<String>,
     /// Streaming `FileChunk` replies accumulate here until `done` —
     /// consumed by the Files window's download path.
     pub download: Option<(String, Vec<u8>, bool)>,
@@ -214,6 +217,7 @@ impl Default for Shared {
             file_written: None,
             usage: None,
             file_op: None,
+            upload_ready: None,
             download: None,
             jobs: Vec::new(),
             job_progress: std::collections::BTreeMap::new(),
@@ -407,7 +411,7 @@ impl Fold {
                 sh.usage = Some((used, quota));
             }
             proto::ServerMsg::UploadReady { path } => {
-                sh.file_op = Some(format!("upload ready {path}"));
+                sh.upload_ready = Some(path.clone());
             }
             proto::ServerMsg::FileChunk { path, data, done } => {
                 let entry = sh
@@ -920,5 +924,20 @@ mod tests {
         assert_eq!(sh.download.as_ref().unwrap().1, vec![1, 2, 3]);
         let e = sh.last_error.take().expect("drop must be reported");
         assert!(e.contains("b.txt") && e.contains("a.txt"), "{e}");
+    }
+
+    #[test]
+    fn upload_ready_arrives_typed() {
+        // 3.3: the path must reach the app without string-parsing.
+        let mut fold = Fold::default();
+        let mut sh = Shared::default();
+        fold.apply(
+            &mut sh,
+            proto::ServerMsg::UploadReady {
+                path: "nets/x.ne2".into(),
+            },
+        );
+        assert_eq!(sh.upload_ready.as_deref(), Some("nets/x.ne2"));
+        assert!(sh.file_op.is_none());
     }
 }

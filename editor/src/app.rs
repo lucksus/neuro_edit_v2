@@ -1010,19 +1010,18 @@ impl EditorApp {
             if let Some((used, quota)) = sh.usage.take() {
                 self.files.usage = Some((used, quota));
             }
+            if let Some(p) = sh.upload_ready.take() {
+                // drop the lock: upload_ready sends client messages
+                drop(sh);
+                self.upload_ready(&p);
+                sh = self.ctl.shared.write().unwrap();
+            }
             if let Some(op) = sh.file_op.take() {
-                // a mkdir/delete/rename/upload landed — relist
-                if let Some(p) = op.strip_prefix("upload ready ") {
-                    // drop the lock: upload_ready sends client messages
-                    drop(sh);
-                    self.upload_ready(p);
-                    sh = self.ctl.shared.write().unwrap();
-                } else {
-                    drop(sh);
-                    self.files_refresh();
-                    self.status = op;
-                    sh = self.ctl.shared.write().unwrap();
-                }
+                // a mkdir/delete/rename landed — relist
+                drop(sh);
+                self.files_refresh();
+                self.status = op;
+                sh = self.ctl.shared.write().unwrap();
             }
             let dl = sh.download.take();
             if let Some((path, bytes, done)) = dl {
