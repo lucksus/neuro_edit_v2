@@ -43,8 +43,9 @@ impl From<NeuronKind> for net_format::NeuronKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Backend {
+    #[default]
     Cpu,
     Cuda,
 }
@@ -60,6 +61,25 @@ pub struct Config {
     pub seed: u64,
     pub int_weights: bool,
 }
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            dt_ms: net_format::DEFAULT_DT_MS,
+            synapse_tau_ms: net_format::DEFAULT_SYNAPSE_TAU_MS,
+            readout_tau_ms: net_format::DEFAULT_READOUT_TAU_MS,
+            noise_rate_hz: 0.0,
+            noise_kick_mv: 20.0,
+            seed: 1,
+            int_weights: false,
+        }
+    }
+}
+
+/// Activity-plane trace decay constant (ms) — part of the wire
+/// semantics: the worker quantizes `exp(-(t - last_spike)/τ)` and
+/// clients decay their accumulators by the same τ between frames.
+pub const PLANE_TAU_MS: f32 = 20.0;
 
 // ---------------------------------------------------------------------------
 // geometry
@@ -319,6 +339,22 @@ pub enum ClientMsg {
         neuron: u32,
         amps: f32,
     },
+    /// List a directory inside the server's data dir (or verbatim in
+    /// local mode) — powers the UI's file pickers so no `std::fs` is
+    /// needed client-side.
+    ListFiles {
+        path: String,
+    },
+    /// Read a small file (script sources, configs). Answer: `FileData`
+    /// or `Error`.
+    ReadFile {
+        path: String,
+    },
+    /// Write a small file. Answer: `FileWritten` or `Error`.
+    WriteFile {
+        path: String,
+        data: Vec<u8>,
+    },
     /// Polite disconnect.
     Bye,
 }
@@ -384,8 +420,25 @@ pub enum ServerMsg {
     },
     /// Answer to `ClientMsg::CopySubnet` — JSON for the system clipboard.
     Clipboard(String),
+    /// Answer to `ClientMsg::ListFiles`.
+    FileList {
+        path: String,
+        entries: Vec<FileEntry>,
+    },
+    /// Answer to `ClientMsg::ReadFile`.
+    FileData { path: String, data: Vec<u8> },
+    /// Answer to `ClientMsg::WriteFile`.
+    FileWritten { path: String },
     /// Refused edit / protocol error / worker failure worth a dialog.
     Error(String),
+}
+
+/// One entry in a `FileList` reply.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FileEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
 }
 
 /// A `ServerMsg` plus routing: `to: None` broadcasts to every connected
@@ -516,6 +569,16 @@ mod tests {
             ClientMsg::SetExternal {
                 neuron: 9,
                 amps: 2.0,
+            },
+            ClientMsg::ListFiles {
+                path: "sub/dir".into(),
+            },
+            ClientMsg::ReadFile {
+                path: "a.rhai".into(),
+            },
+            ClientMsg::WriteFile {
+                path: "b.rhai".into(),
+                data: b"print(1)".to_vec(),
             },
             ClientMsg::Bye,
         ] {
@@ -678,6 +741,28 @@ mod tests {
                 grids: vec![vec![0u8; 16]],
             },
             ServerMsg::Clipboard("{\"neurons\":[]}".into()),
+            ServerMsg::FileList {
+                path: ".".into(),
+                entries: vec![
+                    FileEntry {
+                        name: "a.rhai".into(),
+                        is_dir: false,
+                        size: 42,
+                    },
+                    FileEntry {
+                        name: "nets".into(),
+                        is_dir: true,
+                        size: 0,
+                    },
+                ],
+            },
+            ServerMsg::FileData {
+                path: "a.rhai".into(),
+                data: b"code".to_vec(),
+            },
+            ServerMsg::FileWritten {
+                path: "a.rhai".into(),
+            },
             ServerMsg::Error("stale edit".into()),
         ] {
             round_trip(&m);

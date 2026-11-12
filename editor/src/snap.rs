@@ -115,14 +115,21 @@ pub struct Shared {
     pub console: VecDeque<String>,
     /// Live sim configuration — the toolbar reads these so script calls
     /// (`sim.set_dt`, `sim.set_noise`) show up instead of stale values.
-    pub cfg: sim::SimConfig,
+    pub cfg: proto::Config,
     /// Live backend choice on the worker.
-    pub backend: sim::BackendKind,
+    pub backend: proto::Backend,
     /// Worker noticed the backend failed and fell back.
     pub notice: Option<String>,
     /// JSON subnet staged by a copy/cut command for the UI to put on the
     /// system clipboard.
     pub clipboard: Option<String>,
+    /// Last `ListFiles` reply (dir path + entries) — feeds the file
+    /// pickers; client-side fs is never touched.
+    pub files: Option<(String, Vec<proto::FileEntry>)>,
+    /// `ReadFile` reply, consumed once by the script panel.
+    pub file_data: Option<(String, String)>,
+    /// `WriteFile` ack for status display.
+    pub file_written: Option<String>,
 }
 
 impl Default for Shared {
@@ -137,10 +144,13 @@ impl Default for Shared {
             sim_built: false,
             busy: false,
             console: VecDeque::with_capacity(512),
-            cfg: sim::SimConfig::default(),
-            backend: sim::BackendKind::Cpu,
+            cfg: proto::Config::default(),
+            backend: proto::Backend::Cpu,
             notice: None,
             clipboard: None,
+            files: None,
+            file_data: None,
+            file_written: None,
         }
     }
 }
@@ -233,20 +243,8 @@ impl Fold {
                 sh.running = running;
                 sh.busy = busy;
                 sh.sim_built = sim_built;
-                sh.backend = match backend {
-                    proto::Backend::Cpu => sim::BackendKind::Cpu,
-                    proto::Backend::Cuda => sim::BackendKind::Cuda,
-                };
-                sh.cfg = sim::SimConfig {
-                    dt_ms: cfg.dt_ms,
-                    synapse_tau_ms: cfg.synapse_tau_ms,
-                    readout_tau_ms: cfg.readout_tau_ms,
-                    noise_rate_hz: cfg.noise_rate_hz,
-                    noise_kick_mv: cfg.noise_kick_mv,
-                    seed: cfg.seed,
-                    int_weights: cfg.int_weights,
-                    ..Default::default()
-                };
+                sh.backend = backend;
+                sh.cfg = cfg;
                 sh.notice = notice;
             }
             proto::ServerMsg::Console(s) => sh.log(s),
@@ -256,6 +254,16 @@ impl Fold {
                 sh.snap.grid_traces = self.traces_f32();
             }
             proto::ServerMsg::Clipboard(txt) => sh.clipboard = Some(txt),
+            proto::ServerMsg::FileList { path, entries } => {
+                sh.files = Some((path, entries));
+            }
+            proto::ServerMsg::FileData { path, data } => {
+                sh.file_data = Some((path, String::from_utf8_lossy(&data).into_owned()));
+            }
+            proto::ServerMsg::FileWritten { path } => {
+                sh.file_written = Some(path.clone());
+                sh.log(format!("wrote {path}"));
+            }
             proto::ServerMsg::Error(e) => sh.log(format!("! {e}")),
         }
     }
@@ -274,7 +282,7 @@ impl Fold {
         let dsteps = a.t_steps.saturating_sub(self.last_t_steps);
         self.last_time_ms = a.time_ms;
         self.last_t_steps = a.t_steps;
-        let f_plane = (-dms / crate::simctl::PLANE_TAU_MS as f64).exp();
+        let f_plane = (-dms / proto::PLANE_TAU_MS as f64).exp();
         let f_act = {
             let dt = sh.cfg.dt_ms.max(1e-6) as f64;
             let tau = sh.cfg.readout_tau_ms.max(1e-6) as f64;

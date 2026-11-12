@@ -74,6 +74,8 @@ pub struct EditorApp {
     script_text: String,
     script_name: String,
     script_file: String,
+    /// Server-side dir listing for the file pickers (from `ListFiles`).
+    file_list: Option<(String, Vec<proto::FileEntry>)>,
     /// Recently opened/saved .ne2 paths (persisted across runs).
     pub recent: VecDeque<String>,
 
@@ -82,7 +84,7 @@ pub struct EditorApp {
     /// the requested speed so "how fast can this go" is one display.
     speed_peak: f32,
     /// Backend the worker reports (request combo selected text).
-    backend: sim::BackendKind,
+    backend: proto::Backend,
     running: bool,
     sim_built: bool,
     busy: bool,
@@ -246,6 +248,7 @@ impl EditorApp {
             script_text: String::new(),
             script_name: "main".into(),
             script_file: "script.rhai".into(),
+            file_list: None,
             show_grid: true,
             show_synapses: true,
             grid_view: crate::plane::GridView::Auto,
@@ -257,7 +260,7 @@ impl EditorApp {
             plane_cfgs_last: Vec::new(),
             speed: 1.0,
             speed_peak: 0.0,
-            backend: sim::BackendKind::Cpu,
+            backend: proto::Backend::Cpu,
             running: false,
             sim_built: false,
             busy: false,
@@ -277,6 +280,35 @@ impl EditorApp {
 
     fn send(&self, c: ClientMsg) {
         self.ctl.send(c);
+    }
+
+    /// Render the latest `ListFiles` reply as clickable entries under a
+    /// file picker; returns `(path, is_dir)` of the picked entry.
+    fn file_list_ui(&self, ui: &mut egui::Ui) -> Option<(String, bool)> {
+        let (dir, entries) = self.file_list.as_ref()?;
+        let mut picked = None;
+        egui::ScrollArea::vertical()
+            .max_height(120.0)
+            .show(ui, |ui| {
+                for e in entries {
+                    let label = if e.is_dir {
+                        format!("{}/", e.name)
+                    } else {
+                        format!("{} ({} B)", e.name, e.size)
+                    };
+                    if ui.small_button(label).clicked() {
+                        picked = Some((
+                            if dir == "." {
+                                e.name.clone()
+                            } else {
+                                format!("{dir}/{}", e.name)
+                            },
+                            e.is_dir,
+                        ));
+                    }
+                }
+            });
+        picked
     }
 
     /// Apply a structured edit — versioned, delta-able, and expressible
@@ -458,6 +490,21 @@ impl EditorApp {
 
     /// Pull fresh shared state (geometry + snapshot) into the UI.
     fn sync_shared(&mut self, gpu: &mut Gpu) {
+        // One-shot consumables the worker answered for us.
+        {
+            let mut sh = self.ctl.shared.write().unwrap();
+            if let Some((path, text)) = sh.file_data.take() {
+                self.script_file = path;
+                self.script_text = text;
+                self.status = "loaded".into();
+            }
+            if let Some(p) = sh.file_written.take() {
+                self.status = format!("wrote {p}");
+            }
+            if let Some((dir, entries)) = sh.files.take() {
+                self.file_list = Some((dir, entries));
+            }
+        }
         let (geo_new, snap, running, sim_built, busy, net_gen, cfg, backend) = {
             let sh = self.ctl.shared.read().unwrap();
             (
@@ -880,8 +927,8 @@ impl EditorApp {
                 ui.label("backend");
                 egui::ComboBox::from_id_salt("backend")
                     .selected_text(match self.backend {
-                        sim::BackendKind::Cuda => "cuda",
-                        sim::BackendKind::Cpu => "cpu",
+                        proto::Backend::Cuda => "cuda",
+                        proto::Backend::Cpu => "cpu",
                     })
                     .show_ui(ui, |ui| {
                         if ui.button("cuda").clicked() {
@@ -1368,17 +1415,30 @@ impl EditorApp {
                     ui.label("file");
                     ui.text_edit_singleline(&mut self.script_file);
                     if ui.button("Open").clicked() {
-                        match std::fs::read_to_string(&self.script_file) {
-                            Ok(s) => self.script_text = s,
-                            Err(e) => self.status = format!("open: {e}"),
-                        }
+                        self.send(ClientMsg::ReadFile {
+                            path: self.script_file.clone(),
+                        });
                     }
                     if ui.button("Save").clicked() {
-                        if let Err(e) = std::fs::write(&self.script_file, &self.script_text) {
-                            self.status = format!("save: {e}");
-                        }
+                        self.send(ClientMsg::WriteFile {
+                            path: self.script_file.clone(),
+                            data: self.script_text.clone().into_bytes(),
+                        });
+                    }
+                    if ui.button("List").clicked() {
+                        self.send(ClientMsg::ListFiles {
+                            path: dir_of(&self.script_file),
+                        });
                     }
                 });
+                if let Some((p, is_dir)) = self.file_list_ui(ui) {
+                    if is_dir {
+                        self.send(ClientMsg::ListFiles { path: p });
+                    } else {
+                        self.script_file = p.clone();
+                        self.send(ClientMsg::ReadFile { path: p });
+                    }
+                }
                 // scripts stored in the loaded .ne2
                 if let Some(g) = self.geo.clone() {
                     if !g.scripts.is_empty() {
@@ -1889,11 +1949,22 @@ impl EditorApp {
                 egui::Window::new("Load network")
                     .open(&mut open)
                     .show(ctx, |ui| {
-                        ui.text_edit_singleline(path);
-                        if ui.button("Load").clicked() {
-                            let p = path.clone();
-                            self.guarded(ctx, PendingAction::Load(p));
-                            keep = false;
+                        ui.horizontal(|ui| {
+                            ui.text_edit_singleline(path);
+                            if ui.button("list").clicked() {
+                                self.send(ClientMsg::ListFiles { path: dir_of(path) });
+                            }
+                            if ui.button("Load").clicked() {
+                                let p = path.clone();
+                                self.guarded(ctx, PendingAction::Load(p));
+                                keep = false;
+                            }
+                        });
+                        if let Some((p, is_dir)) = self.file_list_ui(ui) {
+                            *path = p.clone();
+                            if is_dir {
+                                self.send(ClientMsg::ListFiles { path: p });
+                            }
                         }
                     });
             }
@@ -1984,5 +2055,14 @@ impl eframe::App for EditorApp {
 
         crate::view::viewport(self, ctx, rs);
         ctx.request_repaint();
+    }
+}
+
+/// Parent dir of a path for a `ListFiles` request ("." at the top).
+fn dir_of(p: &str) -> String {
+    match p.rsplit_once('/') {
+        Some(("", _)) => "/".into(),
+        Some((d, _)) => d.to_string(),
+        None => ".".into(),
     }
 }

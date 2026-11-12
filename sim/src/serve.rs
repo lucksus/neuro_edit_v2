@@ -32,7 +32,9 @@ const COUNTS_WINDOW: usize = 4096;
 /// Spike-trace decay constant for the plane view (sim time, ms).
 /// Deliberately slower than the readout trace's 2 ms — the plane is a
 /// visual summary, so texels should glow for a few hundred steps.
-pub const PLANE_TAU_MS: f32 = 20.0;
+/// Re-exported — the constant lives in `proto` (it's wire semantics:
+/// clients decay with the same τ).
+pub use proto::PLANE_TAU_MS;
 
 /// Minimum wall-clock interval between Activity publishes while running —
 /// the bandwidth rate-limit for remote clients.
@@ -487,6 +489,57 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                 ClientMsg::SetExternal { neuron, amps } => {
                     if let Ok(h) = env.sim_handle() {
                         h.borrow_mut().set_external(neuron as usize, amps);
+                    }
+                }
+                // UI file pickers/read/write — confined to --data-dir by
+                // `resolve` (or verbatim in local mode) so the UI never
+                // needs its own std::fs.
+                ClientMsg::ListFiles { path } => {
+                    let r = resolve(&env, &path).and_then(|p| {
+                        let mut entries: Vec<proto::FileEntry> = std::fs::read_dir(&p)
+                            .map_err(|e| e.to_string())?
+                            .filter_map(|e| e.ok())
+                            .filter_map(|e| {
+                                let md = e.metadata().ok()?;
+                                Some(proto::FileEntry {
+                                    name: e.file_name().to_string_lossy().into_owned(),
+                                    is_dir: md.is_dir(),
+                                    size: md.len(),
+                                })
+                            })
+                            .collect();
+                        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+                        Ok(entries)
+                    });
+                    match r {
+                        Ok(entries) => {
+                            emit_to(&emit, client, ServerMsg::FileList { path, entries })
+                        }
+                        Err(e) => {
+                            emit_to(&emit, client, ServerMsg::Error(format!("ls {path}: {e}")))
+                        }
+                    }
+                }
+                ClientMsg::ReadFile { path } => {
+                    match resolve(&env, &path)
+                        .and_then(|p| std::fs::read(&p).map_err(|e| e.to_string()))
+                    {
+                        Ok(data) => emit_to(&emit, client, ServerMsg::FileData { path, data }),
+                        Err(e) => {
+                            emit_to(&emit, client, ServerMsg::Error(format!("read {path}: {e}")))
+                        }
+                    }
+                }
+                ClientMsg::WriteFile { path, data } => {
+                    match resolve(&env, &path)
+                        .and_then(|p| std::fs::write(&p, &data).map_err(|e| e.to_string()))
+                    {
+                        Ok(()) => emit_to(&emit, client, ServerMsg::FileWritten { path }),
+                        Err(e) => emit_to(
+                            &emit,
+                            client,
+                            ServerMsg::Error(format!("write {path}: {e}")),
+                        ),
                     }
                 }
             }
