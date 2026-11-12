@@ -1,17 +1,19 @@
 # Feature documentation
 
-Two binaries share one `Network` model (`net-format`):
+Three binaries share one `Network` model (`net-format`):
 
 | binary | role |
 |---|---|
 | `sim` | headless simulator: run scripts, eval snippets, benchmarks |
-| `editor` | interactive 3D editor/simulator (egui + wgpu) |
+| `editor` | interactive 3D editor/simulator (egui + wgpu); also builds for the browser |
+| `server` | headless wire server: one shared sim over WebSocket, `editor --connect` and browser clients |
 
 The editor does not launch `sim` as a subprocess — the simulator is compiled
 in via the `sim` crate and runs on a worker thread (see *Architecture* below).
-A browser UI could connect the same way by exposing the worker's `Cmd` channel
-over a websocket and shipping the published snapshots; nothing in the design
-requires the wgpu frontend.
+Both local and remote transports speak the same bincode protocol
+(`proto::ClientMsg`/`ServerMsg`): `editor --connect host:port` attaches to a
+`server` over WebSocket, and the wasm build of the editor attaches from a
+browser tab (see *Server and browser* below).
 
 ## `sim` CLI
 
@@ -31,6 +33,35 @@ sim --int-weights …        # CUDA only: fixed-point accumulation → bitwise
 - `--bench N` builds a random N-neuron net (~`bench-k` out-degree each) and
   reports steps/s.
 - `--noise` adds Poisson kicks; `--seed` seeds everything.
+
+## Server and browser
+
+```sh
+server [--bind 127.0.0.1:9337] [--data-dir DIR] [--net f.ne2]
+       [--cpu|--cuda] [--seed N] [--script x.rhai] [--web DIR]
+editor --connect host:port          # remote GUI on a running server
+```
+
+- `server` runs one shared worker headless and speaks the wire protocol over
+  WebSocket (bincode frames). Localhost by default; `--bind 0.0.0.0` requires
+  `--data-dir`.
+- Every client sees the same run: edits are versioned and serialized by the
+  worker (`NetEdit` + `base` version; stale edits are refused and the client
+  resyncs). A client leaving does not affect the others.
+- With `--data-dir`, all file paths the worker touches — `net.save`/`net.load`,
+  script file functions, Rhai `import`, and the client file requests below —
+  must resolve inside it: relative to the directory, no `..`, no absolute
+  paths, and no symlink inside it may resolve outside.
+- Client file requests (`ListFiles`/`ReadFile`/`WriteFile`) list, read and
+  write under `--data-dir`; the UI uses them for script open/save and the
+  Load dialog, so a remote or browser client needs no filesystem of its own.
+- `server --web DIR` serves static files (the browser bundle) on the same
+  port: plain HTTP GETs get files, `Upgrade: websocket` requests get the wire.
+  `editor/web/build.sh` builds `editor/dist-web` with cargo + wasm-bindgen.
+- The browser editor is the same app compiled to wasm32: browser WebSocket
+  for transport, WebGPU required (storage buffers — a clear message is shown
+  when no adapter exists). Threads, `std::fs` and CUDA/local transport are
+  compiled out of that build.
 
 ## `editor` CLI
 

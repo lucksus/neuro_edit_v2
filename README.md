@@ -94,6 +94,30 @@ editor --screenshot out.png --net examples/lsm.ne2 --after-ms 500
 editor --screenshot big.png --net big.ne2 --no-synapses --width 1920 --height 1080
 ```
 
+## Server and browser
+
+`server` runs the sim headless and serves the wire protocol over WebSocket;
+any number of editors attach to the same run:
+
+```sh
+server --bind 127.0.0.1:3090 --data-dir /path/to/data   # headless sim + WS
+editor --connect 127.0.0.1:3090                       # remote GUI
+```
+
+`--data-dir` sandboxes every path scripts and clients touch (`net.save`/
+`net.load`, file reads/writes, Rhai `import`): absolute paths, `..`, and
+symlinks resolving outside are refused. Scripts run server-side.
+
+The browser editor is the same egui/wgpu UI compiled to wasm32 and served by
+`server --web` — one port carries the page, the wasm bundle and the WebSocket
+the page connects back to. WebGPU required (the 3D view uses storage buffers).
+
+```sh
+editor/web/build.sh                              # cargo + wasm-bindgen → editor/dist-web
+server --bind 127.0.0.1:3090 --data-dir /path/to/data --web editor/dist-web
+# open http://127.0.0.1:3090/
+```
+
 ## Architecture notes
 
 - One `Network` (flat arrays) is shared by the CPU sim, CUDA sim and the
