@@ -47,37 +47,57 @@ cargo run -p sim --release -- --script examples/lsm_hidden.rhai --cuda
 drive a 512-neuron liquid (8x8x8 grid, distance-dependent connections). During
 labelled "event" windows each of 4 source *pairs* flips a shared coin
 (strength 0.8); per-stream marginals stay iid Bernoulli(0.5) — signal exists
-only in pairwise correlation. 200 train / 120 held-out windows, 50 ms each.
-Features = per-neuron spike rates over the window. The script loops over 12
-seeds, rebuilding the liquid each seed (`net.clear()`).
+only in pairwise correlation. 200 train / 120 validation / 120 test windows,
+50 ms each, from three independent generator streams. Features = per-neuron
+spike rates over the window. The script loops over 12 seeds, rebuilding the
+liquid each seed (`net.clear()`).
 
-Measured (12 seeds, CUDA; ~45 s):
+Measured (12 seeds, CPU; ~15 min):
 
 ```
 main          delta_auc = 0.880 ± 0.030   ridge_auc = 0.874 ± 0.032
+main (val)                              ridge_auc = 0.860 ± 0.028
 signal off    delta_auc = 0.484 ± 0.036   ridge_auc = 0.484 ± 0.035
-shuffled      delta_auc = 0.500 ± 0.001   ridge_auc = 0.500 ± 0.000
 raw baseline  delta_auc = 0.480 ± 0.051   ridge_auc = 0.482 ± 0.046
-shuffled single-draw ridge AUC: mean 0.500, sd 0.185
-sweep (seed 11): s=0.0→0.45  0.5→0.79  0.8→0.89  1.0→0.94 (ridge auc)
+cooc (28-d)   delta_auc = 1.000 ± 0.000   ridge_auc = 1.000 ± 0.000
+permutation null (6000 draws): mean 0.502, sd 0.189
+pooled p = 0.001   per-seed p: [0.001, 0.005], mean 0.003
+sweep (seed 11): s=0.0 liq 0.445 / cooc 0.533   s=0.5 liq 0.793 / cooc 1.000
+                 s=0.8 liq 0.894 / cooc 1.000   s=1.0 liq 0.937 / cooc 1.000
 ```
 
-**The shuffled-label bug (reviewer's finding, now fixed).** The old control
-retrained the readouts on ONE label permutation and reported that AUC. On
-this pipeline that single draw is *not* a point estimate at 0.5 — it's a
-draw from a wide null: 200 windows in 513 features are interpolated, so the
-weight vector fitted to random labels is large and its projection onto the
-true class-separation direction is randomly ±, scaling with the signal
-strength. Measured: single-draw sd ≈ 0.19, 28% of draws < 0.4 — seeds 7/42
-drew 0.28/0.32, which looked "~4 SE below chance" only against the wrong
+**What the numbers say.** The liquid detects the hidden correlation, and the
+effect is real: no permutation draw beat the observed AUC on 7 of 12 seeds
+(p=0.001), worst case p=0.005, pooled p=0.001 over 6000 draws — while the
+signal-off and raw-input controls sit at chance. The validation split
+(0.860 vs test 0.874) confirms the test number is not overfit. **But the
+28-feature pairwise-coincidence baseline solves this task outright (AUC
+1.000 at every nonzero strength), clearly beating the liquid's 0.79–0.94.**
+That's the honest result: the coincidence features are a task-matched
+decoder — they count equal bits per source pair, which is exactly where
+the signal lives. The liquid is the general-purpose machine (it would also
+pick up structure linear coincidence features cannot see), but on this
+synthetic task a trivial statistic wins. The experiment demonstrates that
+the liquid genuinely detects hidden correlations, not that it is the best
+decoder for this task.
+
+**The shuffled-label bug (reviewer's finding, history).** The original
+control retrained the readouts on ONE label permutation and reported that
+AUC. On this pipeline that single draw is *not* a point estimate at 0.5 —
+it's a draw from a wide null: 200 windows in 513 features are interpolated,
+so the weight vector fitted to random labels is large and its projection
+onto the true class-separation direction is randomly ±, scaling with the
+signal strength. Measured: single-draw sd ≈ 0.19 — seeds 7/42 drew
+0.28/0.32, which looked "~4 SE below chance" only against the wrong
 (within-sample) SE. There is no leak and no metric bug: over the full
 permutation group E[AUC] = 0.5 exactly, by complement symmetry
-(w(1−y) = −w(y) for ridge ⇒ scores negate ⇒ AUC → 1−AUC). The fix: the
-control now averages over NPERM=20 permutation *pairs* (each permutation
-and its label complement — antithetic pairs, so the per-seed null lands
-essentially exactly on 0.5) and the script also prints the single-draw sd
-so the spread stays visible. Regression test: `lsm_null.rs` reproduces the
-tail draw (0.344) and the ~0.5 mean at reduced scale.
+(w(1−y) = −w(y) for ridge ⇒ scores negate ⇒ AUC → 1−AUC). An intermediate
+fix averaged over 20 permutation/complement pairs to pin the mean at 0.5;
+the current version is a real permutation test — NPERM=500 independent
+label shuffles per seed, ridge refit per draw, and the fraction of draws
+reaching the observed AUC reported as the p-value together with the null
+mean/sd. Regression test: `lsm_null.rs` reproduces the tail draw (0.344)
+and the ~0.5 null mean at reduced scale.
 
 Fully deterministic: identical numbers on CPU and CUDA runs (streams come
 from `rng_stream`, a seeded counter-based Rust RNG, not the sim's noise

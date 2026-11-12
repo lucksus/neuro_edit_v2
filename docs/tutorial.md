@@ -9,23 +9,28 @@ sim --script examples/lsm_hidden.rhai          # CUDA
 sim --script examples/lsm_hidden.rhai --cpu    # same on the CPU backend
 ```
 
-Takes a few minutes (12 seeds × (200 + 120) windows × 50 ms of liquid time
-plus 40 shuffled fits per seed) and prints a per-seed line, then a
-`mean ± sd` summary:
+Takes ~10 min (12 seeds × (200 + 120 + 120) liquid windows × 50 ms of sim
+time, plus 500 permutation fits per seed) and prints a per-seed line, then
+a `mean ± sd` summary:
 
 ```
 seed 1: liquid 512 neurons, ~79k synapses
-seed 1  main auc=0.883  off=0.512  shuf=0.500 (1-draw sd=0.19)  raw=0.493
+seed 1  main auc=0.877 (val=0.85)  p=0.003  off=0.527  raw=0.501  cooc=1.0
+        null=0.515±0.19
 …
 === mean ± sd over 12 seeds ===
-main         delta_auc = 0.872 ± 0.03   ridge_auc = 0.88 ± 0.03
-signal off   delta_auc = 0.484 ± 0.036  ridge_auc = …
-shuffled     delta_auc = …   ridge_auc = 0.500 ± 0.001
-raw baseline … ≈ 0.48 ± 0.05
+main         delta_auc = …   ridge_auc ≈ 0.88 ± 0.03
+main (val)   ridge_auc ≈ 0.86
+signal off   … ≈ 0.5
+raw baseline … ≈ 0.5
+cooc (28-d)  … = 1.000
+permutation null: mean ≈ 0.5 sd ≈ 0.19  pooled p < 0.001
 ```
 
-Exact numbers are in `NOTES-for-data.md`; the point of the experiment is the
-gap between `main` and the three controls at ≈ 0.5.
+Exact numbers are in `NOTES-for-data.md`. Two honest takeaways: the main
+result is real (permutation p ≈ 0.001–0.003 per seed), **and** the trivial
+28-feature coincidence baseline solves this synthetic task perfectly —
+the liquid's value is generality, not this particular task.
 
 ## 1. The problem it solves
 
@@ -95,39 +100,57 @@ The feature vector is the liquid's per-neuron spike rate over the window —
 513-ish numbers (`n_liq` + nothing extra). `sim.reset()` between windows is
 essential: without it, one window's leftover activity leaks into the next.
 
-### `gen_set(seed, strength, raw)` — train/test sets
+### `gen_set(seed, strength, mode)` — train/val/test sets
 
-Uses two `rng_stream`s (`seed+11` for train, `seed+77` for test — disjoint
-draws so test windows aren't train windows). Labels alternate `it % 2`.
-`raw=true` swaps liquid features for `counts_of(m)` (per-source bit counts).
+Uses three `rng_stream`s (`seed+11` train, `seed+55` validation, `seed+77`
+test — disjoint draws so no window is shared across splits). Labels
+alternate `it % 2`. `mode` picks the feature extractor: `MODE_LIQ` (liquid
+rates), `MODE_RAW` (per-source counts), `MODE_COOC` (28 pairwise
+coincidences). The validation split is never trained or tuned on — it only
+cross-checks the test number.
 
-### `eval_fit(X, n_feat, ytr, Xte, labs)` — the readouts
+### `eval_fit(X, n_feat, ytr, Xte, labs, Xval, labsval)` — the readouts
 
-Two readouts fit on the same 200 windows and score 120 held-out windows:
+Two readouts fit on the same 200 windows and score the held-out splits:
 
 - **delta**: `delta_new(n)` + `init_random` + `set_proper(1)` (the
   "proper" corrected delta rule), 10 epochs at `LR=0.5`.
 - **ridge**: closed-form `fit_ridge(X, 200, n_feat, y, λ=1.0)`.
 
-Both are scored by `accuracy` (0.5 threshold) and `auc` (threshold-free).
+Both are scored by `accuracy` (0.5 threshold) and `auc` (threshold-free)
+on the test split; the ridge additionally reports a validation AUC.
 
-### The three controls
+### The controls and the permutation test
 
 ```rhai
-signal off : gen_set(seed, 0.0,      false)  — no planted correlation
-shuffled   : retrain on NPERM=20 permutation *pairs* of the labels
-raw        : gen_set(seed, STRENGTH, true )  — per-source counts, no liquid
+signal off : gen_set(seed, 0.0,      MODE_LIQ)  — no planted correlation
+raw        : gen_set(seed, STRENGTH, MODE_RAW)  — per-source counts, no liquid
+cooc       : gen_set(seed, STRENGTH, MODE_COOC) — 28 pairwise-coincidence
+                                                features, no liquid
+permutation: NPERM=500 shuffles of the main labels; the ridge is refit per
+             draw and the fraction of draws reaching the observed AUC is
+             the p-value
 ```
 
-**Why permutation pairs?** A single permutation is not a valid null here:
-with 200 training windows in ~500 dimensions the fitted noise direction has
-a large random projection onto the true class axis, so one draw can sit
-anywhere in [0,1] (measured sd ≈ 0.19; seeds 7 and 42 once reported ~0.3 —
-that was the reviewer complaint). For every permutation σ the script also
-evaluates its label complement, and AUC(complement) = 1 − AUC(σ) exactly,
-so the pair average is 0.5 by construction and the mean over 20 pairs is a
-real null. The script also reports the pooled single-draw sd so you can see
-how wide the un-paired null was.
+**Why a permutation test, not one shuffle?** A single permutation is not a
+valid null here: with 200 training windows in ~500 dimensions the fitted
+noise direction has a large random projection onto the true class axis, so
+one draw can sit anywhere in [0,1] (measured sd ≈ 0.19; seeds 7 and 42 once
+reported ~0.3 — that was the reviewer complaint). 500 draws per seed give a
+real null distribution — mean ≈ 0.5, sd ≈ 0.19 — and a p-value with ~0.002
+resolution. (An earlier version paired each permutation with its complement
+to force the mean to exactly 0.5 by symmetry; the honest version just uses
+more draws.)
+
+**About `cooc` beating the liquid:** the coincidence features count equal
+bits per source pair — exactly the statistic the signal is planted in. On
+this synthetic task it reaches AUC 1.0 at strengths where the liquid gets
+0.8–0.9. That's expected and reported, not hidden: the liquid is the
+*general-purpose* machine (it would also pick up nonlinear mixtures the
+linear coincidence features can't see); the coincidence baseline is a
+task-matched decoder. The experiment shows the liquid genuinely detects
+the hidden signal (p ~ 0.001–0.003), not that it's the best possible
+decoder for this task.
 
 ## 3. Reproduce it interactively in the editor
 
@@ -161,5 +184,5 @@ or build it by hand:
 - `TRAIN_N`/`TEST_N`: more windows → tighter, slower.
 - `SEEDS`: the script is the multi-seed loop; keep ≥ 10 seeds or the sd is
   meaningless.
-- `NPERM`: 20 pairs is cheap insurance; drop it and the shuffled control
-  widens (the pooled single-draw sd line quantifies exactly how much).
+- `NPERM`: 500 shuffles gives p resolution ~0.002 per seed; it only refits
+  the ridge on cached features, so it's cheap.

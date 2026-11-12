@@ -59,10 +59,14 @@ turns those coincidences into separable spike-count features.
 sim --script examples/lsm_hidden.rhai
 ```
 
-prints accuracy/AUC for the delta-rule and ridge readouts, the three controls
-(signal off, shuffled labels, raw-stream baseline ≈ chance), and a
-signal-strength sweep showing the detection threshold. Seeded and
-reproducible; results in `NOTES-for-data.md`.
+prints accuracy/AUC for the delta-rule and ridge readouts over a
+train/validation/test split, plus three controls (signal off, raw-stream
+counts, and a 28-feature pairwise-coincidence baseline), a real permutation
+test (500 label shuffles per seed → p-value + null mean/sd), and a
+signal-strength sweep. The coincidence baseline solves this task at
+AUC 1.0 — plainly better than the liquid's ~0.88 — while the permutation
+test shows the liquid's detection is real (p ≈ 0.001–0.003 per seed).
+Seeded and reproducible; results in `NOTES-for-data.md`.
 
 ## Editor
 

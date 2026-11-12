@@ -133,4 +133,4 @@ Checked against the C++ source at `~/code/neuro_edit-ref` (commit 8c4e7ce), 2026
 | 10.3 | Headless screenshot mode (`--screenshot`) | [x] verified (docs/screenshots/) |
 | 10.4 | Seeded, reproducible runs (counter-based RNG) | [x] |
 | 10.5 | Ridge/closed-form readout baseline | [x] |
-| 10.6 | Planted-hidden-signal LSM benchmark + controls | [x] acc/auc + controls + sweep in NOTES |
+| 10.6 | Planted-hidden-signal LSM benchmark + controls | [x] acc/auc + permutation test + cooc baseline + val split + sweep in NOTES |
