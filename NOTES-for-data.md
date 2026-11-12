@@ -956,3 +956,60 @@ Chrome: `server --web editor/dist-web` + no-GPU browser renders the
 numbered-steps page (`review/stage9_webgpu_help.png`), not a blank
 canvas. README's browser section now documents the check and the
 node-test command.
+
+## Stage 10 — new artwork
+
+Direction B ("spike": one neuron + its action potential, cyan line,
+amber tip) from Data's artwork set, put into the app. Masters (SVG)
+live in `editor/assets/src/`; tool-icon names → labels in
+`editor/assets/src/tool-icons/icons.tsv`.
+
+- **App icon + About** (`25dbe99`): `editor/assets/icon_256.png` (window
+  icon, `main.rs` unchanged) and `icon_32.png` swapped. `about.png` is
+  now 740×246 and drawn at 370×123, so it stays sharp on 2x screens.
+- **Web** (`4f05545`): `favicon.ico` (16/32/48), `favicon.svg`,
+  `apple-touch-icon.png`, `icon-192/512.png`, `site.webmanifest` +
+  `<link>` tags; `#loading` shows `loading-logo.svg` (slow pulse, off
+  with reduced motion) and `webgpu-help.mjs` writes its line into a
+  child `#loading-status` (`setLoadingStatus`), so the logo stays.
+  `build.sh` copies the 7 files. Server (`4d7fa51`): `.webmanifest` →
+  `application/manifest+json` (was octet-stream).
+- **Tool icons** (`4ddd0b5`): `icons.rs` loads 39 white 48 px PNGs
+  (`editor/assets/icons/`); old toolbar PNGs removed. Buttons use
+  `image_tint_follows_text_color`, so icons take the text colour,
+  hover/selected/disabled included (dark on the browser's light theme,
+  light on native dark). Toolbar: Run/Stop, 10ms, 100ms, Reset keep
+  their text; speed, backend, dt, noise get an icon with hover text
+  instead of the "backend"/"dt"/"noise Hz" labels (the fields show
+  " ms"/" Hz"); modes, planes and plot tabs are icon + text; synapses,
+  grid and the four panels are icon + text toggle buttons (were
+  checkboxes); Frame is icon-only (hover: "Frame network (F)"). File
+  and Help menus have icons; Edit/Insert/Group menus stay text.
+- **Mipmaps:** egui-wgpu 0.32.3 (Cargo.lock) makes every managed
+  texture with `mip_level_count: 1` (`renderer.rs:629`) and never reads
+  `TextureOptions::mipmap_mode` (`with_mipmap_mode` exists in epaint
+  0.32.3 but does nothing on wgpu). So icons are box-filtered on load
+  (`image::imageops::thumbnail`) to 16 px × `pixels_per_point` (16 at
+  1x, 32 at 2x, max 48) and reloaded when the scale changes
+  (`Icons::ensure`).
+
+Tests: `icons::tests::tool_icons_are_scaled_to_16_points` (sizes at
+ppp 1/1.5/2/3/4 + banner 740×246; red with resizing off);
+`webgpu-help.test.mjs` +3 (status goes to `#loading-status` and the
+`#loading` text is untouched — red when it writes `#loading`; fallback
+without the span; `index.html` has the logo, span and favicon link);
+`ws_web_serves_http_and_ws_on_one_port` checks the manifest MIME (red
+without the fix). `cargo fmt` clean; `cargo test --workspace` 122
+passed in 30 targets (cuda); `cargo test -p sim --no-default-features`
+53 in 15; `node --test` 12/12; clippy warnings unchanged.
+
+Verified live: native editor on Xvfb at 1x and at 2x
+(`WINIT_X11_SCALE_FACTOR=2`); `editor/web/build.sh` + `server --bind
+127.0.0.1:3197 --web editor/dist-web` in headed Chromium (SwiftShader
+WebGPU): favicon in the tab, loading logo + "loading neuro_edit v2…
+WebGPU adapter: google swiftshader", editor boots. Screenshots:
+`review/stage10_*.png`.
+
+Open: the x-y plane icon is a plain square and can read as an
+unchecked checkbox. At 1x the toolbar is ~1160 px wide (window default
+1440). Direction A or C would need the set redrawn.
