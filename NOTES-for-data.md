@@ -1486,3 +1486,94 @@ rewritten. All other manual pages checked — no other colour claims.
 - `stage13b_manual_1440` / `stage13b_manual_800` — Manual at 1440×900
   and 800×700: page list left, wrapped body right, new colour legend
   visible, ASCII arrows in the empty-plot hint.
+
+## Stage 14 — input lag: measure first, then fix
+
+Complaint: dragging egui windows and pulling a selection frame lags the
+cursor, on both browser and desktop.
+
+### Method
+
+`update()` timestamps instrumented identically on both builds (scratch
+worktree at Stage-13B HEAD vs the fixed tree; patch reverted after):
+wasm pushed `wall_ms` to `window.__ft`, native printed `FT` lines to
+stderr. Browser driven via playwright on own ports (:3515 before,
+:3516 after); native under Xvfb :99 + xdotool, `--connect` to :3515
+(lsm.ne2, 512 neurons, CUDA server).
+
+### Why it lagged
+
+Every `update()` unconditionally rendered the whole scene offscreen AND
+queued a full-viewport pick pass whenever the cursor hovered the canvas
+— submits pile into the wgpu present queue (default depth 2), so the
+displayed frame carries input that's 1–2 frames old. It's present-queue
+latency, not CPU frame time: on this hardware update() never exceeded
+~1 ms CPU per frame unthrottled, and vsync-capped it holds 16.7 ms.
+
+### Browser (headful Chromium under Xvfb, vsync 60 Hz)
+
+`update()` calls per gesture window — p50 interval:
+
+| gesture                | before            | after                    |
+|------------------------|-------------------|--------------------------|
+| hover                  | 150 @ 16.7 ms     | 150 @ 16.6 ms            |
+| egui window drag       | 121 @ 16.7 ms     | 121 @ 16.6 ms            |
+| selection-frame drag   | 120 @ 16.7 ms     | 120 @ 16.7 ms            |
+| idle, sim paused       | 178 @ 16.7 ms     | **1 frame** (sleeps)     |
+| `sim.run(4000)` eval   | 179 @ 16.8 ms     | **9 @ ~467 ms** (snap cadence) |
+
+Unthrottled run (vsync off) confirmed update() cadence is bounded by
+event/repaint rate, ~0.8 ms main-thread cost — GPU-side queue depth is
+the lag lever, addressed by the latency cap below.
+
+### Native (Xvfb, no vsync — interval = app cadence)
+
+| phase                  | before                  | after                        |
+|------------------------|-------------------------|------------------------------|
+| idle, sim paused       | 4543 upd @ 0.84 ms spin | **0 frames**                 |
+| hover                  | 4256 @ 0.86 ms          | 475 @ 3.67 ms (input-driven) |
+| egui window drag       | 1804 @ 0.85 ms          | 1214 @ 0.85 ms               |
+| selection-frame drag   | 1766 @ 0.86 ms          | 1703 @ 0.83 ms               |
+| idle after drag        | 4420 @ 0.87 ms          | **2 frames**                 |
+| during `sim.run` eval  | ~2.35 ms continuous     | ~2.31 ms continuous          |
+
+Drags still repaint per input event — interaction cadence unchanged.
+The win is ~4600 wasted renders/4 s at idle eliminated, and hover no
+longer queues a full-viewport pick every frame.
+
+### Fixes
+
+- **B. SceneKey dirty-check** (`gpu.rs`, `view.rs`): fingerprint of
+  size/camera/preview/hover/selection/activity/polylines/particles/
+  planes/draw-params/geo-version; `render_offscreen` skips when
+  unchanged, blit keeps showing `scene_tex`. `set_scene` invalidates.
+  Sim activity changes every snap → still renders while running.
+  Unit test: `scene_dirty_only_on_real_change` verifies every field
+  invalidates and identical keys skip.
+- **C. Pick scissor**: `request_pick` sets `set_scissor_rect(px,py,1,1)`
+  — raster work confined to the target pixel.
+- **D. Frame latency**: `desired_maximum_frame_latency: Some(1)` in
+  native + web wgpu options — submit blocks until at most 1 frame is
+  queued ahead, so a drag can't sit behind 2 presents.
+- **E. On-demand repaint**: unconditional `ctx.request_repaint()`
+  replaced by an animating check (running/busy/server traffic/camera
+  tween/drags/particles/picks/uploads). Server traffic signals via
+  `Shared.dirty_seq` (bumped per ServerMsg → `net_touched`). Hover
+  picks now queue only when the target pixel/camera/geometry changed
+  (`last_hover_pick`) — the old every-frame pick would otherwise hold
+  `pick_in_flight` and keep the app awake forever under a still cursor.
+- **A. Frame-stats readout**: View ▸ "frame stats" toggles a
+  `frame ms / fps` overlay (viewport top-right; EMA, idle gaps >200 ms
+  skipped).
+
+### Notes
+
+- Browser p50 is vsync-pinned at 16.7 ms in both builds — the win is
+  idle→sleep, 20× fewer frames while streaming, scissored picks, and
+  the queue-depth cap (end-to-end latency, not cadence).
+- Native Xvfb numbers are unthrottled cadence, not GPU time; on a real
+  desktop with vsync the before-build holds 60 fps but keeps the
+  present queue saturated, which is the felt lag.
+- `busy` is a local-worker concept; remote-server evals stream via
+  `dirty_seq` → repaint per message (~snap cadence), which is also
+  what keeps status/plots current.
