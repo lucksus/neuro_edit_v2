@@ -176,8 +176,13 @@ pub struct MoveDrag {
     /// plane passes through it (not the camera target) so the object
     /// stays under the cursor for the whole drag.
     pub anchor: glam::Vec3,
-    /// Where the drag-start ray hit the work plane.
+    /// Constraint-space zero point: `delta = hit - plane_pt`. Re-anchored
+    /// on plane/axis switches so the object doesn't jump.
     pub plane_pt: glam::Vec3,
+    /// The live constraint (work plane / Shift vertical / axis lock).
+    pub plane: crate::view::DragPlane,
+    /// X/Y/Z toggle state: `Some(0|1|2)` = locked to that axis.
+    pub axis: Option<u8>,
     pub start_pos: Vec<glam::Vec3>,
     pub ids: Vec<u32>,
 }
@@ -2219,6 +2224,11 @@ impl EditorApp {
                     row(ui, "drag on empty", "box select");
                     row(ui, "right-click", "context menu");
                     ui.end_row();
+                    ui.strong("while moving");
+                    ui.end_row();
+                    row(ui, "Shift (hold)", "vertical camera plane");
+                    row(ui, "X / Y / Z", "axis lock (repeat releases)");
+                    ui.end_row();
                     ui.strong("edit");
                     ui.end_row();
                     row(ui, "Ctrl+C / X / V", "copy / cut / paste");
@@ -2822,11 +2832,7 @@ impl EditorApp {
     /// Turn follow off when the user pans/zooms away from the imposed
     /// window (bounds no longer match what we set), and back on when
     /// they double-click — egui_plot's own "reset" gesture.
-    fn plot_follow(
-        &mut self,
-        pr: &egui_plot::PlotResponse<()>,
-        imposed: Option<(f64, f64)>,
-    ) {
+    fn plot_follow(&mut self, pr: &egui_plot::PlotResponse<()>, imposed: Option<(f64, f64)>) {
         if pr.response.double_clicked() {
             self.plot_win.follow = true;
             return;

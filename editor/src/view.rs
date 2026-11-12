@@ -50,12 +50,92 @@ pub fn plane_hit(plane: Plane, anchor: Vec3, ro: Vec3, rd: Vec3) -> Option<Vec3>
         Plane::XY => (Vec3::Z, anchor.z),
         Plane::YZ => (Vec3::X, anchor.x),
     };
+    plane_hit_n(nrm, nrm * off, ro, rd)
+}
+
+/// Ray ↔ plane (normal, a point on it).
+pub fn plane_hit_n(nrm: Vec3, pt: Vec3, ro: Vec3, rd: Vec3) -> Option<Vec3> {
     let d = rd.dot(nrm);
     if d.abs() < 1e-9 {
         return None;
     }
-    let t = (off - ro.dot(nrm)) / d;
+    let t = (pt - ro).dot(nrm) / d;
     (t > 0.0).then(|| ro + rd * t)
+}
+
+/// What a move drag is constrained to. Live in `MoveDrag`, resolved from
+/// the work plane + modifiers every frame so Shift/X/Y/Z switch it
+/// mid-drag without a jump (see `reanchor`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum DragPlane {
+    /// The toolbar work plane (XZ/XY/YZ) through the anchor.
+    Work(Plane),
+    /// Shift: the vertical plane through the anchor that faces the
+    /// camera — normal is the camera forward's horizontal part.
+    CamVertical(Vec3),
+    /// X/Y/Z axis lock: the drag rides the axis line through the anchor.
+    Axis(u8),
+}
+
+/// The world axes, indexed by `DragPlane::Axis`.
+pub const AXES: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
+
+/// Pick the constraint for this frame: an axis lock beats Shift, which
+/// beats the work plane. A straight-down camera can't form a vertical
+/// plane, so Shift falls back to the work plane.
+pub fn drag_plane(work: Plane, shift: bool, axis: Option<u8>, cam_fwd: Vec3) -> DragPlane {
+    if let Some(k) = axis {
+        return DragPlane::Axis(k.min(2));
+    }
+    if shift {
+        let h = Vec3::new(cam_fwd.x, 0.0, cam_fwd.z);
+        if h.length_squared() > 1e-6 {
+            return DragPlane::CamVertical(h.normalize());
+        }
+    }
+    DragPlane::Work(work)
+}
+
+/// Closest point on the line `anchor + s·axis` to the cursor ray — the
+/// hit "on" an axis lock.
+pub fn axis_hit(anchor: Vec3, axis: Vec3, ro: Vec3, rd: Vec3) -> Option<Vec3> {
+    let w0 = ro - anchor;
+    let b = rd.dot(axis);
+    let denom = 1.0 - b * b; // rd,axis unit ⇒ a=c=1
+    if denom.abs() < 1e-6 {
+        return None; // ray parallel to the axis
+    }
+    let s = (axis.dot(w0) - b * rd.dot(w0)) / denom;
+    Some(anchor + axis * s)
+}
+
+/// Cursor-ray hit on the drag constraint through `anchor`.
+pub fn drag_hit(dp: DragPlane, anchor: Vec3, ro: Vec3, rd: Vec3) -> Option<Vec3> {
+    match dp {
+        DragPlane::Work(p) => plane_hit(p, anchor, ro, rd),
+        DragPlane::CamVertical(n) => plane_hit_n(n, anchor, ro, rd),
+        DragPlane::Axis(k) => axis_hit(anchor, AXES[k.min(2) as usize], ro, rd),
+    }
+}
+
+/// What a constraint switch does to the in-flight delta: a plane keeps
+/// it whole (no jump), an axis lock drops the off-axis part.
+pub fn kept_delta(dp: DragPlane, delta: Vec3) -> Vec3 {
+    match dp {
+        DragPlane::Axis(k) => AXES[k.min(2) as usize] * delta.dot(AXES[k.min(2) as usize]),
+        _ => delta,
+    }
+}
+
+/// Name for the hint strip ("move plane: …").
+pub fn drag_plane_name(dp: DragPlane) -> String {
+    match dp {
+        DragPlane::Work(Plane::XZ) => "x-z".into(),
+        DragPlane::Work(Plane::XY) => "x-y".into(),
+        DragPlane::Work(Plane::YZ) => "y-z".into(),
+        DragPlane::CamVertical(_) => "vertical".into(),
+        DragPlane::Axis(k) => format!("{} axis", ["x", "y", "z"][k.min(2) as usize]),
+    }
 }
 
 /// Project a world point to viewport-normalized [0,1] coords.
@@ -185,7 +265,19 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
             // ---- uploads + offscreen scene render ----
             let sel: Vec<u32> = app.selection.iter().copied().collect();
             let mut pvs = Vec::new();
-            if app.mode == Mode::Move || app.mode == Mode::Insert {
+            if let Some(md) = &app.move_drag {
+                // The live drag constraint, through the object's current
+                // (preview) position — brighter than the idle work plane.
+                let cur = md.anchor + app.preview_delta.unwrap_or(Vec3::ZERO);
+                let (axes, axis_line) = match md.plane {
+                    DragPlane::Work(p) => (Some(scene::plane_axes(p)), None),
+                    DragPlane::CamVertical(n) => {
+                        (Some((n.cross(Vec3::Y).normalize(), Vec3::Y)), None)
+                    }
+                    DragPlane::Axis(k) => (None, Some(AXES[k.min(2) as usize])),
+                };
+                scene::drag_plane_vis(&mut pvs, cur, md.anchor, axes, axis_line);
+            } else if app.mode == Mode::Move || app.mode == Mode::Insert {
                 scene::work_plane(app.camera.target, app.plane, &mut pvs);
             }
             if let Some(g) = &app.geo {
@@ -582,16 +674,48 @@ fn mode_input(
                 }
             }
             if resp.dragged_by(egui::PointerButton::Primary) {
-                if let (Some(mv), Some(md)) = (mouse_vp, app.move_drag.clone()) {
+                if let (Some(mv), Some(mut md)) = (mouse_vp, app.move_drag.clone()) {
                     let (ro, rd) = ray(&app.camera, aspect, mv.x, mv.y);
-                    // Plane through the grabbed object — it stays under
-                    // the cursor for the whole drag.
-                    if let Some(hit) = plane_hit(app.plane, md.anchor, ro, rd) {
+                    // X/Y/Z toggle an axis lock; Shift picks the vertical
+                    // camera-facing plane. Switching re-anchors the drag
+                    // zero so the object doesn't jump.
+                    let (shift, kx, ky, kz) = resp.ctx.input(|i| {
+                        let bare = !(i.modifiers.ctrl || i.modifiers.command || i.modifiers.alt);
+                        (
+                            i.modifiers.shift,
+                            bare && i.key_pressed(egui::Key::X),
+                            bare && i.key_pressed(egui::Key::Y),
+                            bare && i.key_pressed(egui::Key::Z),
+                        )
+                    });
+                    for (k, hit) in [(0u8, kx), (1, ky), (2, kz)] {
+                        if hit {
+                            md.axis = (md.axis != Some(k)).then_some(k);
+                        }
+                    }
+                    let dp = drag_plane(
+                        app.plane,
+                        shift,
+                        md.axis,
+                        app.camera.target - app.camera.eye(),
+                    );
+                    if dp != md.plane {
+                        if let Some(h) = drag_hit(dp, md.anchor, ro, rd) {
+                            let d = kept_delta(dp, app.preview_delta.unwrap_or(Vec3::ZERO));
+                            md.plane_pt = h - d;
+                            app.preview_delta = Some(d);
+                        }
+                        md.plane = dp;
+                    }
+                    // Constraint through the grabbed object — it stays
+                    // under the cursor for the whole drag.
+                    if let Some(hit) = drag_hit(md.plane, md.anchor, ro, rd) {
                         let delta = hit - md.plane_pt;
                         app.preview_delta = Some(delta);
                         app.status =
                             format!("move d({:.0},{:.0},{:.0})", delta.x, delta.y, delta.z);
                     }
+                    app.move_drag = Some(md);
                 } else if let (Some((a, _)), Some(cur)) = (app.box_sel, resp.interact_pointer_pos())
                 {
                     app.box_sel = Some((a, cur));
@@ -669,10 +793,13 @@ fn begin_move(app: &mut EditorApp, grab: Option<u32>, mv: Vec2, aspect: f32) {
         })
         .unwrap_or(app.camera.target);
     let (ro, rd) = ray(&app.camera, aspect, mv.x, mv.y);
-    if let Some(hit) = plane_hit(app.plane, anchor, ro, rd) {
+    let dp = drag_plane(app.plane, false, None, app.camera.target - app.camera.eye());
+    if let Some(hit) = drag_hit(dp, anchor, ro, rd) {
         app.move_drag = Some(MoveDrag {
             anchor,
             plane_pt: hit,
+            plane: dp,
+            axis: None,
             start_pos: pairs.iter().map(|(_, p)| *p).collect(),
             ids: pairs.iter().map(|(i, _)| *i).collect(),
         });
@@ -763,6 +890,19 @@ fn inst_pos(g: &GeoSnap, inst: u32) -> Option<Vec3> {
 fn overlay_2d(app: &EditorApp, ui: &mut egui::Ui, rect: egui::Rect, aspect: f32) {
     let painter = ui.painter();
     const SEL_COL: egui::Color32 = egui::Color32::from_rgb(255, 120, 40);
+    // Move-drag hint: live plane + the modifier keys that switch it.
+    if let Some(md) = &app.move_drag {
+        painter.text(
+            rect.left_bottom() + egui::vec2(8.0, -8.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!(
+                "plane: {} · Shift: vertical · X/Y/Z: axis lock · Esc: cancel",
+                drag_plane_name(md.plane)
+            ),
+            egui::FontId::proportional(12.0),
+            egui::Color32::from_rgb(170, 200, 220),
+        );
+    }
     /// Past this many selected objects, per-object brackets turn to noise —
     /// draw one bracket around their union plus a count instead.
     const BIG_SEL: usize = 24;
@@ -916,6 +1056,99 @@ mod tests {
         let (odx, ody) = orbit_delta(egui::vec2(0.0, 10.0));
         c.orbit(odx, ody);
         assert!(c.pitch_deg < pitch0);
+    }
+
+    #[test]
+    fn drag_plane_choice_prefers_axis_then_shift() {
+        let fwd = Vec3::new(0.5, -0.7, -0.5).normalize();
+        assert_eq!(
+            drag_plane(Plane::XZ, false, None, fwd),
+            DragPlane::Work(Plane::XZ)
+        );
+        // Shift alone → vertical plane facing the camera …
+        match drag_plane(Plane::XZ, true, None, fwd) {
+            DragPlane::CamVertical(n) => {
+                assert!((n.y).abs() < 1e-6, "vertical-plane normal is horizontal");
+                let want = Vec3::new(fwd.x, 0.0, fwd.z).normalize();
+                assert!((n - want).length() < 1e-5);
+            }
+            other => panic!("shift should give CamVertical, got {other:?}"),
+        }
+        // … axis lock wins over Shift …
+        assert_eq!(
+            drag_plane(Plane::XZ, true, Some(2), fwd),
+            DragPlane::Axis(2)
+        );
+        // … and a straight-down camera falls back to the work plane.
+        assert_eq!(
+            drag_plane(Plane::XY, true, None, Vec3::NEG_Y),
+            DragPlane::Work(Plane::XY)
+        );
+    }
+
+    #[test]
+    fn axis_hit_rides_the_locked_axis() {
+        // Ray from origin along +x; locked-Y line through (5,0,0) — the
+        // closest line point is the line's foot (5,0,0).
+        let h = axis_hit(Vec3::new(5.0, 0.0, 0.0), Vec3::Y, Vec3::ZERO, Vec3::X).unwrap();
+        assert!((h - Vec3::new(5.0, 0.0, 0.0)).length() < 1e-5);
+        // Ray parallel to the axis → no hit.
+        assert!(axis_hit(Vec3::ZERO, Vec3::Y, Vec3::ZERO, Vec3::Y).is_none());
+    }
+
+    /// Switching constraint mid-drag must not teleport the object: the
+    /// re-anchor makes `hit - plane_pt` return the same delta. An axis
+    /// lock additionally drops the off-axis component.
+    #[test]
+    fn reanchor_keeps_delta_continuous() {
+        let anchor = Vec3::new(10.0, 5.0, 0.0);
+        let ro = Vec3::new(10.0, 80.0, 120.0);
+        let rd = (anchor - ro).normalize();
+        // Mid-drag on the XZ plane, delta already nonzero.
+        let mut md = (
+            DragPlane::Work(Plane::XZ),
+            plane_hit(Plane::XZ, anchor, ro, rd).unwrap(), // plane_pt
+        );
+        // pretend the cursor moved: new ray direction
+        let rd2 = (anchor + Vec3::new(8.0, 0.0, 4.0) - ro).normalize();
+        let h2 = drag_hit(md.0, anchor, ro, rd2).unwrap();
+        let delta = h2 - md.1;
+        assert!(delta.length() > 0.1);
+        // Switch to the camera-facing vertical plane at this cursor pos:
+        let dp = drag_plane(
+            Plane::XZ,
+            true,
+            None,
+            Vec3::new(0.0, -0.4, -1.0).normalize(),
+        );
+        let h_new = drag_hit(dp, anchor, ro, rd2).unwrap();
+        // the exact re-anchor the drag loop performs:
+        let d2 = kept_delta(dp, delta);
+        md.1 = h_new - d2;
+        md.0 = dp;
+        // Same cursor → same delta afterwards (no jump on the frame of
+        // the switch).
+        let after = drag_hit(md.0, anchor, ro, rd2).unwrap() - md.1;
+        assert!(
+            (after - d2).length() < 1e-4,
+            "plane switch jumped: {after:?} vs {d2:?}"
+        );
+        // Switch to a Y axis lock: only y survives.
+        let dp = DragPlane::Axis(1);
+        let h_new = drag_hit(dp, anchor, ro, rd2).unwrap();
+        let d3 = kept_delta(dp, after);
+        assert!(
+            d3.x.abs() < 1e-5 && d3.z.abs() < 1e-5,
+            "axis lock keeps y only: {d3:?}"
+        );
+        md.1 = h_new - d3;
+        md.0 = dp;
+        let after = drag_hit(md.0, anchor, ro, rd2).unwrap() - md.1;
+        assert!((after - d3).length() < 1e-4);
+        // An axis hit lands ON the line through the anchor.
+        let h = axis_hit(anchor, Vec3::Y, ro, rd2).unwrap();
+        assert!((h - anchor).dot(Vec3::X).abs() < 1e-4);
+        assert!((h - anchor).dot(Vec3::Z).abs() < 1e-4);
     }
 
     #[test]

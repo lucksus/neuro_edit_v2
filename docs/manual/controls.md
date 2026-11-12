@@ -28,8 +28,9 @@ During a move drag:
 - Switching plane or axis re-anchors under the cursor — the object
   never jumps.
 
-The status line shows the plane and the keys while dragging.
-Neurons, inputs and readouts all move.
+A hint strip at the bottom of the viewport shows the active plane and
+the keys while dragging. Neurons and inputs move; readouts stay
+auto-placed above their units.
 
 ## Context menu
 

@@ -8,6 +8,7 @@ use crate::gpu::{Part, Pv};
 use crate::snap::GeoSnap;
 
 const PLANE_COL: [f32; 4] = [0.35, 0.5, 0.6, 0.5];
+const DRAG_COL: [f32; 4] = [0.55, 0.8, 1.0, 0.85];
 const GROUP_COL: [f32; 4] = [0.9, 0.8, 0.3, 0.6];
 const CONN_COL: [f32; 4] = [1.0, 0.9, 0.2, 1.0];
 
@@ -25,66 +26,62 @@ fn line(out: &mut Vec<Pv>, a: Vec3, b: Vec3, c: [f32; 4]) {
 }
 
 /// Work-plane grid near the target (move/insert reference plane).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Plane {
     XZ,
     XY,
     YZ,
 }
 
+/// The two in-plane unit axes of an axis-aligned work plane.
+pub fn plane_axes(plane: Plane) -> (Vec3, Vec3) {
+    match plane {
+        Plane::XZ => (Vec3::X, Vec3::Z),
+        Plane::XY => (Vec3::X, Vec3::Y),
+        Plane::YZ => (Vec3::Y, Vec3::Z),
+    }
+}
+
 pub fn work_plane(center: Vec3, plane: Plane, out: &mut Vec<Pv>) {
+    let (u, v) = plane_axes(plane);
+    work_plane_axes(center, u, v, PLANE_COL, out);
+}
+
+/// Grid on the plane through `center` spanned by orthonormal `u`,`v` —
+/// the world-snapped work/drag grid. `col` brightens it mid-drag.
+pub fn work_plane_axes(center: Vec3, u: Vec3, v: Vec3, col: [f32; 4], out: &mut Vec<Pv>) {
     let step = 20.0f32;
     let ext = 200.0f32;
-    let c = |v: f32| (v / step).round() * step;
+    let snap = |x: f32| (x / step).round() * step;
+    // Project `center` onto the grid lattice (the out-of-plane coord is
+    // kept verbatim so the plane stays exactly through it).
+    let base = center
+        - u * (center.dot(u) - snap(center.dot(u)))
+        - v * (center.dot(v) - snap(center.dot(v)));
     for i in -10..=10 {
         let o = i as f32 * step;
-        let o0 = -ext;
-        let o1 = ext;
-        match plane {
-            Plane::XZ => {
-                line(
-                    out,
-                    Vec3::new(c(center.x) + o, center.y, c(center.z) + o0),
-                    Vec3::new(c(center.x) + o, center.y, c(center.z) + o1),
-                    PLANE_COL,
-                );
-                line(
-                    out,
-                    Vec3::new(c(center.x) + o0, center.y, c(center.z) + o),
-                    Vec3::new(c(center.x) + o1, center.y, c(center.z) + o),
-                    PLANE_COL,
-                );
-            }
-            Plane::XY => {
-                line(
-                    out,
-                    Vec3::new(c(center.x) + o, c(center.y) + o0, center.z),
-                    Vec3::new(c(center.x) + o, c(center.y) + o1, center.z),
-                    PLANE_COL,
-                );
-                line(
-                    out,
-                    Vec3::new(c(center.x) + o0, c(center.y) + o, center.z),
-                    Vec3::new(c(center.x) + o1, c(center.y) + o, center.z),
-                    PLANE_COL,
-                );
-            }
-            Plane::YZ => {
-                line(
-                    out,
-                    Vec3::new(center.x, c(center.y) + o, c(center.z) + o0),
-                    Vec3::new(center.x, c(center.y) + o, c(center.z) + o1),
-                    PLANE_COL,
-                );
-                line(
-                    out,
-                    Vec3::new(center.x, c(center.y) + o0, c(center.z) + o),
-                    Vec3::new(center.x, c(center.y) + o1, c(center.z) + o),
-                    PLANE_COL,
-                );
-            }
-        }
+        line(out, base + u * o - v * ext, base + u * o + v * ext, col);
+        line(out, base + v * o - u * ext, base + v * o + u * ext, col);
     }
+}
+
+/// Drag visuals: the active constraint through the object's *current*
+/// position (brighter), plus a connector from the grabbed spot.
+pub fn drag_plane_vis(
+    out: &mut Vec<Pv>,
+    center: Vec3,
+    grab: Vec3,
+    axes: Option<(Vec3, Vec3)>,
+    axis_line: Option<Vec3>,
+) {
+    if let Some((u, v)) = axes {
+        work_plane_axes(center, u, v, DRAG_COL, out);
+    }
+    if let Some(a) = axis_line {
+        line(out, center - a * 200.0, center + a * 200.0, DRAG_COL);
+    }
+    // grab point -> current preview: shows how far the drag went.
+    line(out, grab, center, CONN_COL);
 }
 
 /// Group bounding boxes.
@@ -217,8 +214,7 @@ impl Particles {
                 let (tgt, delay) = geo.disp_edges[s + ((i + k as usize) % (e - s))];
                 // Sim axon delay as the wall duration, clamped to a
                 // visible window.
-                let dur = ((delay as f64) * geo.dt_ms as f64)
-                    .clamp(MIN_FLIGHT_MS, MAX_FLIGHT_MS);
+                let dur = ((delay as f64) * geo.dt_ms as f64).clamp(MIN_FLIGHT_MS, MAX_FLIGHT_MS);
                 self.flights.push(Flight {
                     t0_ms: wall_ms - dur * (k as f64 / c.max(1) as f64),
                     dur_ms: dur,
@@ -233,7 +229,8 @@ impl Particles {
     /// Produce the instance list for this frame; drops finished flights.
     /// `wall_ms` is the same clock `feed` stamps flights with.
     pub fn instances(&mut self, wall_ms: f64) -> Vec<Part> {
-        self.flights.retain(|f| wall_ms - f.t0_ms < f.dur_ms + 0.001);
+        self.flights
+            .retain(|f| wall_ms - f.t0_ms < f.dur_ms + 0.001);
         self.flights
             .iter()
             .map(|f| {
@@ -296,7 +293,7 @@ mod tests {
         let g = geo();
         p.feed(&g, &[1, 0], 10.0, 1000.0);
         p.feed(&g, &[1, 0], 5.0, 1100.0); // sim went backwards
-        // only the second feed's flight exists (t0 = 1100)
+                                          // only the second feed's flight exists (t0 = 1100)
         let mid = p.instances(1100.0 + MIN_FLIGHT_MS / 2.0);
         assert_eq!(mid.len(), 1);
     }
