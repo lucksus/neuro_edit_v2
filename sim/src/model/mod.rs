@@ -8,6 +8,7 @@
 
 use net_format::NeuronKind;
 
+pub mod adex;
 pub mod izh;
 
 /// A parameter's descriptor — units/ranges for editors and validation.
@@ -60,7 +61,7 @@ pub trait NeuronModel: Sync {
 /// Every model the sim can run, in registry order. A file names a model
 /// by `id()`; a net's `model[]` column indexes the per-net table
 /// `NeuronParams::models` built from this registry.
-pub static MODELS: &[&dyn NeuronModel] = &[&izh::Izhikevich];
+pub static MODELS: &[&dyn NeuronModel] = &[&izh::Izhikevich, &adex::AdEx];
 
 /// Registry index + model for `id`, if known.
 pub fn by_id(id: &str) -> Option<(u8, &'static dyn NeuronModel)> {
