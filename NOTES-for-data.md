@@ -2563,7 +2563,7 @@ scene shots stay byte-identical to Stage 20's hashes
 
 ### Test counts
 
-`c9a4507` 262 → HEAD 286 (+24).
+`c9a4507` 262 → HEAD 277 (+15 `#[test]`s; `cargo test --workspace` passed=277 failed=0 over 36 result blocks).
 
 New tests, what they assert, and the sabotage that was shown to fail:
 
