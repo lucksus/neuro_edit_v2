@@ -176,25 +176,6 @@ pub(super) fn clamp_window_rect(want: egui::Rect, usable: egui::Rect) -> egui::R
     egui::Rect::from_min_size(min, size)
 }
 
-/// One toolbar control group laid out atomically (Stage 15 B). Inside a
-/// `horizontal_wrapped` row, plain `ui.horizontal` claims the whole
-/// remaining row as its desired size, so egui's wrap check
-/// (`available < desired`) never fires and groups split mid-control.
-/// Claiming an explicit upper-bound width instead makes the wrap check
-/// see the group's real footprint — it moves to the next row whole.
-/// `max_w` must overestimate, never undershoot: overshoot only packs a
-/// little early; undershoot lets content overflow the row edge.
-pub(super) fn toolbar_group(
-    ui: &mut egui::Ui,
-    max_w: f32,
-    add: impl FnOnce(&mut egui::Ui),
-) -> egui::InnerResponse<()> {
-    ui.allocate_ui_with_layout(
-        egui::vec2(max_w, ui.spacing().interact_size.y),
-        egui::Layout::left_to_right(egui::Align::Center),
-        add,
-    )
-}
 
 /// A floating window pinned to [`usable_rect`]. egui re-applies the
 /// constraint every frame, so persisted off-screen positions and narrow
@@ -231,21 +212,7 @@ pub(super) fn plots_default_rect(u: egui::Rect) -> egui::Rect {
     )
 }
 
-/// U5b: next auto-retry delay — 2 s first, doubling, capped at 60 s.
-/// A manual Retry keeps the same progression (a click is not a loop).
-pub(super) fn next_backoff(prev: f64) -> f64 {
-    if prev <= 0.0 {
-        2.0
-    } else {
-        (prev * 2.0).min(60.0)
-    }
-}
 
-/// U5: the banner shows only on a real mid-session disconnect — not
-/// while the login dialog is up (there is no session to lose yet).
-pub(super) fn show_disconnect_banner(connected: bool, login_open: bool) -> bool {
-    !connected && !login_open
-}
 
 /// U8: the session token persists in eframe's app.ron — keep it
 /// owner-only (0600) instead of the umask default.
@@ -379,49 +346,6 @@ mod tests {
         );
     }
 
-    /// Stage 15 B: `toolbar_group` units inside `horizontal_wrapped` wrap
-    /// whole — a group never splits its icon/control across two rows, and
-    /// a group that doesn't fit moves to the next row instead of
-    /// overflowing the panel edge.
-    #[test]
-    fn wrapped_toolbar_groups_never_split() {
-        let ctx = egui::Context::default();
-        let mut same_row = true;
-        let mut fits = true;
-        let mut h = 0.0f32;
-        for _ in 0..3 {
-            let _ = ctx.run(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::pos2(0.0, 0.0),
-                        egui::vec2(300.0, 500.0),
-                    )),
-                    ..Default::default()
-                },
-                |ctx| {
-                    egui::TopBottomPanel::top("t").show(ctx, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            let max_x = ui.max_rect().max.x;
-                            for g in 0..4 {
-                                let r = toolbar_group(ui, 260.0, |ui| {
-                                    let a = ui.label(format!("group-{g}")).rect;
-                                    let b = ui.add(egui::Slider::new(&mut 0.5f32, 0.0..=1.0)).rect;
-                                    same_row &= a.center().y == b.center().y;
-                                })
-                                .response
-                                .rect;
-                                fits &= r.max.x <= max_x + 0.5;
-                            }
-                        });
-                        h = ui.min_rect().height();
-                    });
-                },
-            );
-        }
-        assert!(same_row, "a control group split across wrap rows");
-        assert!(fits, "a group overflowed the panel edge");
-        assert!(h > 40.0, "groups did not wrap (panel {h}px)");
-    }
 
 
     #[test]
@@ -450,24 +374,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn reconnect_backoff_doubles_to_60() {
-        let mut d = 0.0;
-        let seq: Vec<u64> = (0..8)
-            .map(|_| {
-                d = next_backoff(d);
-                d as u64
-            })
-            .collect();
-        assert_eq!(seq, vec![2, 4, 8, 16, 32, 60, 60, 60]);
-    }
 
-    #[test]
-    fn disconnect_banner_gating() {
-        assert!(show_disconnect_banner(false, false));
-        assert!(!show_disconnect_banner(true, false));
-        assert!(!show_disconnect_banner(false, true));
-    }
 
     #[test]
     fn upload_slot_frees_on_written_and_error() {
