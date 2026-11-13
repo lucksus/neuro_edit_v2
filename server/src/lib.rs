@@ -327,7 +327,8 @@ fn serve_http(
         None => ("404 Not Found", "text/plain", b"not found".to_vec()),
     };
     let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\n\
+         Cache-Control: no-cache\r\nConnection: close\r\n\r\n",
         bytes.len()
     );
     stream.write_all(head.as_bytes())?;

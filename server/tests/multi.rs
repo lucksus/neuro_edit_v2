@@ -1178,3 +1178,71 @@ fn app_csp_allows_wasm_not_inline_scripts() {
         }
     }
 }
+
+/// The bundle keeps its file names across builds, so /app/* must make
+/// the browser revalidate: a fresh page paired with a cached old
+/// editor.js/wasm once dialled `ws://` from https and read as a WebGPU
+/// failure. no-cache + ETag; a matching If-None-Match gets a bodyless
+/// 304, a rebuilt file a new tag.
+#[test]
+fn app_bundle_revalidates_with_etag() {
+    let fx = start("etag", |_| {});
+    let _u = mkuser(&fx, "e@x.dev", "Ee");
+    let tok = token_of(&fx, "e@x.dev");
+    let cookie = format!("ne_session={tok}");
+    let js = fx.root.join("web").join("editor.js");
+    std::fs::write(&js, "export default 1;").unwrap();
+
+    let r = http(
+        &fx.addr,
+        "GET",
+        "/app/editor.js",
+        &[("cookie", &cookie)],
+        "",
+    );
+    assert_eq!(200, r.status);
+    assert_eq!(Some("no-cache"), r.header("cache-control"));
+    let tag = r.header("etag").expect("etag on a static file").to_string();
+    assert_eq!("export default 1;", r.text());
+
+    let r = http(
+        &fx.addr,
+        "GET",
+        "/app/editor.js",
+        &[("cookie", &cookie), ("if-none-match", &tag)],
+        "",
+    );
+    assert_eq!(304, r.status);
+    assert_eq!("", r.text());
+    assert_eq!(Some(tag.as_str()), r.header("etag"));
+
+    // a rebuild (new size + mtime) must not match the old tag
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(&js, "export default 22;").unwrap();
+    let r = http(
+        &fx.addr,
+        "GET",
+        "/app/editor.js",
+        &[("cookie", &cookie), ("if-none-match", &tag)],
+        "",
+    );
+    assert_eq!(200, r.status);
+    assert_eq!("export default 22;", r.text());
+    assert_ne!(Some(tag.as_str()), r.header("etag"));
+
+    // the shell itself stays no-store, with no validator
+    std::fs::write(
+        fx.root.join("web").join("index.html"),
+        "<html><head></head></html>",
+    )
+    .unwrap();
+    let r = http(
+        &fx.addr,
+        "GET",
+        "/app/index.html",
+        &[("cookie", &cookie)],
+        "",
+    );
+    assert_eq!(Some("no-store"), r.header("cache-control"));
+    assert_eq!(None, r.header("etag"));
+}

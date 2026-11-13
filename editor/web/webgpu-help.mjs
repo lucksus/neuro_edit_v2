@@ -14,7 +14,10 @@
 // gpuState: 'missing' (navigator.gpu absent — WebGPU is OFF here),
 //           'no-adapter' (on, but no usable GPU/driver),
 //           'device-failed' (adapter found, device request died —
-//            the Rust fallback path calls renderHelp with this).
+//            the Rust fallback path calls renderHelp with this),
+//           'connect-failed' (not a GPU state: the editor could not
+//            open its WebSocket to the server — Rust calls
+//            neWebgpuHelp.showConnect so it never reads as WebGPU).
 //
 // Steps are arrays of parts: {t: "text"} or {c: "copyable"}. Browsers
 // refuse to open chrome:// etc. from page JS, so copyable parts render
@@ -184,10 +187,24 @@ function unknownSteps(env, state, host) {
 }
 
 export function stepsFor(env, gpuState, host) {
+    if (gpuState === 'connect-failed') return connectSteps(env, host);
     if (env.browser === 'firefox') return firefoxSteps(env, gpuState, host);
     if (env.browser === 'safari') return safariSteps(env, gpuState, host);
     if (env.browser === 'unknown') return unknownSteps(env, gpuState, host);
     return chromiumSteps(env, gpuState, host);
+}
+
+// Same for every browser: the socket failing says nothing about WebGPU.
+function connectSteps(env, host) {
+    return {
+        title: "can't connect to the server",
+        steps: [
+            [T('The editor loaded, but opening its connection to the server failed.')],
+            [T('Reload without the cache (Ctrl+Shift+R, Cmd+Shift+R on macOS) — an editor bundle cached from an older version may connect the wrong way.')],
+            [T('If you were logged out, log in again on the start page.')],
+            [T('Or use the desktop editor: '), C(`editor --connect ${host}`)],
+        ],
+    };
 }
 
 // ---- browser-only part (never touched by node --test) --------------
@@ -259,7 +276,9 @@ export function renderHelp(doc, env, gpuState, detail) {
     box.appendChild(h);
     const sub = doc.createElement('p');
     sub.style.cssText = 'color:#888';
-    sub.textContent = 'The 3D view uses WebGPU storage buffers — the page needs WebGPU on. ' +
+    sub.textContent = (gpuState === 'connect-failed'
+        ? 'WebGPU is fine here — the problem is the connection. '
+        : 'The 3D view uses WebGPU storage buffers — the page needs WebGPU on. ') +
         `Detected: ${env.browser} on ${env.os}.`;
     box.appendChild(sub);
     const ol = doc.createElement('ol');
@@ -302,6 +321,7 @@ export async function boot(loadEditor) {
     window.neWebgpuHelp = {
         env,
         show: (detail) => renderHelp(document, env, 'device-failed', detail),
+        showConnect: (detail) => renderHelp(document, env, 'connect-failed', detail),
     };
     const r = await checkWebGPU();
     if (r.state !== 'ok') {

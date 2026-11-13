@@ -104,6 +104,18 @@ test('device-failed (rust fallback path): gpu page + driver', () => {
     assert.ok(txt.includes(`editor --connect ${HOST}`), txt);
 });
 
+test('connect-failed: a server page with no WebGPU steps, in every browser', () => {
+    for (const [ua, brave] of [[CHROME_LINUX_UA, true], [FF_LINUX_UA, false], [SAFARI_MAC_UA, false]]) {
+        const env = detectBrowser(ua, brave, 'Linux x86_64');
+        const { title, steps } = stepsFor(env, 'connect-failed', HOST);
+        assert.match(title, /connect to the server/i, env.browser);
+        const txt = flat(steps);
+        assert.ok(!/webgpu|:\/\/gpu|flags|driver/i.test(txt), txt);
+        assert.ok(txt.includes('Ctrl+Shift+R'), txt);
+        assert.ok(txt.includes(`editor --connect ${HOST}`), txt);
+    }
+});
+
 test('android chromium: linux-style flag steps', () => {
     const ua =
         'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) ' +

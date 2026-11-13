@@ -613,7 +613,12 @@ impl Multi {
                 None => redirect(stream, "/", ""),
             },
             ("GET", p) if p.starts_with("/app/") => match &sess {
-                Some(_) => serve_static(stream, &self.opts.web_dir, &p[5..]),
+                Some(_) => serve_static(
+                    stream,
+                    &self.opts.web_dir,
+                    &p[5..],
+                    req.header("if-none-match"),
+                ),
                 None => redirect(stream, "/", ""),
             },
             ("GET", "/assets/about.png") => {
@@ -920,7 +925,18 @@ fn ws_accept(stream: &mut TcpStream, key: &str) -> anyhow::Result<()> {
 }
 
 /// Static file from `web_dir` (the `--web` tree), component-safe.
-fn serve_static(stream: &mut TcpStream, web_dir: &Path, rel: &str) -> anyhow::Result<()> {
+///
+/// `editor.js` / `editor_bg.wasm` keep their names across builds, so
+/// without a cache header a browser may pair a fresh page with a stale
+/// bundle (one that still dialled `ws://` from https). Every file goes
+/// out `no-cache` with an ETag (size + mtime): the browser revalidates
+/// on each load and gets a 304 while the build is unchanged.
+fn serve_static(
+    stream: &mut TcpStream,
+    web_dir: &Path,
+    rel: &str,
+    if_none_match: Option<&str>,
+) -> anyhow::Result<()> {
     let rel = rel.split(['?', '#']).next().unwrap_or("");
     let rel = if rel.is_empty() { "index.html" } else { rel };
     let mut path = web_dir.to_path_buf();
@@ -949,10 +965,50 @@ fn serve_static(stream: &mut TcpStream, web_dir: &Path, rel: &str) -> anyhow::Re
     } else {
         CSP_STRICT
     };
+    // html already goes out no-store (respond_csp); no validator there
+    let html = mime.contains("text/html");
+    let etag = if bad || html {
+        None
+    } else {
+        static_etag(&path)
+    };
+    if let (Some(tag), Some(inm)) = (&etag, if_none_match) {
+        if inm.split(',').any(|t| t.trim() == tag || t.trim() == "*") {
+            let extra = format!("Cache-Control: no-cache\r\nETag: {tag}\r\n");
+            return respond_csp(stream, "304 Not Modified", mime, b"", &extra, csp);
+        }
+    }
     match if bad { None } else { std::fs::read(&path).ok() } {
-        Some(b) => respond_csp(stream, "200 OK", mime, &b, "", csp),
+        Some(b) => {
+            let extra = match &etag {
+                _ if html => String::new(),
+                Some(tag) => format!("Cache-Control: no-cache\r\nETag: {tag}\r\n"),
+                None => "Cache-Control: no-cache\r\n".to_string(),
+            };
+            respond_csp(stream, "200 OK", mime, &b, &extra, csp)
+        }
         None => not_found(stream),
     }
+}
+
+/// Weak validator for a static file: size + mtime, so a rebuilt bundle
+/// gets a new tag without hashing 10 MB of wasm per request.
+fn static_etag(path: &Path) -> Option<String> {
+    let md = std::fs::metadata(path).ok()?;
+    if !md.is_file() {
+        return None;
+    }
+    let mtime = md
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some(format!(
+        "W/\"{:x}-{:x}-{:x}\"",
+        md.len(),
+        mtime.as_secs(),
+        mtime.subsec_nanos()
+    ))
 }
 
 #[cfg(test)]

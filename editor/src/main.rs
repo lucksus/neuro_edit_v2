@@ -245,6 +245,12 @@ fn main() {
     // Same latency cap as native — harmless where unsupported (Stage 14 D).
     opts.wgpu_options.desired_maximum_frame_latency = Some(1);
 
+    // Set when the app creator fails on the socket, so the error below
+    // gets the server page instead of the WebGPU one (a mixed-content
+    // `ws://` refusal used to read as "device request failed").
+    let connect_failed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let connect_failed_in = connect_failed.clone();
+
     wasm_bindgen_futures::spawn_local(async move {
         let runner = eframe::WebRunner::new();
         let r = runner
@@ -252,8 +258,12 @@ fn main() {
                 canvas,
                 opts,
                 Box::new(move |cc| {
-                    let ctl = editor::simctl::SimCtl::connect(&ws_url)
-                        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+                    let ctl = editor::simctl::SimCtl::connect(&ws_url).map_err(
+                        |e| -> Box<dyn std::error::Error + Send + Sync> {
+                            connect_failed_in.set(true);
+                            e.into()
+                        },
+                    )?;
                     cc.egui_ctx.set_theme(eframe::egui::Theme::Dark);
                     Ok(Box::new(editor::app::EditorApp::new(ctl, cc.storage)))
                 }),
@@ -261,24 +271,34 @@ fn main() {
             .await;
         if let Err(e) = r {
             // index.html's boot() already showed WebGPU help when the
-            // adapter check failed; a failure HERE means an adapter was
-            // offered but the device request died — render the same
-            // per-browser help via window.neWebgpuHelp.show(), keeping
-            // the raw JsValue in the details line.
-            let msg = format!("Adapter/device request failed: {e:?}");
+            // adapter check failed; a failure HERE is either the socket
+            // (connect_failed) or an adapter that was offered but whose
+            // device request died. Render the matching page via
+            // window.neWebgpuHelp, keeping the raw JsValue in the
+            // details line.
+            let (msg, show, fallback) = if connect_failed.get() {
+                (
+                    format!("Connection to the server failed: {e:?}"),
+                    "showConnect",
+                    "neuro_edit v2 could not connect to the server.",
+                )
+            } else {
+                (
+                    format!("Adapter/device request failed: {e:?}"),
+                    "show",
+                    "neuro_edit v2 needs WebGPU (the 3D view uses storage buffers).",
+                )
+            };
             if let Some(w) = web_sys::window() {
                 let shown = js_sys::Reflect::get(&w, &"neWebgpuHelp".into())
                     .ok()
-                    .and_then(|o| js_sys::Reflect::get(&o, &"show".into()).ok())
+                    .and_then(|o| js_sys::Reflect::get(&o, &show.into()).ok())
                     .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
                     .map(|f| f.call1(&w, &msg.clone().into()));
                 if shown.is_none() {
                     // help module not on the page (old bundle): last
                     // resort — the raw message on a dark page
-                    let full = format!(
-                        "neuro_edit v2 needs WebGPU (the 3D view uses storage \
-                         buffers). {msg}"
-                    );
+                    let full = format!("{fallback} {msg}");
                     if let Some(b) = w.document().and_then(|d| d.body()) {
                         b.set_inner_html(&format!(
                             "<div style='color:#ddd;background:#181818;\
