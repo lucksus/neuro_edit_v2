@@ -259,10 +259,13 @@ fn respond_csp(
     // Baseline headers on everything; HTML responses (which include
     // the authenticated pages) additionally refuse framing and forbid
     // caching so a back-button can't replay a dead session's view.
+    // Referrer-Policy is `same-origin`, not `no-referrer`: under
+    // `no-referrer` browsers send `Origin: null` on form POSTs, and
+    // `origin_ok` then refuses our own /signup and /login forms.
     let security = if content_type.contains("text/html") {
         format!(
             "X-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\n\
-             Referrer-Policy: no-referrer\r\nCache-Control: no-store\r\n\
+             Referrer-Policy: same-origin\r\nCache-Control: no-store\r\n\
              Content-Security-Policy: {csp}\r\n"
         )
     } else {

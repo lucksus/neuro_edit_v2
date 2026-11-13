@@ -800,6 +800,18 @@ fn trust_proxy_gates_xff() {
 /// S1: cookie-authenticated WS upgrades must pass the Origin check —
 /// a cross-site upgrade is WS-CSRF. Bearer clients (native editor)
 /// carry no ambient credentials, so no-Origin is fine for them.
+/// Browsers send `Origin: null` on form POSTs from a page served with
+/// `Referrer-Policy: no-referrer`, which `origin_ok` refuses — the
+/// landing page's own sign-up and login forms then answer "bad origin".
+/// The policy must keep the Origin on same-origin requests.
+#[test]
+fn html_referrer_policy_keeps_same_origin_origin() {
+    let fx = start("rp", |_| {});
+    let r = http(&fx.addr, "GET", "/", &[], "");
+    assert_eq!(r.status, 200);
+    assert_eq!(r.header("referrer-policy"), Some("same-origin"));
+}
+
 #[test]
 fn ws_cookie_requires_our_origin() {
     let fx = start("s1", |_| {});
