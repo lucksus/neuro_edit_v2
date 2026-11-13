@@ -9,7 +9,42 @@ use std::path::Path;
 use crate::Network;
 
 const MAGIC: &[u8; 4] = b"NE2\0";
-const FORMAT_VERSION: u32 = 5;
+const FORMAT_VERSION: u32 = 6;
+
+/// `Readout` as serialized through format v5 — before the `mlp` field
+/// existed. Every older loader (v1–v5) decodes this shape and lifts to
+/// `mlp: None`.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReadoutV5 {
+    name: String,
+    units: Vec<u32>,
+    weights: Vec<f32>,
+    bias: f32,
+    bias_weight: f32,
+    tau_ms: f32,
+    pos: [f32; 3],
+}
+
+fn lift_readouts(v5: Vec<ReadoutV5>) -> Vec<crate::Readout> {
+    v5.into_iter()
+        .map(|r| crate::Readout {
+            name: r.name,
+            units: r.units,
+            weights: r.weights,
+            bias: r.bias,
+            bias_weight: r.bias_weight,
+            tau_ms: r.tau_ms,
+            pos: r.pos,
+            mlp: None,
+        })
+        .collect()
+}
+
+fn de_readouts_v5(r: &mut impl Read) -> Result<Vec<crate::Readout>, LoadError> {
+    let v5: Vec<ReadoutV5> =
+        bincode::deserialize_from(r).map_err(|e| LoadError::Decode(format!("readouts: {e}")))?;
+    Ok(lift_readouts(v5))
+}
 
 /// `Neuron` as serialized through format v3 — model+kind inline per
 /// neuron, before the type table existed.
@@ -143,7 +178,7 @@ fn load_v1(r: &mut impl Read) -> Result<Network, LoadError> {
         },
         inputs: de("inputs", r)?,
         samples: de("samples", r)?,
-        readouts: de("readouts", r)?,
+        readouts: de_readouts_v5(r)?,
         scripts: de("scripts", r)?,
         meta: de("meta", r)?,
     };
@@ -167,7 +202,7 @@ fn load_v2(r: &mut impl Read) -> Result<Network, LoadError> {
         groups: de("groups", r)?,
         inputs: de("inputs", r)?,
         samples: de("samples", r)?,
-        readouts: de("readouts", r)?,
+        readouts: de_readouts_v5(r)?,
         scripts: de("scripts", r)?,
         meta: de("meta", r)?,
     };
@@ -188,7 +223,7 @@ fn load_v3(r: &mut impl Read) -> Result<Network, LoadError> {
         groups: de("groups", r)?,
         inputs: de("inputs", r)?,
         samples: de("samples", r)?,
-        readouts: de("readouts", r)?,
+        readouts: de_readouts_v5(r)?,
         scripts: de("scripts", r)?,
         meta: de("meta", r)?,
     };
@@ -214,7 +249,7 @@ struct NetworkV4 {
     groups: Vec<crate::Group>,
     inputs: Vec<crate::Input>,
     samples: Vec<crate::Samples>,
-    readouts: Vec<crate::Readout>,
+    readouts: Vec<ReadoutV5>,
     scripts: Vec<(String, String)>,
     meta: crate::Meta,
 }
@@ -241,7 +276,40 @@ fn load_v4(r: &mut impl Read) -> Result<Network, LoadError> {
         groups: n.groups,
         inputs: n.inputs,
         samples: n.samples,
-        readouts: n.readouts,
+        readouts: lift_readouts(n.readouts),
+        scripts: n.scripts,
+        meta: n.meta,
+    })
+}
+
+/// The v5 `Network` layout — today's field order with `ReadoutV5` rows
+/// (no `mlp` field yet).
+#[derive(serde::Deserialize)]
+struct NetworkV5 {
+    types: Vec<crate::NeuronType>,
+    neurons: Vec<crate::Neuron>,
+    synapses: Vec<crate::Synapse>,
+    groups: Vec<crate::Group>,
+    inputs: Vec<crate::Input>,
+    samples: Vec<crate::Samples>,
+    readouts: Vec<ReadoutV5>,
+    scripts: Vec<(String, String)>,
+    meta: crate::Meta,
+}
+
+/// Decode a v5 stream — identical layout to v6 except `readouts`, whose
+/// rows predate the `mlp` field (lifted to `None`).
+fn load_v5(r: &mut impl Read) -> Result<Network, LoadError> {
+    let n: NetworkV5 =
+        bincode::deserialize_from(r).map_err(|e| LoadError::Decode(e.to_string()))?;
+    Ok(Network {
+        types: n.types,
+        neurons: n.neurons,
+        synapses: n.synapses,
+        groups: n.groups,
+        inputs: n.inputs,
+        samples: n.samples,
+        readouts: lift_readouts(n.readouts),
         scripts: n.scripts,
         meta: n.meta,
     })
@@ -305,6 +373,7 @@ pub fn load(path: impl AsRef<Path>) -> Result<Network, LoadError> {
         2 => load_v2(&mut r)?,
         3 => load_v3(&mut r)?,
         4 => load_v4(&mut r)?,
+        5 => load_v5(&mut r)?,
         FORMAT_VERSION => {
             bincode::deserialize_from(&mut r).map_err(|e| LoadError::Decode(e.to_string()))?
         }
@@ -701,6 +770,85 @@ mod tests {
             assert!(load_json(&path).is_err(), "load_json case {i}");
             std::fs::remove_file(&path).ok();
         }
+    }
+
+    /// Trained MLP weights ride the `.ne2`: save + load preserves sizes,
+    /// weights and the feature standardization.
+    #[test]
+    fn readout_mlp_round_trips() {
+        let mut net = Network::new();
+        for i in 0..4 {
+            net.add_neuron([i as f32 * 10.0, 0.0, 0.0], crate::NeuronKind::Excitatory);
+        }
+        net.add_readout("ro", vec![0, 1, 2, 3]);
+        net.set_readout_mlp(
+            "ro",
+            Some(crate::MlpDef {
+                sizes: vec![4, 8, 1],
+                w: vec![(0..8 * 5).map(|i| i as f32 * 0.01).collect(), vec![0.5; 9]],
+                mu: vec![1.0, 2.0, 3.0, 4.0],
+                sd: vec![0.5, 0.5, 0.5, 0.5],
+            }),
+        )
+        .unwrap();
+        let path = tempdir().join("mlp.ne2");
+        save(&net, &path).unwrap();
+        let back = load(&path).unwrap();
+        let m = back.readout_mlp("ro").expect("mlp must survive the file");
+        assert_eq!(m.sizes, vec![4, 8, 1]);
+        assert_eq!(m.w[1], vec![0.5; 9]);
+        assert_eq!(m.mu, vec![1.0, 2.0, 3.0, 4.0]);
+        // A malformed mlp must fail validate() on load.
+        let mut bad = net.clone();
+        bad.readouts[0].mlp.as_mut().unwrap().sizes = vec![4, 8, 2];
+        save(&bad, &path).unwrap();
+        assert!(load(&path).is_err(), "bad output size must not load");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A format-v5 file's readouts have no `mlp` — they lift to `None`.
+    #[test]
+    fn v5_readouts_lift_to_no_mlp() {
+        let mut net = Network::new();
+        for i in 0..3 {
+            net.add_neuron([i as f32 * 10.0, 0.0, 0.0], crate::NeuronKind::Excitatory);
+        }
+        net.add_readout("ro", vec![0, 1, 2]);
+        net.readouts[0].weights = vec![0.1, 0.2, 0.3];
+
+        // Hand-write a v5 stream: same field order, ReadoutV5 shape.
+        let path = tempdir().join("v5.ne2");
+        let mut w = Vec::new();
+        w.extend_from_slice(b"NE2\0");
+        w.extend_from_slice(&5u32.to_le_bytes());
+        bincode::serialize_into(&mut w, &net.types).unwrap();
+        bincode::serialize_into(&mut w, &net.neurons).unwrap();
+        bincode::serialize_into(&mut w, &net.synapses).unwrap();
+        bincode::serialize_into(&mut w, &net.groups).unwrap();
+        bincode::serialize_into(&mut w, &net.inputs).unwrap();
+        bincode::serialize_into(&mut w, &net.samples).unwrap();
+        let v5: Vec<ReadoutV5> = net
+            .readouts
+            .iter()
+            .map(|r| ReadoutV5 {
+                name: r.name.clone(),
+                units: r.units.clone(),
+                weights: r.weights.clone(),
+                bias: r.bias,
+                bias_weight: r.bias_weight,
+                tau_ms: r.tau_ms,
+                pos: r.pos,
+            })
+            .collect();
+        bincode::serialize_into(&mut w, &v5).unwrap();
+        bincode::serialize_into(&mut w, &net.scripts).unwrap();
+        bincode::serialize_into(&mut w, &net.meta).unwrap();
+        std::fs::write(&path, &w).unwrap();
+
+        let back = load(&path).unwrap();
+        assert_eq!(back.readouts[0].weights, vec![0.1, 0.2, 0.3]);
+        assert!(back.readouts[0].mlp.is_none());
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

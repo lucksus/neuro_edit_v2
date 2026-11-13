@@ -116,6 +116,12 @@ fn est_net_bytes(n: &Network) -> usize {
     }
     for r in &n.readouts {
         b += r.name.capacity() + r.units.capacity() * 4 + r.weights.capacity() * 4;
+        if let Some(m) = &r.mlp {
+            b += m.sizes.capacity() * 4
+                + m.mu.capacity() * 4
+                + m.sd.capacity() * 4
+                + m.w.iter().map(|l| l.capacity() * 4).sum::<usize>();
+        }
     }
     for (a, c) in &n.scripts {
         b += a.capacity() + c.capacity();

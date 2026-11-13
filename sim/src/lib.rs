@@ -7,6 +7,7 @@
 pub mod bench;
 pub mod cpu;
 pub mod dataset;
+pub mod mlp;
 pub mod model;
 pub mod readout;
 pub mod script;

@@ -280,6 +280,23 @@ impl Samples {
     }
 }
 
+/// Trained MLP weights saved on a `Readout` — the multilayer readout's
+/// full state so a `net.save` keeps it deployable. Layout mirrors
+/// `sim::mlp::Mlp`: layer-major weight rows with the bias weight in the
+/// last column of each row; `mu`/`sd` are the fit-time feature
+/// standardization (applied again at output time).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MlpDef {
+    /// Layer sizes including input and output: `[n_features, h1, …, 1]`.
+    pub sizes: Vec<u32>,
+    /// `w[l]` is a `sizes[l+1] × (sizes[l]+1)` row-major matrix; the last
+    /// column of each row is that unit's bias weight.
+    pub w: Vec<Vec<f32>>,
+    /// Per-feature mean/stddev measured on the training subset.
+    pub mu: Vec<f32>,
+    pub sd: Vec<f32>,
+}
+
 /// LSM readout unit — the original's `LSMReadOutNeuron`. Its filtered-trace
 /// semantics are reproduced in `sim::readout`; the weights are stored here so
 /// a trained readout survives in the file, as it did in the original.
@@ -295,6 +312,10 @@ pub struct Readout {
     /// Filtered-trace time constant (ms). Original default: tc=50 -> tau 2ms.
     pub tau_ms: f32,
     pub pos: [f32; 3],
+    /// Trained MLP attached to this readout (`net.set_readout_mlp`); None
+    /// for files saved before format v6 and for never-trained readouts.
+    #[serde(default)]
+    pub mlp: Option<MlpDef>,
 }
 
 /// File-level metadata.
@@ -686,8 +707,27 @@ impl Network {
             bias_weight: 1.0,
             tau_ms: crate::DEFAULT_READOUT_TAU_MS,
             pos: [0.0; 3],
+            mlp: None,
         });
         i
+    }
+
+    /// Attach trained MLP weights to a readout (`sim::mlp::Mlp::to_def`
+    /// produces the shape). `None` detaches.
+    pub fn set_readout_mlp(&mut self, name: &str, mlp: Option<MlpDef>) -> Result<(), String> {
+        let Some(r) = self.readouts.iter_mut().find(|r| r.name == name) else {
+            return Err(format!("set_readout_mlp: no readout named {name:?}"));
+        };
+        r.mlp = mlp;
+        Ok(())
+    }
+
+    /// A readout's attached MLP, if any.
+    pub fn readout_mlp(&self, name: &str) -> Option<&MlpDef> {
+        self.readouts
+            .iter()
+            .find(|r| r.name == name)
+            .and_then(|r| r.mlp.as_ref())
     }
 
     /// Remove synapses that reference neurons >= n (used after truncating the
@@ -1049,6 +1089,40 @@ impl Network {
                     r.name, r.tau_ms
                 ));
             }
+            if let Some(m) = &r.mlp {
+                // [n_feat, ≥1 hidden…, 1] — and every layer matrix +
+                // the feature standardization must agree with it.
+                if m.sizes.len() < 2 || *m.sizes.last().unwrap() != 1 || m.sizes[0] == 0 {
+                    return Err(format!(
+                        "readout '{}' has malformed mlp sizes {:?}",
+                        r.name, m.sizes
+                    ));
+                }
+                if m.w.len() + 1 != m.sizes.len() {
+                    return Err(format!(
+                        "readout '{}' mlp has {} weight matrices for {} sizes",
+                        r.name,
+                        m.w.len(),
+                        m.sizes.len()
+                    ));
+                }
+                for (l, wl) in m.w.iter().enumerate() {
+                    let want = m.sizes[l + 1] as usize * (m.sizes[l] as usize + 1);
+                    if wl.len() != want || !wl.iter().all(|v| v.is_finite()) {
+                        return Err(format!(
+                            "readout '{}' mlp layer {l} has bad weights ({} want {want})",
+                            r.name,
+                            wl.len()
+                        ));
+                    }
+                }
+                if m.mu.len() != m.sizes[0] as usize || m.sd.len() != m.sizes[0] as usize {
+                    return Err(format!(
+                        "readout '{}' mlp standardization doesn't match {} inputs",
+                        r.name, m.sizes[0]
+                    ));
+                }
+            }
         }
         for s in &self.samples {
             if s.times.len() != s.values.len() {
@@ -1300,6 +1374,7 @@ mod tests {
             bias_weight: 0.0,
             tau_ms: 2.0,
             pos: [0.0; 3],
+            mlp: None,
         });
         assert!(net.validate().is_ok());
         let mut bad = net.clone();

@@ -83,6 +83,10 @@ pub struct Env {
     /// Drive program saved by the last sim drop, reapplied to the next
     /// build — see `DriveSlot`.
     pub drive: DriveSlot,
+    /// `quick()` in scripts — true when the reduced test scale is wanted
+    /// (env `NEURO_QUICK=1`, or the test harness flips the cell). Full
+    /// runs leave it false.
+    pub quick: Rc<std::cell::Cell<bool>>,
 }
 
 impl Env {
@@ -137,6 +141,11 @@ impl Env {
         };
         let job_dir: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let drive: DriveSlot = Rc::new(RefCell::new(None));
+        let quick = Rc::new(std::cell::Cell::new(
+            std::env::var("NEURO_QUICK")
+                .map(|v| v != "0" && !v.is_empty())
+                .unwrap_or(false),
+        ));
         register_api(
             &mut engine,
             net.clone(),
@@ -155,6 +164,7 @@ impl Env {
             sim_limits.clone(),
             quota_bytes.clone(),
             drive.clone(),
+            quick.clone(),
         );
         Env {
             engine,
@@ -175,6 +185,7 @@ impl Env {
             sim_limits,
             quota_bytes,
             drive,
+            quick,
         }
     }
 
@@ -374,7 +385,9 @@ fn help_text(topic: &str) -> String {
             "readout",
             "readout: add_readout(name,units)  set_readout_weights(name,w)  readout_weights(name)\n  \
              delta_new(n)  r.learn(trace,target,rate)  r.output(trace)\n  \
-             fit_ridge(x_flat,T,F,y,lambda)  ridge_output(w,x)  accuracy(s,y)  auc(s,y)",
+             fit_ridge(x_flat,T,F,y,lambda)  ridge_output(w,x)  accuracy(s,y)  auc(s,y)\n  \
+             fit_mlp(x_flat,T,F,y[,#{hidden,epochs,lr,wd,seed,val_frac,patience}])\n  \
+             mlp_output(m,x)  mlp_sizes(m)  net.set_readout_mlp(name,m)  net.readout_mlp(name)",
         ),
         (
             "io",
@@ -385,10 +398,14 @@ fn help_text(topic: &str) -> String {
             "streams",
             "streams: rng_stream(seed,n_src,p) .window(steps,label,pairs,strength)",
         ),
-        ("misc", "misc: rand(a,b)  gauss(m,sd)  seed(s)  print(x)"),
+        (
+            "misc",
+            "misc: rand(a,b)  gauss(m,sd)  seed(s)  print(x)  quick()  sim.backend()",
+        ),
         (
             "examples",
-            "examples: first_spikes.rhai  grid_wave.rhai  lsm_readout.rhai —\n  \
+            "examples: first_spikes.rhai  grid_wave.rhai  lsm_readout.rhai  lsm_big.rhai\n  \
+             lsm_adex.rhai  lsm_hidden.rhai  detector.rhai  memory_window.rhai —\n  \
              runnable from the console's examples picker",
         ),
     ];
@@ -694,6 +711,7 @@ pub fn register_api(
     sim_limits: Rc<RefCell<crate::SimLimits>>,
     quota_bytes: Rc<RefCell<u64>>,
     drive: DriveSlot,
+    quick: Rc<std::cell::Cell<bool>>,
 ) {
     engine
         .register_type_with_name::<NetHandle>("Net")
@@ -701,7 +719,14 @@ pub fn register_api(
         .register_type_with_name::<RngHandle>("Rng")
         .register_type_with_name::<RngStream>("RngStream")
         .register_type_with_name::<DeltaReadout>("DeltaReadout")
+        .register_type_with_name::<net_format::MlpDef>("Mlp")
         .register_type_with_name::<crate::dataset::Dataset>("Dataset");
+
+    // `quick()` — scripts check it to shrink their runs under tests.
+    {
+        let q = quick.clone();
+        engine.register_fn("quick", move || -> bool { q.get() });
+    }
 
     // ---- help: `help`, `help()` and `help("topic")` all work ----
     engine.register_fn("help", || help_text(""));
@@ -2033,6 +2058,110 @@ pub fn register_api(
         let y: Vec<u8> = labels.iter().map(|d| d_i64(d) as u8).collect();
         auc(&s, &y)
     });
+
+    // ---- MLP readout ----
+    // `fit_mlp(x_flat, T, F, y)` / `fit_mlp(…, #{hidden,epochs,lr,wd,seed,
+    // val_frac,patience})` → a trained `Mlp` value; `mlp_output(m, row)`
+    // scores one raw feature row. Attach to a readout for persistence:
+    // `net.set_readout_mlp(name, m)`; `net.readout_mlp(name)` gets it
+    // back (or `()` when the readout has no mlp).
+    fn mlp_params(opts: &rhai::Map) -> Result<crate::mlp::MlpParams, Box<rhai::EvalAltResult>> {
+        let mut p = crate::mlp::MlpParams::default();
+        for (k, v) in opts {
+            match k.as_str() {
+                "hidden" => p.hidden = d_i64(v).max(1) as usize,
+                "epochs" => p.epochs = d_i64(v).max(1) as usize,
+                "lr" => p.lr = d_f64(v) as f32,
+                "wd" => p.wd = d_f64(v) as f32,
+                "seed" => p.seed = d_i64(v) as u64,
+                "val_frac" => p.val_frac = (d_f64(v) as f32).clamp(0.05, 0.9),
+                "patience" => p.patience = d_i64(v).max(1) as usize,
+                other => return Err(s_err(format!("fit_mlp: unknown option {other:?}"))),
+            }
+        }
+        Ok(p)
+    }
+    fn fit_mlp_impl(
+        x: rhai::Array,
+        t: rhai::INT,
+        f: rhai::INT,
+        y: rhai::Array,
+        p: &crate::mlp::MlpParams,
+    ) -> Result<net_format::MlpDef, Box<rhai::EvalAltResult>> {
+        let (t, f) = (t.max(0) as usize, f.max(0) as usize);
+        if x.len() < t.saturating_mul(f) || y.len() < t {
+            return Err(s_err(format!(
+                "fit_mlp: need x ≥ T*F={} and y ≥ T={t} (got {} and {})",
+                t * f,
+                x.len(),
+                y.len()
+            )));
+        }
+        let xf: Vec<f32> = x.iter().take(t * f).map(|d| d_f64(d) as f32).collect();
+        let yf: Vec<f32> = y.iter().take(t).map(|d| d_f64(d) as f32).collect();
+        Ok(crate::mlp::fit_mlp(&xf, t, f, &yf, p))
+    }
+    engine.register_fn(
+        "fit_mlp",
+        move |x: rhai::Array,
+              t: rhai::INT,
+              f: rhai::INT,
+              y: rhai::Array|
+              -> Result<net_format::MlpDef, Box<rhai::EvalAltResult>> {
+            fit_mlp_impl(x, t, f, y, &crate::mlp::MlpParams::default())
+        },
+    );
+    engine.register_fn(
+        "fit_mlp",
+        move |x: rhai::Array,
+              t: rhai::INT,
+              f: rhai::INT,
+              y: rhai::Array,
+              opts: rhai::Map|
+              -> Result<net_format::MlpDef, Box<rhai::EvalAltResult>> {
+            fit_mlp_impl(x, t, f, y, &mlp_params(&opts)?)
+        },
+    );
+    engine.register_fn(
+        "mlp_output",
+        |m: &mut net_format::MlpDef, x: rhai::Array| -> f64 {
+            let xf: Vec<f32> = x.iter().map(|d| d_f64(d) as f32).collect();
+            crate::mlp::mlp_output(m, &xf) as f64
+        },
+    );
+    engine.register_fn("mlp_sizes", |m: &mut net_format::MlpDef| -> rhai::Array {
+        m.sizes.iter().map(|&s| dyn_f64(s as f64)).collect()
+    });
+    {
+        let v = net_version.clone();
+        engine.register_fn(
+            "set_readout_mlp",
+            move |n: &mut NetHandle,
+                  name: &str,
+                  m: net_format::MlpDef|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                bump(&v);
+                n.borrow_mut().set_readout_mlp(name, Some(m)).map_err(s_err)
+            },
+        );
+    }
+    engine.register_fn("readout_mlp", |n: &mut NetHandle, name: &str| -> Dynamic {
+        match n.borrow().readout_mlp(name) {
+            Some(m) => Dynamic::from(m.clone()),
+            None => Dynamic::UNIT,
+        }
+    });
+
+    // `sim.backend()` → "cpu" | "cuda" — examples report which engine ran.
+    {
+        let b = backend.clone();
+        engine.register_fn("backend", move |_: &mut SimSlot| -> String {
+            match b.get() {
+                BackendKind::Cpu => "cpu".to_string(),
+                BackendKind::Cuda => "cuda".to_string(),
+            }
+        });
+    }
 
     // ---- RNG ----
     {

@@ -15,8 +15,9 @@ pub mod rng;
 mod network;
 
 pub use network::{
-    check_grid_dims, GridShape, Group, Input, Meta, Network, Neuron, NeuronKind, NeuronModel,
-    NeuronType, Readout, Samples, SynCsr, Synapse, IZH_FS_PARAMS, IZH_RS_PARAMS, MAX_GRID_TEXELS,
+    check_grid_dims, GridShape, Group, Input, Meta, MlpDef, Network, Neuron, NeuronKind,
+    NeuronModel, NeuronType, Readout, Samples, SynCsr, Synapse, IZH_FS_PARAMS, IZH_RS_PARAMS,
+    MAX_GRID_TEXELS,
 };
 pub use rng::Rng;
 
