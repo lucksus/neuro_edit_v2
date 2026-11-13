@@ -519,6 +519,12 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                                 },
                             );
                         } else {
+                            // The edits that replaced `format!`-built `Eval`s
+                            // keep that path's `> net.…` console echo — the
+                            // line that teaches the script equivalent.
+                            if let Some(line) = script_equiv(&edit) {
+                                emit_b(&emit, con(format!("> {line}")));
+                            }
                             // Scope the net borrow: the Delta arm needs fresh
                             // reads (non_grid, geo_snap) — a match scrutinee
                             // RefMut would live across the arms.
@@ -1494,6 +1500,38 @@ pub fn geo_from_net(net: &Network, dt: f32) -> Geo {
 // ---------------------------------------------------------------------------
 // edits → deltas
 // ---------------------------------------------------------------------------
+
+/// The `net.*` script call this edit replaced, formatted exactly as
+/// the old `format!`-built `Eval` produced it — echoed to the console
+/// as `> net.…`. `None` for edits that never went through a script.
+fn script_equiv(e: &NetEdit) -> Option<String> {
+    match e {
+        NetEdit::CreateConnections {
+            group,
+            scaling,
+            lambda,
+            w,
+        } => Some(format!(
+            "net.create_connections({group:?}, {scaling:?}, {lambda:?}, {w:?})"
+        )),
+        NetEdit::SetSynapseWeights { group, mean, sd } => Some(format!(
+            "net.set_synapse_weights({group:?}, {mean:?}, {sd:?})"
+        )),
+        NetEdit::SetSynTauDist {
+            src,
+            dst,
+            mean,
+            sd,
+        } => Some(format!(
+            "net.set_syn_tau_dist({src:?}, {dst:?}, {mean:?}, {sd:?})"
+        )),
+        NetEdit::SetExcInh { group, frac } => Some(format!("net.set_exc_inh({group:?}, {frac:?})")),
+        NetEdit::ScriptAdd { name, src } => {
+            Some(format!("net.script_add({name:?}, {src:?})"))
+        }
+        _ => None,
+    }
+}
 
 enum Applied {
     /// Emit a `GeoDelta`.

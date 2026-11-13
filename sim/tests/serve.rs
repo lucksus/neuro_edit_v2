@@ -1530,3 +1530,96 @@ fn edit_script_add_stores_and_replaces_script() {
     );
     rig.stop();
 }
+
+/// Two overlapping groups over 9 neurons with a few synapses — the
+/// starting net the group-edit tests share (deterministic, no rng).
+fn group_net() -> Network {
+    let mut net = Network::new();
+    for i in 0..9 {
+        net.add_neuron(
+            [i as f32, (i % 3) as f32, 0.0],
+            net_format::NeuronKind::Excitatory,
+        );
+    }
+    net.add_group("g");
+    net.groups[0].members = (0..7).collect();
+    net.add_group("h");
+    net.groups[1].members = (5..9).collect();
+    net.connect(0, 5, 1.0);
+    net.connect(0, 6, 1.0);
+    net.connect(1, 6, 1.0);
+    net
+}
+
+/// 19b: the five edits that replaced `format!`-built `Eval`s must
+/// still echo the `> net.…` line the console used to show — it's how
+/// a dialog teaches the script equivalent.
+#[test]
+fn typed_edits_echo_script_line() {
+    let rig = start(group_net(), None);
+    let mut base = subscribe_base(&rig);
+
+    let cases: Vec<(NetEdit, &str)> = vec![
+        (
+            NetEdit::CreateConnections {
+                group: "g".into(),
+                scaling: 0.3,
+                lambda: 0.1,
+                w: 0.5,
+            },
+            "> net.create_connections(\"g\", 0.3, 0.1, 0.5)",
+        ),
+        (
+            NetEdit::SetSynapseWeights {
+                group: "g".into(),
+                mean: 0.3,
+                sd: 0.1,
+            },
+            "> net.set_synapse_weights(\"g\", 0.3, 0.1)",
+        ),
+        (
+            NetEdit::SetSynTauDist {
+                src: "g".into(),
+                dst: "h".into(),
+                mean: 0.3,
+                sd: 0.1,
+            },
+            "> net.set_syn_tau_dist(\"g\", \"h\", 0.3, 0.1)",
+        ),
+        (
+            NetEdit::SetExcInh {
+                group: "g".into(),
+                frac: 0.2,
+            },
+            "> net.set_exc_inh(\"g\", 0.2)",
+        ),
+        (
+            NetEdit::ScriptAdd {
+                name: "drive".into(),
+                src: "sim.run(10)".into(),
+            },
+            "> net.script_add(\"drive\", \"sim.run(10)\")",
+        ),
+    ];
+    for (edit, want) in cases {
+        rig.send(ClientMsg::Edit { base, edit });
+        let evs = rig.until(|m| {
+            matches!(m, ServerMsg::GeoDelta(_)) || matches!(m, ServerMsg::Error(_))
+        });
+        let d = evs
+            .iter()
+            .find_map(|e| match &e.msg {
+                ServerMsg::GeoDelta(d) => Some(&**d),
+                _ => None,
+            })
+            .expect("edit refused");
+        base = d.version;
+        // broadcast, like the Eval echo was — every client sees it
+        let hit = evs
+            .iter()
+            .find(|e| matches!(&e.msg, ServerMsg::Console(s) if s == want));
+        assert!(hit.is_some(), "missing console echo {want:?}: {evs:?}");
+        assert_eq!(hit.unwrap().to, None);
+    }
+    rig.stop();
+}
