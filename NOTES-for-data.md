@@ -3241,3 +3241,100 @@ than hiding it.
   (each 40 ms window does `run_steps` + `spike_counts`). Batch the feature
   collection (one `run` + sample at end via trace buffer) if we want it
   faster; acceptable as-is?
+
+## Stage 24d — the AdEx noise-kick unit bug, long-haul audit, honest tails
+
+Data's Stage-24 review caught it: `stage24_adex_1440900.png` showed
+`rate = 0.0 Hz` at t = 65.7 s — spikes 1241 vs the script's
+`done: spikes=1238`, i.e. ~3 spikes in a minute of Run — while the
+console claimed the liquid was "still firing".
+
+### Root cause: `noise_kick_mv` was mV for izh, mV/281 for AdEx
+
+Noise DID reach AdEx on both backends — `set_noise(rate, kick)` draws
+per-neuron Poisson kicks from a shared counter hash (`noise_fires` on
+CPU, `noise_hash` on CUDA, same draws) and adds `kick/dt` input units
+to `I` for one step. The unit was wrong per model: izh's `v̇` takes `+I`
+so a kick moves v by `noise_kick_mv` mV as documented — but AdEx's
+`v̇` takes `+I/C` (pA into C=281 pF), so the same setting gave
+`700/281 ≈ 2.5 mV` per kick, under the ~20 mV gap to threshold, and
+the liquid died within seconds of the script ending.
+
+Fix: `NeuronModel::noise_gain(p)` (default 1.0) — AdEx returns C
+(`p[0]`). CPU scales the pulse by it (`cpu.rs`); CUDA keeps a raw
+`nzk` pulse and each generated model case emits `I += nzk * gain`
+(`kernels.rs`). Now `noise_kick_mv` means the same Δv for every model;
+`state.rs` documents the contract. Only AdEx nets change behaviour —
+izh's gain is `1.0f` so its input math is bit-identical to c063b03
+(all izh snapshot/parity tests pass unchanged; `lsm_big`/`lsm_big_off`/
+`lsm_readout` numbers below are the same run).
+
+New tests (`sim/tests/adex.rs`): one tonic AdEx on noise alone fires
+at the example's setting (60 Hz × 14 mV: >0.5 Hz measured over 20 s)
+and rate rises with noise rate (30 Hz vs 120 Hz kick rate) — on CPU
+and CUDA.
+
+### Retuned tails — measured, not claimed
+
+With the unit fixed, 700 mV was absurd — the AdEx tail is now
+`set_noise(60.0, 14.0)` (sub-threshold kicks that stack through
+τ_m ≈ 9.4 ms — stochastic firing, not one spike per kick). izh tails
+keep `set_noise(60.0, 10.0)` (`lsm_readout` 8.0). All four liquids now
+print a measured rate: `done: tail rate=X.X Hz over N … on noise;
+press Run to keep it going` — no more fixed "still firing".
+
+`lsm_adex` held-out numbers, rerun on this branch — **unchanged**
+(the noise change only touches the post-training tail):
+
+| metric | full (CUDA) | quick (CPU) |
+|---|---|---|
+| test mlp auc/acc | 0.937 / 0.86 | 0.822 / 0.75 |
+| test ridge auc/acc | 0.887 / 0.75 | 0.94 / 0.854 |
+| test raw auc | 0.531 | 0.538 |
+| test cooc auc | 1.0 | 1.0 |
+| tail rate | 8.0 Hz | 11.5 Hz |
+
+Long-run gate (item 2): after the script, `sim.run(30_000)` × 2 —
+reservoir rate stayed **7.83 Hz over 32–62 s on CUDA (full)** and
+**7.77 Hz on CPU (quick)**, both ≫ 1 Hz. The Stage-24 open question
+("AdEx goes quiet after the tail — adaptation wins at 200 Hz?") is
+answered: it wasn't adaptation, it was the kick unit.
+
+### Audit tests the long haul (`editor/tests/example_audit.rs`)
+
+The 300 ms check let a dying liquid pass. Now, after eval, each
+example is `RunMs(4000)`, spike count recorded, then `RunMs(1000)`
+more — and it must publish **new spikes in the LAST second**
+(`spikes_total` grows, `rate_hz > 0`). All 9 pass in ~92 s under
+`NEURO_QUICK=1`. Named sabotage verified: `lsm_adex` with tail
+`set_noise(60.0, 0.0)` fails the last-second gate (temporary test,
+removed after the check).
+
+### Editor: Plots + title
+
+- Plots fix — chose **watch on load** over closing Plots: the three
+  big liquids + `lsm_readout` carry `watch=[0,1,2]` so a Run opens
+  Plots with real v(t) (and w(t) for AdEx) instead of the empty
+  "no watched neurons" window covering the reservoir.
+- Title: `net_label` records the script's name on Run — example name
+  for bundled picks, `.rhai` stem for `--script`. Top bar shows
+  file name → net_label → `(new net)`; cleared on New net.
+
+### Shots
+
+`review/stage24_adex_{800700,1440900}.png` — lsm_adex on CUDA after
+≥30 s of Run (t = 71.8 s / 113 s), status-bar rate ≈ 7.9 Hz, title
+`lsm_adex`, Plots showing spiking AdEx v(t), console's measured
+`tail rate=8.0 Hz` line.
+`review/stage24_lsm_block_{800700,1440900}.png` — lsm_big block group
+after ≥30 s of Run (see each shot's status bar).
+
+### Gates
+
+- `cargo check --workspace --all-targets` clean on every commit
+  `2002099..b537702` (the four Stage-24d commits).
+- `cargo test --workspace`: **323 passed, 0 failed** (321 → +2: the two
+  lone-AdEx noise tests; the audit itself grew to ~103 s).
+- `editor/web/build.sh` — OK. `cargo fmt --check` — clean.
+- Spike regression vs c063b03: only AdEx nets change (documented bug);
+  every izh net is bit-identical (gain = 1.0f).
