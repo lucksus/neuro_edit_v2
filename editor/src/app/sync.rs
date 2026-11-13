@@ -163,7 +163,7 @@ impl EditorApp {
                 self.files.status = e.clone();
             }
             self.status = e.clone();
-            self.last_error = Some(e);
+            self.console.last_error = Some(e);
         }
         self.jobs.list = jobs;
         self.jobs.progress = job_progress;

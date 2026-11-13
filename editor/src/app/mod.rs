@@ -113,15 +113,8 @@ pub struct EditorApp {
     plane_geo: u64,
     plane_cfgs_last: Vec<crate::plane::PlaneCfg>,
 
-    console_input: String,
-    history: Vec<String>,
-    hist_idx: Option<usize>,
-    /// U1: latest server error — the status line shows it in warning
-    /// colour while `self.status` still equals it.
-    last_error: Option<String>,
-    /// U1: `Shared::err_seq` at the last console-open — the Console
-    /// button gets an unread dot while unseen errors exist.
-    err_seq_seen: u64,
+    /// Console input/history + server-error unread state.
+    console: ConsoleUi,
     pub(crate) show_console: bool,
     pub(crate) show_plots: bool,
     pub(crate) show_inspector: bool,
@@ -375,6 +368,21 @@ pub struct SimControls {
     pub noise_kick: f32,
 }
 
+/// Console state: input line, command history + cursor, latest server
+/// error and the seen-marker for the unread dot.
+#[derive(Default)]
+pub struct ConsoleUi {
+    pub input: String,
+    pub history: Vec<String>,
+    pub hist_idx: Option<usize>,
+    /// U1: latest server error — the status line shows it in warning
+    /// colour while `self.status` still equals it.
+    pub last_error: Option<String>,
+    /// U1: `Shared::err_seq` at the last console-open — the Console
+    /// button gets an unread dot while unseen errors exist.
+    pub err_seq_seen: u64,
+}
+
 /// Script-window state: editor buffer + file name, plus the
 /// example-run auto-watch handshake (see examples.rs).
 pub struct ScriptUi {
@@ -552,11 +560,7 @@ impl EditorApp {
             hover: None,
             pick_click: None,
             inst_half: Vec::new(),
-            console_input: String::new(),
-            history: Vec::new(),
-            hist_idx: None,
-            last_error: None,
-            err_seq_seen: 0,
+            console: ConsoleUi::default(),
             show_console: wins.console,
             show_plots: wins.plots,
             show_inspector: wins.inspector,

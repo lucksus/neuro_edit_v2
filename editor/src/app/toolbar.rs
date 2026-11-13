@@ -216,7 +216,7 @@ impl EditorApp {
                 ui.menu_button("View", |ui| {
                     // toggles stay open so several windows can flip at once
                     let err_seq = self.ctl.shared.read().unwrap().err_seq;
-                    let unread_err = err_seq > self.err_seq_seen && !self.show_console;
+                    let unread_err = err_seq > self.console.err_seq_seen && !self.show_console;
                     for (flag, icon, label) in [
                         (&mut self.show_inspector, &ic.inspector, "Inspector"),
                         (&mut self.show_plots, &ic.plots, "Plots"),
@@ -456,7 +456,7 @@ impl EditorApp {
                 ui.separator();
                 // U1: while the status line still holds the latest
                 // error, draw it in warning colour.
-                if self.last_error.as_deref() == Some(self.status.as_str()) {
+                if self.console.last_error.as_deref() == Some(self.status.as_str()) {
                     ui.label(egui::RichText::new(&self.status).color(egui::Color32::LIGHT_RED));
                 } else {
                     ui.label(&self.status);
