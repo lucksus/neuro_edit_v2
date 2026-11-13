@@ -204,6 +204,15 @@ pub struct GeoDelta {
 // edits (the data version of today's EditNet closures)
 // ---------------------------------------------------------------------------
 
+/// The f64 a `format!("{x:?}")`-built Rhai call delivered for an f32
+/// field — the shortest-decimal string reparsed. A plain `x as f64`
+/// widens the binary tail instead (`0.3f32 as f64` is
+/// 0.30000001192092896), so RNG thresholds and stored weights/taus
+/// would differ from the same digits typed into a script.
+pub fn f64_of(x: f32) -> f64 {
+    format!("{x:?}").parse().unwrap_or(x as f64)
+}
+
 /// A network mutation. Sent as `ClientMsg::Edit { base, edit }`; the server
 /// applies it only if `base` equals its current `net_version`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

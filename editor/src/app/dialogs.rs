@@ -5,7 +5,7 @@
 use eframe::egui;
 
 use crate::gpu::Entity;
-use proto::{ClientMsg, NetEdit};
+use proto::{f64_of, ClientMsg, NetEdit};
 
 use super::files::dir_of;
 use super::layout::app_win;
@@ -186,8 +186,8 @@ impl EditorApp {
                         if ui.button("Create").clicked() {
                             self.edit_net(NetEdit::CreateConnections {
                                 group: group.clone(),
-                                scaling: *scaling as f64,
-                                lambda: *lambda as f64,
+                                scaling: f64_of(*scaling),
+                                lambda: f64_of(*lambda),
                                 w: *w,
                             });
                             *keep = false;
@@ -208,8 +208,8 @@ impl EditorApp {
                         if ui.button("Apply").clicked() {
                             self.edit_net(NetEdit::SetSynapseWeights {
                                 group: group.clone(),
-                                mean: *mean as f64,
-                                sd: *sd as f64,
+                                mean: f64_of(*mean),
+                                sd: f64_of(*sd),
                             });
                             *keep = false;
                         }
@@ -235,8 +235,8 @@ impl EditorApp {
                             self.edit_net(NetEdit::SetSynTauDist {
                                 src: src.clone(),
                                 dst: dst.clone(),
-                                mean: *mean as f64,
-                                sd: *sd as f64,
+                                mean: f64_of(*mean),
+                                sd: f64_of(*sd),
                             });
                             *keep = false;
                         }
@@ -255,7 +255,7 @@ impl EditorApp {
                         if ui.button("Apply").clicked() {
                             self.edit_net(NetEdit::SetExcInh {
                                 group: group.clone(),
-                                frac: *frac as f64,
+                                frac: f64_of(*frac),
                             });
                             *keep = false;
                         }

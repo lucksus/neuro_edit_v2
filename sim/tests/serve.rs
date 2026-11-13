@@ -1333,9 +1333,8 @@ fn backend_switch_keeps_script_drive() {
 /// Send an edit, wait for its GeoDelta, return it (fails on Error).
 fn edit_delta(rig: &Rig, base: u64, edit: NetEdit) -> Box<proto::GeoDelta> {
     rig.send(ClientMsg::Edit { base, edit });
-    let evs = rig.until(|m| {
-        matches!(m, ServerMsg::GeoDelta(_)) || matches!(m, ServerMsg::Error(_))
-    });
+    let evs =
+        rig.until(|m| matches!(m, ServerMsg::GeoDelta(_)) || matches!(m, ServerMsg::Error(_)));
     evs.iter()
         .find_map(|e| match &e.msg {
             ServerMsg::GeoDelta(d) => Some(d.clone()),
@@ -1347,18 +1346,7 @@ fn edit_delta(rig: &Rig, base: u64, edit: NetEdit) -> Box<proto::GeoDelta> {
 
 /// Copy `ids` back out as a subnet and parse the JSON.
 fn subnet_json(rig: &Rig, ids: &[u32]) -> serde_json::Value {
-    rig.send(ClientMsg::CopySubnet {
-        ids: ids.to_vec(),
-    });
-    let evs = rig.until(|m| matches!(m, ServerMsg::Clipboard(_)));
-    let txt = evs
-        .iter()
-        .find_map(|e| match &e.msg {
-            ServerMsg::Clipboard(t) => Some(t.clone()),
-            _ => None,
-        })
-        .expect("a Clipboard reply");
-    serde_json::from_str(&txt).expect("subnet json parses")
+    serde_json::from_str(&subnet_txt(rig, ids)).expect("subnet json parses")
 }
 
 fn subscribe_base(rig: &Rig) -> u64 {
@@ -1427,7 +1415,11 @@ fn edit_set_synapse_weights_changes_net() {
         .iter()
         .map(|s| s["w"].as_f64().unwrap())
         .collect();
-    assert_eq!(ws, vec![-5.0, -5.0], "weights did not reach the net: {ws:?}");
+    assert_eq!(
+        ws,
+        vec![-5.0, -5.0],
+        "weights did not reach the net: {ws:?}"
+    );
     rig.stop();
 }
 
@@ -1603,9 +1595,8 @@ fn typed_edits_echo_script_line() {
     ];
     for (edit, want) in cases {
         rig.send(ClientMsg::Edit { base, edit });
-        let evs = rig.until(|m| {
-            matches!(m, ServerMsg::GeoDelta(_)) || matches!(m, ServerMsg::Error(_))
-        });
+        let evs =
+            rig.until(|m| matches!(m, ServerMsg::GeoDelta(_)) || matches!(m, ServerMsg::Error(_)));
         let d = evs
             .iter()
             .find_map(|e| match &e.msg {
@@ -1666,8 +1657,7 @@ fn create_connections_edit_stops_on_abort() {
     // Busy must mark the build while it runs (a GeoDelta first means
     // the whole O(m²) loop ran with no busy flag and no Stop).
     let evs = rig.until(|m| {
-        matches!(m, ServerMsg::Status { busy: true, .. })
-            || matches!(m, ServerMsg::GeoDelta(_))
+        matches!(m, ServerMsg::Status { busy: true, .. }) || matches!(m, ServerMsg::GeoDelta(_))
     });
     assert!(
         evs.iter()
@@ -1734,4 +1724,77 @@ fn create_connections_edit_stops_on_abort() {
         "build must have stopped before all pairs were tried"
     );
     rig.stop();
+}
+
+/// Copy `ids` back out as a subnet — raw JSON text.
+fn subnet_txt(rig: &Rig, ids: &[u32]) -> String {
+    rig.send(ClientMsg::CopySubnet { ids: ids.to_vec() });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Clipboard(_)));
+    evs.iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::Clipboard(t) => Some(t.clone()),
+            _ => None,
+        })
+        .expect("a Clipboard reply")
+}
+
+/// 19b: a typed group edit must land exactly like the `Eval` string
+/// it replaced — same seed, same starting net, so the two sessions
+/// end with byte-identical subnet JSON. This is what pins the
+/// dialog's f32 → the f64 the Rhai parser produced (`proto::f64_of`)
+/// and the identical rng draw order.
+#[test]
+fn typed_group_edits_match_eval() {
+    let all: Vec<u32> = (0..9).collect();
+    let cases: Vec<(&str, NetEdit)> = vec![
+        (
+            "net.create_connections(\"g\", 0.3, 3.0, 0.5)",
+            NetEdit::CreateConnections {
+                group: "g".into(),
+                scaling: proto::f64_of(0.3),
+                lambda: proto::f64_of(3.0),
+                w: 0.5,
+            },
+        ),
+        (
+            "net.set_synapse_weights(\"g\", 0.3, 0.1)",
+            NetEdit::SetSynapseWeights {
+                group: "g".into(),
+                mean: proto::f64_of(0.3),
+                sd: proto::f64_of(0.1),
+            },
+        ),
+        (
+            "net.set_syn_tau_dist(\"g\", \"h\", 0.3, 0.1)",
+            NetEdit::SetSynTauDist {
+                src: "g".into(),
+                dst: "h".into(),
+                mean: proto::f64_of(0.3),
+                sd: proto::f64_of(0.1),
+            },
+        ),
+        (
+            "net.set_exc_inh(\"g\", 0.2)",
+            NetEdit::SetExcInh {
+                group: "g".into(),
+                frac: proto::f64_of(0.2),
+            },
+        ),
+    ];
+    for (code, edit) in cases {
+        // CopySubnet is processed after the op either way — the
+        // Clipboard reply is the settled net in both sessions.
+        let rig_eval = start(group_net(), None);
+        rig_eval.send(ClientMsg::Eval { code: code.into() });
+        let eval_json = subnet_txt(&rig_eval, &all);
+
+        let rig_edit = start(group_net(), None);
+        let base = subscribe_base(&rig_edit);
+        rig_edit.send(ClientMsg::Edit { base, edit });
+        let edit_json = subnet_txt(&rig_edit, &all);
+
+        assert_eq!(eval_json, edit_json, "`{code}` vs the typed edit diverged");
+        rig_eval.stop();
+        rig_edit.stop();
+    }
 }
