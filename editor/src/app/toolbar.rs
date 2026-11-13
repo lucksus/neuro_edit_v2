@@ -90,7 +90,52 @@ impl EditorApp {
                         self.guarded(ctx, PendingAction::Quit);
                     }
                 });
-                ui.menu_button("Edit", |ui| {
+                let edit_menu = ui.menu_button("Edit", |ui| {
+                    // Stage 23: the worker owns the stacks and names the
+                    // top step — the menu just renders the labels it
+                    // ships in Status. Same gate as edits: an undo
+                    // rebuilds the sim.
+                    let (undo_l, redo_l) = {
+                        let sh = self.ctl.shared.read().unwrap();
+                        (sh.undo_label.clone(), sh.redo_label.clone())
+                    };
+                    let undo_why = why_edit.or(if undo_l.is_none() {
+                        Some("nothing to undo")
+                    } else {
+                        None
+                    });
+                    let redo_why = why_edit.or(if redo_l.is_none() {
+                        Some("nothing to redo")
+                    } else {
+                        None
+                    });
+                    if gate(
+                        ui,
+                        undo_why,
+                        egui::Button::new(match &undo_l {
+                            Some(l) => format!("Undo {l} (Ctrl+Z)"),
+                            None => "Undo (Ctrl+Z)".into(),
+                        }),
+                    )
+                    .clicked()
+                    {
+                        self.undo();
+                        ui.close();
+                    }
+                    if gate(
+                        ui,
+                        redo_why,
+                        egui::Button::new(match &redo_l {
+                            Some(l) => format!("Redo {l} (Ctrl+Shift+Z)"),
+                            None => "Redo (Ctrl+Shift+Z)".into(),
+                        }),
+                    )
+                    .clicked()
+                    {
+                        self.redo();
+                        ui.close();
+                    }
+                    ui.separator();
                     let sel = self.selection.is_empty();
                     let why_sel = sel.then_some("nothing selected");
                     if gate(ui, why_sel, egui::Button::new("Copy (Ctrl+C)")).clicked() {
@@ -134,6 +179,14 @@ impl EditorApp {
                         ui.close();
                     }
                 });
+                // Review driver: --open-menu Edit keeps the menu open so
+                // a screenshot catches the live Undo label.
+                if self.open_menu.as_deref() == Some("Edit") {
+                    egui::Popup::open_id(
+                        ctx,
+                        egui::Popup::default_response_id(&edit_menu.response),
+                    );
+                }
                 ui.menu_button("Insert", |ui| {
                     if gate(ui, why_edit, egui::Button::new("Neuron (I)")).clicked() {
                         self.mode = Mode::Insert;

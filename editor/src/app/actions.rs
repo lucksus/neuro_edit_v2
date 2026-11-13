@@ -7,7 +7,7 @@ use crate::gpu::Entity;
 use crate::scene::Particles;
 use proto::{ClientMsg, NetEdit};
 
-use super::{Dialog, EditorApp, MoveDrag, PendingAction, PlotTab};
+use super::{Act, Dialog, EditorApp, MoveDrag, PendingAction, PlotTab};
 
 impl EditorApp {
     /// Context-menu helper: watch a neuron's v(t) by selecting it (the
@@ -229,6 +229,7 @@ impl EditorApp {
         self.box_sel = None;
         self.hover = None;
         self.pick_click = None;
+        self.click_block = None; // Geo.groups index — meaningless on the new net
         if !self.watch_sent.is_empty() {
             self.watch_sent.clear();
             self.send(ClientMsg::Watch(Vec::new()));
@@ -292,6 +293,25 @@ impl EditorApp {
             json: txt,
             offset: [30.0, 0.0, 30.0],
         });
+    }
+
+    /// Worker-owned history (Stage 23). Undo/redo are edits like any
+    /// other — the worker rebuilds the sim and republishes — so they go
+    /// through the same gate a structural edit does.
+    pub fn undo(&mut self) {
+        if let Some(why) = self.why(Act::Edit) {
+            self.status = format!("undo blocked: {why}");
+            return;
+        }
+        self.send(ClientMsg::Undo);
+    }
+
+    pub fn redo(&mut self) {
+        if let Some(why) = self.why(Act::Edit) {
+            self.status = format!("redo blocked: {why}");
+            return;
+        }
+        self.send(ClientMsg::Redo);
     }
 }
 

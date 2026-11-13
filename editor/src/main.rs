@@ -79,6 +79,25 @@ struct Cli {
     /// (the sim keeps stepping — traces accumulate for shots).
     #[arg(long)]
     autorun: bool,
+    /// Stage 23 review driver: set a group's mode `name:whole|inside|block`
+    /// (repeatable, applied each frame).
+    #[arg(long)]
+    group_mode: Vec<String>,
+    /// Stage 23 review driver: select a named group's members once Geo
+    /// names them (whole-group selection shot).
+    #[arg(long)]
+    group_sel: Option<String>,
+    /// Stage 23 review driver: select these instance ids once Geo covers
+    /// them (inside-mode member shot).
+    #[arg(long)]
+    sel: Option<String>,
+    /// Stage 23 review driver: keep this menubar menu open (e.g. "Edit").
+    #[arg(long)]
+    open_menu: Option<String>,
+    /// Stage 23 review driver: after --group-sel/--sel lands, move the
+    /// selection by x,y,z (gives the Edit menu a real undo label).
+    #[arg(long)]
+    edit_move: Option<String>,
     /// GUI window size WxH (default 1440x900) — deterministic size for
     /// review screenshots.
     #[arg(long)]
@@ -118,6 +137,7 @@ fn main() -> anyhow::Result<()> {
             plane_cfgs: Default::default(),
             noise_hz: cli.noise_hz,
             noise_kick: cli.noise_kick,
+            group_sel: Default::default(),
         };
         return pollster::block_on(editor::shot::render_headless(opts));
     }
@@ -173,6 +193,21 @@ fn main() -> anyhow::Result<()> {
         let ids: Vec<u32> = s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
         &*Box::leak(ids.into_boxed_slice())
     });
+    let shot_sel: Option<Vec<u32>> = cli
+        .sel
+        .as_deref()
+        .map(|s| s.split(',').filter_map(|t| t.trim().parse().ok()).collect());
+    let shot_group_modes = cli.group_mode.clone();
+    let shot_group_sel = cli.group_sel.clone();
+    let open_menu = cli.open_menu.clone();
+    let shot_move: Option<glam::Vec3> = cli.edit_move.as_deref().map(|s| {
+        let v: Vec<f32> = s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+        glam::vec3(
+            v.first().copied().unwrap_or(0.0),
+            v.get(1).copied().unwrap_or(0.0),
+            v.get(2).copied().unwrap_or(0.0),
+        )
+    });
     let (win_w, win_h) = cli
         .window_size
         .as_deref()
@@ -219,6 +254,11 @@ fn main() -> anyhow::Result<()> {
             if let Some(ids) = shot_watch {
                 app.arm_example_watch(ids);
             }
+            app.shot_group_modes = shot_group_modes.clone();
+            app.shot_group_sel = shot_group_sel.clone();
+            app.shot_sel = shot_sel.clone();
+            app.open_menu = open_menu.clone();
+            app.shot_move = shot_move;
             // dark theme — set_theme, not set_visuals: eframe applies the
             // system light scheme AFTER the app creator, which would undo
             // a bare set_visuals(dark) on light desktops/browser OS themes

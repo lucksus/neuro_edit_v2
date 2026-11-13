@@ -2986,3 +2986,155 @@ Checked each myself:
 - `editor/web/build.sh`: wasm release build OK; dist-web served on
   :3422 and rendered (web_1440 shot).
 - `cargo fmt --all --check`: clean.
+
+## Stage 23 — group modes + worker-owned undo/redo
+
+### Undo/redo: architecture and why
+
+The worker (local `sim serve` thread or the remote wire server) owns the
+network, so history lives there — `ClientMsg::{Undo, Redo}` are ordinary
+protocol commands and the hosted web build gets the same behaviour with
+no client-side duplicate.
+
+Each history step is a **pre-edit snapshot** `UndoSnap { net, rng, gen }`
+plus a label: two `VecDeque`s (`undo`, `redo`) in `run()`'s command loop.
+Snapshot over typed `NetEdit` inverses because builders are rng-driven
+(`create_connections` consumes `env.rng`) and evals mutate through many
+paths (`net.clear`, file loads, group edits) — a pre-eval clone is the
+only capture that cannot miss a mutation. Pushed at: `Edit` (on accept),
+`Eval` (when net version or generation changed — one step however many
+edits the script made), `LoadNet`, `NewNet`. Redo clears on any fresh
+edit/eval/load.
+
+Undo = `env.invalidate_sim()` against the OLD net first (drive-stash
+name lookups must resolve against pre-swap indexes), swap net+rng+gen,
+`net_version` bump → the existing republish turns it into Geo/GridTraces
+like every other edit. Sim time/activity/state are never captured — only
+the net, its rng and its group-generation counter.
+
+**Two clients, one run:** the net is shared, so the stack is shared —
+either client's Ctrl+Z pops the last network edit whoever sent it
+(documented in the manual). `Status` carries the top-of-stack labels so
+every client's Edit menu shows the same next action.
+
+**Bound:** `UNDO_MAX_STEPS = 64`, `UNDO_MAX_BYTES = 256 MiB` estimated
+(`est_net_bytes`: neurons, synapses incl. weights/delay vectors, groups,
+inputs, readouts, samples). `push_step_bounded` evicts the OLDEST entry
+while over either cap — a single oversized snapshot is kept as the sole
+undo point rather than dropping history entirely.
+
+**PROTO_VERSION 3 → 4:** `ClientMsg` gained `Undo`/`Redo`; `Status`
+gained `undo`/`redo` label fields.
+
+### Editor
+
+- Edit menu: `Undo {label} (Ctrl+Z)` / `Redo {label} (Ctrl+Shift+Z)`
+  from the worker labels; disabled entries say "nothing to undo/redo"
+  or the edit-gate reason. Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y bound in
+  `view::keys`; both go through `why(Act::Edit)` so a blocked undo
+  lands in the status line.
+- `app/groups.rs`: `GroupMode { Whole, Inside, Block }` — one control
+  family (view IS interaction mode); `group_expand` (pick → acted-on
+  set), `click_select`, `expand_sel_groups_in` (box-select fixpoint
+  over overlapping groups), `block_members` (hidden set), `group_aabb`.
+- Whole: member click/box/grab takes the whole group (overlaps union);
+  drag is one `MoveNeurons` with the shared offset. Inside: member only.
+  Block: members hidden via `hide_bits` (also skipped in CPU ray tests
+  and dbl-click focus); the projected-AABB glyph — painted AND hit-tested
+  by the same `aabb_screen_rect` — is the handle; it's always whole.
+  Move-mode semantics preserved for ungrouped objects ("drag moves the
+  selection") — a real group grab expands the drag set in both modes.
+- Inspector Groups section: `default: whole|inside` +
+  per-group `whole | inside | block` with hover explanations.
+- Review drivers (`--group-mode`, `--group-sel`, `--sel`, `--open-menu`,
+  `--edit-move`) reuse the `--watch` late-arrival pattern; `xwd`
+  captures need the LAST `xdotool search` match — winit maps a wrapper
+  window with the same title first (all-black capture).
+
+### Screenshots (all live, debug binary under Xvfb :99, llvmpipe)
+
+- `stage23_whole_{800700,1440900}.png` — `stage22_build.rhai` +
+  `--group-sel sheet`: all 400 cubes selected, "400 selected" tag,
+  group box highlighted bright, inspector "400 objects selected" +
+  Groups controls (default whole; sheet whole/inside/block).
+- `stage23_block_{800700,1440900}.png` — `--group-mode sheet:block`:
+  member cubes gone, labelled glyph "sheet / 400 neurons" at the
+  projected bounds, kick input still visible, `block` lit in inspector.
+- `stage23_inside_{800700,1440900}.png` — `sheet:inside --sel 200`:
+  exactly #200 selected (bracket), inspector single-neuron view with
+  "group memberships: sheet", group box unlit (partial selection).
+- `stage23_menu_{800700,1440900}.png` — `--group-sel --edit-move
+  30,0,20 --open-menu Edit`: menu reads "Undo move 400 neurons (Ctrl+Z)",
+  Redo greyed "nothing to redo", unsaved `*` in title, moved sheet
+  selected with lit box.
+
+Inspected all eight myself: correct sizes, whole-sel highlight + count,
+block label + hidden members, single-member inside selection, live undo
+label. Note: a NetEdit invalidates the sim (pre-existing rule) — the
+menu shot's Run dock honestly reads "build — no sim yet" after the move,
+while untouched runs show "paused t = 0.0 s".
+
+### New tests + sabotage evidence
+
+- `undo_redo_round_trip_all_edit_kinds` (sim/tests/serve.rs): every
+  NetEdit variant apply → undo → `.ne2` bytes identical to before;
+  redo → identical to after. Sabotage = push the post-edit snapshot →
+  undo restores the edited net, round trip fails.
+- `eval_with_many_edits_is_one_undo_step`: grid+conns+input+noise eval
+  → one Undo restores the empty net, one Redo rebuilds all of it.
+  Sabotage = skip the eval history record (`if false {}`) → verified
+  failing ("nothing pushed; undo stack empty").
+- `undo_is_one_shared_stack_across_clients`: client A edits, client B
+  undoes → A's edit reverts (documented shared-stack model). Sabotage =
+  per-author guard on the shared stack → verified failing (only this
+  test fails; single-client round trips still pass).
+- `undo_redo_empty_stack_answers_caller`: Undo on empty stack → caller
+  gets a notice, no panic/broadcast. Sabotage = `unwrap()` on pop.
+- `undo_stack_is_bounded` (serve.rs): 100 small steps → 64 deep;
+  byte-cap path with a tiny injected bound evicts oldest, keeps one
+  oversized entry. Sabotage = drop the byte check → depth stays under
+  steps cap but bytes assert fails.
+- `undo_labels_name_actions`: "move 3 neurons", "add neuron",
+  "eval …" shape. Sabotage = generic "edit" label → fails.
+- `whole_group_click_and_drag_moves_every_member` (groups.rs, real
+  worker): click → 16-member selection; drag → ONE MoveNeurons, every
+  member by the same delta; undo label "move 16 neurons"; Undo restores
+  all. Sabotage = `group_expand` returns {inst} → verified failing
+  (this + `group_expand_modes` + `block_mode_is_always_whole` all fail).
+- `inside_mode_drag_moves_one_member`: only member 3 moves.
+- `block_mode_is_always_whole`: block members hidden + whole select.
+- `group_expand_modes`, `box_expansion_chains_overlaps` (chains the
+  overlapping-groups fixpoint), `block_members_hidden`,
+  `full_selection_highlight` — sabotage notes inline.
+
+### Gates + counts
+
+- `cargo test --workspace`: 36 suites, **308 passed, 0 failed**
+  (293 at Stage 22B close → +15).
+- `editor/web/build.sh`: wasm release build OK — undo works on the
+  wire protocol, no client fork.
+- `cargo fmt --all --check`: clean.
+- `cargo check --workspace --all-targets` clean (warnings only, all
+  pre-existing in sim/tests/bounds.rs).
+- Commits: `a95ef41` (proto+worker history+tests), editor group modes/
+  UI/shots/notes in the following commit(s). Never pushed.
+
+### Open questions for Nico
+
+- History is one shared stack per run: two humans on one worker see
+  each other's undos (documented). Alternative is per-client stacks,
+  but the net is shared — undoing "your" step under interleaved
+  foreign edits has no clean meaning. OK?
+- The byte bound estimates live net memory (~256 MiB default). Snapshot
+  cost is a full-net clone per step — fine at 64 steps × typical nets;
+  a 1 M-neuron net is ~200 MB/step so the cap trims depth hard. Raise
+  the cap, or snapshot lazily (copy-on-write on first mutation)?
+- Collapsed block glyph = projected member AABB + label. Should the
+  block be draggable as a unit anywhere on its rect, or keep the
+  member-only grab semantics (current: grab the glyph anywhere moves
+  the group)?
+- Should group mode persist into `.ne2` (it's editor UI state today,
+  not saved)?
+- Whole-group drag moves members but not the group's inputs — the
+  kick input stays behind on a moved sheet. Move inputs that target
+  only group members along too?

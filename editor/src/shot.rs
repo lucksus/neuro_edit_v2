@@ -33,6 +33,8 @@ pub struct ShotOpts {
     /// Poisson background kick for the screenshot run (Hz / mV, 0 = quiet).
     pub noise_hz: f32,
     pub noise_kick: f32,
+    /// Instance ids rendered selected (sel_bits + group-box highlight).
+    pub group_sel: std::collections::HashSet<u32>,
 }
 
 pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
@@ -171,10 +173,18 @@ pub async fn render_headless(o: ShotOpts) -> anyhow::Result<()> {
     }
     cam.clamp_above_floor();
     gpu.write_cam(&cam, w as f32 / h as f32, h as f32, 0.0, None, None);
+    let sel: Vec<u32> = o.group_sel.iter().copied().collect();
+    gpu.write_selection(&sel);
 
-    // overlay: group boxes (the floor grid is the shader-drawn quad)
+    // overlay: group boxes (the floor grid is the shader-drawn quad) —
+    // headless has no group modes/selection, so nothing skipped/lit.
     let mut pvs = Vec::new();
-    scene::group_boxes(&geo, &mut pvs);
+    scene::group_boxes(
+        &geo,
+        &std::collections::HashSet::new(),
+        &o.group_sel,
+        &mut pvs,
+    );
     gpu.write_pv(&pvs);
     let pv_count = pvs.len() as u32;
 

@@ -71,6 +71,12 @@ fn hash_pod<T: bytemuck::NoUninit>(s: &[T]) -> u64 {
     h.finish()
 }
 
+/// SceneKey contribution of the hide-bit field alone — `plane_frame`
+/// uses it on the no-grids path so a block toggle still re-renders.
+pub(crate) fn hash_bits(bits: &[u32]) -> u64 {
+    hash_pod(bits)
+}
+
 /// Build the frame's SceneKey (Stage 14 B). Every input the scene pass
 /// reads is fingerprinted — Stage 15 F audit:
 ///   w_px/h_px  scene-texture size (DPI is already in physical pixels)
@@ -310,6 +316,10 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
             {
                 if let Some(mv) = mouse_vp {
                     app.pick_click = Some((mv, app.wall_ms));
+                    // A collapsed block is a CPU-only glyph — remember it
+                    // so a pick miss still lands on the group. A real
+                    // entity hit beats it.
+                    app.click_block = block_at(app, mv, rect, aspect);
                 }
             }
             if let Some((mv, queued_ms)) = app.pick_click {
@@ -386,7 +396,13 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
                 scene::work_plane(app.camera.target, app.plane, &mut pvs);
             }
             if let Some(g) = &app.geo {
-                scene::group_boxes(g, &mut pvs);
+                // Collapsed blocks draw their own glyph (overlay_2d) —
+                // no member box; the rest highlight on full selection.
+                let skip: std::collections::HashSet<usize> = app
+                    .group_ids_mode(crate::app::GroupMode::Block)
+                    .into_iter()
+                    .collect();
+                scene::group_boxes(g, &skip, &app.selection, &mut pvs);
                 // input → target links: all of them on small nets, only the
                 // selected input's on big ones (they'd double the line load).
                 let show_all_inputs = g.syn.len() < 10_000 || g.inputs.len() <= 4;
@@ -612,6 +628,18 @@ fn keys(app: &mut EditorApp, ui: &mut egui::Ui) {
         if i.modifiers.ctrl && i.key_pressed(egui::Key::V) && app.can(Act::Edit) {
             app.paste(None);
         }
+        // Stage 23: Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y → the worker's shared
+        // stack. The methods re-check the edit gate themselves, so a
+        // blocked undo lands in the status line instead of misfiring.
+        if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::Z) {
+            app.undo();
+        }
+        if i.modifiers.ctrl
+            && ((i.modifiers.shift && i.key_pressed(egui::Key::Z))
+                || (!i.modifiers.shift && i.key_pressed(egui::Key::Y)))
+        {
+            app.redo();
+        }
     });
 }
 
@@ -694,6 +722,14 @@ fn context_menu(app: &mut EditorApp, resp: &egui::Response) {
 }
 
 fn on_pick(app: &mut EditorApp, res: Option<u32>, ctx: &egui::Context) {
+    // The block candidate belongs to THIS pick only — taken once so a
+    // stale flag can't apply to a later click.
+    let block_members = app.click_block.take().and_then(|gi| {
+        app.geo
+            .as_ref()
+            .and_then(|g| g.groups.get(gi))
+            .map(|(_, m)| m.clone())
+    });
     match app.eff_mode() {
         Mode::Connect => {
             // Only a hit on a neuron/input changes state: a missed click
@@ -734,10 +770,13 @@ fn on_pick(app: &mut EditorApp, res: Option<u32>, ctx: &egui::Context) {
             // mode_input; this pick is the click that launched them).
             if let Some(inst) = res {
                 if !app.selection.contains(&inst) {
-                    app.selection.clear();
-                    app.selection.insert(inst);
+                    app.click_select(inst, false);
                 }
                 app.last_pick = Some(inst);
+            } else if let Some(members) = block_members {
+                // A collapsed block is always whole-group: clicking its
+                // glyph in Move mode selects the members it stands for.
+                app.selection = members.into_iter().collect();
             }
         }
         _ => {
@@ -745,15 +784,17 @@ fn on_pick(app: &mut EditorApp, res: Option<u32>, ctx: &egui::Context) {
             let shift = ctx.input(|i| i.modifiers.shift);
             match res {
                 Some(inst) => {
-                    if !shift {
-                        app.selection.clear();
-                    }
-                    app.selection.insert(inst);
+                    // Whole-group mode: a member click takes its group.
+                    app.click_select(inst, shift);
                     app.last_pick = Some(inst);
                 }
                 None => {
                     if !shift {
                         app.selection.clear();
+                    }
+                    // A pick miss on a collapsed block selects its group.
+                    if let Some(members) = block_members {
+                        app.selection.extend(members);
                     }
                     app.last_pick = None;
                 }
@@ -794,23 +835,42 @@ fn mode_input(
                     // What did the press land on? The hover pick is a frame
                     // stale — fall back to a CPU ray test so the very first
                     // drag in a session still grabs what's under the cursor.
-                    let under = app.hover.or_else(|| {
+                    // Collapsed-block members are invisible: the ray test
+                    // skips them. The glyph is their handle — a press on
+                    // it counts as grabbing the group's first member, so
+                    // Move and Navigate modes treat it identically to a
+                    // visible member.
+                    let hidden = app.block_members();
+                    let mut under = app.hover.or_else(|| {
                         app.geo
                             .as_ref()
-                            .and_then(|g| nearest_on_ray(g, ro, rd, 6.0))
+                            .and_then(|g| nearest_on_ray(g, ro, rd, 6.0, &hidden))
                     });
+                    if under.is_none() {
+                        under = block_at(app, mv, rect, aspect).and_then(|gi| {
+                            app.geo
+                                .as_ref()
+                                .and_then(|g| g.groups.get(gi)?.1.first().copied())
+                        });
+                    }
                     match primary_drag_action(app.eff_mode(), under) {
                         DragAction::Move { grab } => {
-                            if nav {
-                                if let Some(i) = grab {
-                                    if !app.selection.contains(&i) {
-                                        // Drag on an unselected object
-                                        // selects it, then moves.
-                                        if !resp.ctx.input(|i| i.modifiers.shift) {
-                                            app.selection.clear();
-                                        }
-                                        app.selection.insert(i);
+                            if let Some(i) = grab {
+                                if nav && !app.selection.contains(&i) {
+                                    // Drag on an unselected object
+                                    // selects it, then moves.
+                                    if !resp.ctx.input(|i| i.modifiers.shift) {
+                                        app.selection.clear();
                                     }
+                                }
+                                // Whole-group: a grab always moves the
+                                // whole group, selected or not. In Move
+                                // mode ungrouped entities keep the old
+                                // "drag moves the selection" rule — only
+                                // a real group expands the set.
+                                let ex = app.group_expand(i);
+                                if nav || ex.len() > 1 {
+                                    app.selection.extend(ex);
                                 }
                             }
                             begin_move(app, grab, mv, aspect);
@@ -884,14 +944,23 @@ fn mode_input(
             if resp.double_clicked() {
                 if let (Some(g), Some(mv)) = (&app.geo, mouse_vp) {
                     let (ro, rd) = ray(&app.camera, aspect, mv.x, mv.y);
-                    match nearest_on_ray(g, ro, rd, 25.0) {
+                    let hidden = app.block_members();
+                    match nearest_on_ray(g, ro, rd, 25.0, &hidden) {
                         Some(inst) => {
                             if let Some(p) = inst_pos(g, inst) {
                                 app.camera.focus(p);
                             }
                         }
                         None => {
-                            if let Some(hit) = plane_hit(app.plane, app.camera.target, ro, rd) {
+                            // … or a collapsed block under the cursor —
+                            // focus its centre.
+                            if let Some(gi) = block_at(app, mv, rect, aspect) {
+                                if let Some((mn, mx)) = EditorApp::group_aabb(g, &g.groups[gi].1) {
+                                    app.camera.focus((mn + mx) * 0.5);
+                                }
+                            } else if let Some(hit) =
+                                plane_hit(app.plane, app.camera.target, ro, rd)
+                            {
                                 app.camera.focus(hit);
                             }
                         }
@@ -958,10 +1027,21 @@ fn begin_move(app: &mut EditorApp, grab: Option<u32>, mv: Vec2, aspect: f32) {
 }
 
 /// Nearest entity to a ray within `max_t` world units (double-click focus).
-fn nearest_on_ray(g: &GeoSnap, ro: Vec3, rd: Vec3, max_t: f32) -> Option<u32> {
+/// `skip` holds neuron ids that must not answer — collapsed-block members
+/// are invisible, so only their glyph should catch the cursor.
+fn nearest_on_ray(
+    g: &GeoSnap,
+    ro: Vec3,
+    rd: Vec3,
+    max_t: f32,
+    skip: &std::collections::HashSet<u32>,
+) -> Option<u32> {
     let mut best = None;
     let mut best_d = max_t;
     for (i, p) in g.pos.iter().enumerate() {
+        if skip.contains(&(i as u32)) {
+            continue;
+        }
         let c = Vec3::from(*p) - ro;
         let t = c.dot(rd);
         if !(0.0..=4000.0).contains(&t) {
@@ -1003,6 +1083,69 @@ fn box_select(
             }
         }
     }
+    // Stage 23: a box that catches any member of an atomic group
+    // catches the whole group. (Field-disjoint form: `g` is a local Arc,
+    // `&mut selection` must not trip the `&self` borrow.)
+    EditorApp::expand_sel_groups_in(
+        &app.group_modes,
+        app.group_mode_default,
+        &g,
+        &mut app.selection,
+    );
+}
+
+/// Project an AABB to its screen rect — the block glyph's drawn region
+/// AND its click target, so hit-testing and paint can't drift apart.
+pub(crate) fn aabb_screen_rect(
+    cam: &Camera,
+    aspect: f32,
+    vp: egui::Rect,
+    mn: Vec3,
+    mx: Vec3,
+) -> Option<egui::Rect> {
+    let mut mn_s = egui::pos2(f32::MAX, f32::MAX);
+    let mut mx_s = egui::pos2(f32::MIN, f32::MIN);
+    let mut any = false;
+    for i in 0..8 {
+        let p = Vec3::new(
+            if i & 1 == 0 { mn.x } else { mx.x },
+            if i & 2 == 0 { mn.y } else { mx.y },
+            if i & 4 == 0 { mn.z } else { mx.z },
+        );
+        if let Some(nd) = project(cam, aspect, p) {
+            let s = egui::pos2(vp.min.x + nd.x * vp.width(), vp.min.y + nd.y * vp.height());
+            mn_s = mn_s.min(s);
+            mx_s = mx_s.max(s);
+            any = true;
+        }
+    }
+    any.then(|| egui::Rect::from_min_max(mn_s, mx_s))
+}
+
+/// Collapsed-block group under a viewport-normalized cursor: the
+/// smallest containing glyph wins so overlapping blocks stay pickable.
+fn block_at(app: &EditorApp, mv: Vec2, rect: egui::Rect, aspect: f32) -> Option<usize> {
+    let g = app.geo.as_ref()?;
+    let pt = egui::pos2(
+        rect.min.x + mv.x * rect.width(),
+        rect.min.y + mv.y * rect.height(),
+    );
+    let mut best: Option<(usize, f32)> = None;
+    for gi in app.group_ids_mode(crate::app::GroupMode::Block) {
+        let Some((mn, mx)) = EditorApp::group_aabb(g, &g.groups[gi].1) else {
+            continue;
+        };
+        let Some(r) = aabb_screen_rect(&app.camera, aspect, rect, mn, mx) else {
+            continue;
+        };
+        if r.contains(pt) {
+            let area = r.width() * r.height();
+            if best.is_none_or(|(_, a)| area < a) {
+                best = Some((gi, area));
+            }
+        }
+    }
+    best.map(|(gi, _)| gi)
 }
 
 /// Entity world position (mirrors Gpu::set_scene's marker placement).
@@ -1067,6 +1210,44 @@ fn overlay_2d(app: &EditorApp, ui: &mut egui::Ui, rect: egui::Rect, aspect: f32)
                     SEL_COL,
                 );
             }
+        }
+        // Stage 23: collapsed groups render as a labelled block at the
+        // members' projected bounds — fill + name, brighter when the
+        // whole group is selected.
+        for gi in app.group_ids_mode(crate::app::GroupMode::Block) {
+            let (name, members) = &g.groups[gi];
+            let Some((mn, mx)) = EditorApp::group_aabb(g, members) else {
+                continue;
+            };
+            let Some(r) = aabb_screen_rect(&app.camera, aspect, rect, mn, mx) else {
+                continue;
+            };
+            let sel = app.group_fully_selected(members);
+            let (fill, edge) = if sel {
+                (
+                    egui::Color32::from_rgba_unmultiplied(46, 46, 30, 200),
+                    egui::Color32::from_rgb(255, 225, 80),
+                )
+            } else {
+                (
+                    egui::Color32::from_rgba_unmultiplied(38, 40, 54, 200),
+                    egui::Color32::from_rgb(205, 190, 100),
+                )
+            };
+            painter.rect_filled(r, 6.0, fill);
+            painter.rect_stroke(
+                r,
+                6.0,
+                egui::Stroke::new(if sel { 2.0 } else { 1.4_f32 }, edge),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                r.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("{name}\n{} neurons", members.len()),
+                egui::FontId::proportional(13.0),
+                egui::Color32::from_rgb(235, 225, 160),
+            );
         }
     }
     // Empty scene: a centered hint so a first launch isn't a blank void.

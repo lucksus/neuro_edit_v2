@@ -11,6 +11,19 @@
 - Click an object to select it; **Shift-click** adds to the selection.
 - Drag on empty space draws a box select.
 - Esc clears a drag/connect first, then the mode.
+- A neuron in a group can act for its whole group or just itself —
+  see the group mode toggle in the inspector (whole / inside; a
+  collapsed group is always whole).
+
+## Undo / redo
+
+Every network edit — neurons, synapses, groups, inputs, readouts,
+types, and whole-script evals — lands on the worker's history.
+**Ctrl+Z** undoes the last change (whoever made it — the stack is
+shared across connected clients), **Ctrl+Shift+Z** or **Ctrl+Y**
+redoes. The Edit menu shows the action name ("Undo move 12 neurons").
+Simulation time and activity are never undone; an undo rebuilds the
+sim like any edit, so it's paused-gated the same way.
 
 ## Moving objects
 

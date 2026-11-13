@@ -31,6 +31,9 @@ pub const fn rgba(c: [f32; 3], a: f32) -> [f32; 4] {
 const PLANE_COL: [f32; 4] = [0.35, 0.5, 0.6, 0.5];
 const DRAG_COL: [f32; 4] = [0.55, 0.8, 1.0, 0.85];
 const GROUP_COL: [f32; 4] = [0.9, 0.8, 0.3, 0.6];
+/// Selected group: the box brightens so a whole-group selection reads
+/// as one object, not N independent highlights (Stage 23).
+const GROUP_SEL_COL: [f32; 4] = [1.0, 0.9, 0.3, 1.0];
 const CONN_COL: [f32; 4] = [1.0, 0.9, 0.2, 1.0];
 
 pub fn pv(pos: [f32; 3], color: [f32; 4]) -> Pv {
@@ -105,28 +108,28 @@ pub fn drag_plane_vis(
     line(out, grab, center, CONN_COL);
 }
 
-/// Group bounding boxes.
-pub fn group_boxes(geo: &GeoSnap, out: &mut Vec<Pv>) {
-    for (_, members) in &geo.groups {
-        if members.is_empty() {
+/// Group bounding boxes. `skip` lists `Geo.groups` indices that render
+/// another way (collapsed blocks); `sel` is the app selection — a group
+/// whose members are ALL selected draws highlighted.
+pub fn group_boxes(
+    geo: &GeoSnap,
+    skip: &std::collections::HashSet<usize>,
+    sel: &std::collections::HashSet<u32>,
+    out: &mut Vec<Pv>,
+) {
+    for (gi, (_, members)) in geo.groups.iter().enumerate() {
+        if skip.contains(&gi) || members.is_empty() {
             continue;
         }
-        let mut mn = Vec3::splat(f32::MAX);
-        let mut mx = Vec3::splat(f32::MIN);
-        for &m in members {
-            if let Some(p) = geo.pos.get(m as usize) {
-                let v = Vec3::from(*p);
-                mn = mn.min(v);
-                mx = mx.max(v);
-            }
-        }
-        if mn.x > mx.x {
+        let Some((mn, mx)) = crate::app::EditorApp::group_aabb(geo, members) else {
             continue;
-        }
-        let pad = 12.0;
-        mn -= Vec3::splat(pad);
-        mx += Vec3::splat(pad);
-        box_lines(out, mn, mx, GROUP_COL);
+        };
+        let col = if members.iter().all(|m| sel.contains(m)) {
+            GROUP_SEL_COL
+        } else {
+            GROUP_COL
+        };
+        box_lines(out, mn, mx, col);
     }
 }
 

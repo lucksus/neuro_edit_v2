@@ -350,8 +350,51 @@ impl EditorApp {
                         ui.separator();
                         ui.heading("Groups");
                         if let Some(g) = self.geo.clone() {
+                            if !g.groups.is_empty() {
+                                // Stage 23: one control family — the
+                                // group's view IS its interaction mode.
+                                // A collapsed block is always whole.
+                                ui.horizontal(|ui| {
+                                    ui.weak("default:");
+                                    for (v, l) in [
+                                        (super::GroupMode::Whole, "whole"),
+                                        (super::GroupMode::Inside, "inside"),
+                                    ] {
+                                        ui.selectable_value(&mut self.group_mode_default, v, l);
+                                    }
+                                });
+                            }
                             for (gi, (name, members)) in g.groups.iter().enumerate() {
-                                ui.label(format!("{name}: {} neurons", members.len()));
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("{name}: {} neurons", members.len()));
+                                    let mut mode = self.group_mode(name);
+                                    for (v, l, tip) in [
+                                        (
+                                            super::GroupMode::Whole,
+                                            "whole",
+                                            "clicks select the group, drags move every member",
+                                        ),
+                                        (
+                                            super::GroupMode::Inside,
+                                            "inside",
+                                            "clicks and drags act on single members",
+                                        ),
+                                        (
+                                            super::GroupMode::Block,
+                                            "block",
+                                            "collapse to a labelled block — always whole-group",
+                                        ),
+                                    ] {
+                                        if ui
+                                            .selectable_label(mode == v, l)
+                                            .on_hover_text(tip)
+                                            .clicked()
+                                        {
+                                            mode = v;
+                                            self.group_modes.insert(name.clone(), v);
+                                        }
+                                    }
+                                });
                                 // 3D lattices get a slice/projection choice for the
                                 // activity plane (2D grids show their single sheet).
                                 if let Some(gs) = g.grids.iter().find(|x| x.group == gi) {

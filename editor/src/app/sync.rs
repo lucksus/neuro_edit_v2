@@ -309,15 +309,24 @@ impl EditorApp {
     /// Returns the per-plane draw flags for `DrawParams::planes_on`.
     pub(crate) fn plane_frame(&mut self, gpu: &mut Gpu, vp_h_px: f32) -> Option<Vec<bool>> {
         let g = self.geo.clone()?;
+        let mut bits = vec![0u32; g.pos.len() / 32 + 1];
+        // Stage 23: collapsed-block groups hide their members whether or
+        // not they have a lattice — the block glyph is their render.
+        for (name, members) in &g.groups {
+            if self.group_mode(name) == crate::app::GroupMode::Block {
+                mark_bits(&mut bits, members);
+            }
+        }
         if g.grids.is_empty() {
-            self.plane_key = 0;
+            gpu.write_hide_bits(&bits);
+            // Still fingerprinted — a block toggle must re-render.
+            self.plane_key = crate::view::hash_bits(&bits);
             return None;
         }
         let eye = self.camera.eye();
         let mut on = Vec::with_capacity(g.grids.len());
         let mut params = Vec::with_capacity(g.grids.len());
         let mut cfgs = Vec::with_capacity(g.grids.len());
-        let mut bits = vec![0u32; g.pos.len() / 32 + 1];
         for gs in &g.grids {
             let cfg = self
                 .plane_cfgs
@@ -326,20 +335,25 @@ impl EditorApp {
                 .unwrap_or_default();
             cfgs.push(cfg);
             let dist = (glam::Vec3::from(crate::plane::center(gs)) - eye).length();
-            let show = match self.grid_view {
-                crate::plane::GridView::Planes => true,
-                crate::plane::GridView::Cubes => false,
-                crate::plane::GridView::Auto => {
-                    // A small selection touching this grid flips it back
-                    // to cubes so its neurons stay editable; big selects
-                    // keep the plane. Members are neuron ids == instance
-                    // ids for neurons.
-                    let sel_touches = self.selection.len() <= crate::plane::SEL_CUBE_MAX
-                        && !self.selection.is_empty()
-                        && gs.members.iter().any(|m| self.selection.contains(m));
-                    !sel_touches && crate::plane::texel_px(gs, dist, vp_h_px) < crate::plane::LOD_PX
-                }
-            };
+            // A block-mode grid group draws NEITHER the plane nor its
+            // member cubes — the glyph stands in for both.
+            let block = self.group_mode(&g.groups[gs.group].0) == crate::app::GroupMode::Block;
+            let show = !block
+                && match self.grid_view {
+                    crate::plane::GridView::Planes => true,
+                    crate::plane::GridView::Cubes => false,
+                    crate::plane::GridView::Auto => {
+                        // A small selection touching this grid flips it back
+                        // to cubes so its neurons stay editable; big selects
+                        // keep the plane. Members are neuron ids == instance
+                        // ids for neurons.
+                        let sel_touches = self.selection.len() <= crate::plane::SEL_CUBE_MAX
+                            && !self.selection.is_empty()
+                            && gs.members.iter().any(|m| self.selection.contains(m));
+                        !sel_touches
+                            && crate::plane::texel_px(gs, dist, vp_h_px) < crate::plane::LOD_PX
+                    }
+                };
             on.push(show);
             let (ua, va) = crate::plane::plane_dims(gs, &cfg);
             let (origin, du, dv) = crate::plane::quad(gs, &cfg);

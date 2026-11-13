@@ -57,6 +57,8 @@ impl EditorApp {
                     ui.strong("edit");
                     ui.end_row();
                     row(ui, "Ctrl+C / X / V", "copy / cut / paste");
+                    row(ui, "Ctrl+Z / Ctrl+Shift+Z", "undo / redo");
+                    row(ui, "Ctrl+Y", "redo");
                     row(ui, "Del", "delete selection");
                     ui.end_row();
                     ui.strong("windows");

@@ -17,6 +17,7 @@ mod actions;
 mod console;
 mod dialogs;
 mod files;
+mod groups;
 mod help;
 mod inspector;
 mod jobs;
@@ -32,6 +33,7 @@ mod toolbar;
 
 #[cfg(not(target_arch = "wasm32"))]
 use files::local_files_root;
+pub(crate) use groups::GroupMode;
 use layout::*;
 pub(crate) use state::{gate, gate_ui, Act, EditorState};
 
@@ -91,6 +93,27 @@ pub struct EditorApp {
     /// has moved on — so view.rs drops it instead of applying a hit/miss
     /// to newer state (e.g. an example auto-watch applied meanwhile).
     pub pick_click: Option<(glam::Vec2, f64)>,
+    /// Group index (`Geo.groups`) under the queued click when the cursor
+    /// landed in a collapsed block's screen rect — applied when the pick
+    /// comes back a miss (a real entity hit still wins).
+    pub click_block: Option<usize>,
+    /// Stage 23: per-group interaction/display overrides, keyed by group
+    /// name (the identity that survives group-index reordering). Missing
+    /// = `group_mode_default`.
+    pub group_modes: HashMap<String, GroupMode>,
+    /// The mode every group without an override uses — Whole.
+    pub group_mode_default: GroupMode,
+    /// Stage 23 review drivers (CLI --group-mode/--group-sel/--sel/
+    /// --open-menu): applied in update() once the scripted Geo provides
+    /// what they name — same late-arrival pattern as --watch.
+    pub shot_group_modes: Vec<String>,
+    pub shot_group_sel: Option<String>,
+    pub shot_sel: Option<Vec<u32>>,
+    /// Menu name held open for a screenshot (toolbar reads it).
+    pub open_menu: Option<String>,
+    /// When a `--group-sel`/`--sel` lands, send this move delta too —
+    /// the Edit menu then shows a real "move N neurons" undo step.
+    pub shot_move: Option<glam::Vec3>,
     /// Per-instance cube half sizes (copied from `Scene` on geo change) —
     /// the selection brackets size to the projected object box.
     pub inst_half: Vec<f32>,
@@ -624,6 +647,14 @@ impl EditorApp {
             last_pick: None,
             hover: None,
             pick_click: None,
+            click_block: None,
+            group_modes: HashMap::new(),
+            group_mode_default: GroupMode::Whole,
+            shot_group_modes: Vec::new(),
+            shot_group_sel: None,
+            shot_sel: None,
+            open_menu: None,
+            shot_move: None,
             inst_half: Vec::new(),
             console: ConsoleUi::default(),
             win: Windows {
@@ -762,6 +793,59 @@ impl eframe::App for EditorApp {
         }
         crate::view::with_gpu(rs, |gpu| self.sync_shared(gpu));
         self.update_watch();
+        // Stage 23 review drivers — applied once the scripted Geo provides
+        // what they name (same late-arrival pattern as --watch).
+        for spec in &self.shot_group_modes {
+            if let Some((name, mode)) = spec.split_once(':') {
+                let m = match mode {
+                    "inside" => GroupMode::Inside,
+                    "block" => GroupMode::Block,
+                    _ => GroupMode::Whole,
+                };
+                self.group_modes.insert(name.to_string(), m);
+            }
+        }
+        if let Some(name) = self.shot_group_sel.clone() {
+            let members = self.geo.as_ref().and_then(|g| {
+                g.groups
+                    .iter()
+                    .find(|(n, _)| n == &name)
+                    .map(|(_, m)| m.clone())
+            });
+            if let Some(m) = members {
+                self.selection = m.into_iter().collect();
+                self.shot_group_sel = None;
+            }
+        }
+        if let Some(ids) = self.shot_sel.take() {
+            let covered = self
+                .geo
+                .as_ref()
+                .is_some_and(|g| ids.iter().all(|&i| (i as usize) < g.pos.len()));
+            if covered {
+                self.selection = ids.into_iter().collect();
+            } else {
+                self.shot_sel = Some(ids);
+            }
+        }
+        // --edit-move: ride a landed shot selection into a real
+        // MoveNeurons so the worker's undo stack has a named step.
+        if let Some(d) = self.shot_move.take() {
+            if let Some(g) = &self.geo {
+                let items: Vec<(u32, [f32; 3])> = self
+                    .selection
+                    .iter()
+                    .filter(|&&i| (i as usize) < g.pos.len())
+                    .map(|&i| {
+                        let p = glam::Vec3::from(g.pos[i as usize]) + d;
+                        (i, p.into())
+                    })
+                    .collect();
+                if !items.is_empty() {
+                    self.edit_net(proto::NetEdit::MoveNeurons { items });
+                }
+            }
+        }
         if self.mode != self.last_mode {
             self.status.clear();
             self.last_mode = self.mode;
