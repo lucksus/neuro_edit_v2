@@ -248,6 +248,16 @@ fn main() -> anyhow::Result<()> {
                 app.try_saved_login(url);
             }
             app.net_path = net_path.clone();
+            // A startup --script builds the net — the top bar names it
+            // (Stage 24d: "--script examples/lsm_adex.rhai" shows
+            // "lsm_adex", not "(new net)"). A --net path wins.
+            if net_path.is_none() {
+                app.net_label = cli
+                    .script
+                    .as_deref()
+                    .and_then(|s| std::path::Path::new(s).file_stem())
+                    .map(|s| s.to_string_lossy().into_owned());
+            }
             if let Some(p) = &net_path {
                 app.push_recent(p.clone());
             }

@@ -43,7 +43,9 @@ pub const EXAMPLES: &[Example] = &[
         purpose: "216-cell reservoir, MLP readout detects a hidden correlation",
         file: "lsm_readout.rhai",
         src: include_str!("../../examples/lsm_readout.rhai"),
-        watch: &[],
+        // Stage 24d: watch a few reservoir cells so Plots shows v(t)
+        // instead of opening empty on a block-style liquid.
+        watch: &[0, 1, 2],
         groups: &[],
     },
     Example {
@@ -51,7 +53,7 @@ pub const EXAMPLES: &[Example] = &[
         purpose: "4096-neuron liquid (block group) vs hidden correlation, full baselines",
         file: "lsm_big.rhai",
         src: include_str!("../../examples/lsm_big.rhai"),
-        watch: &[],
+        watch: &[0, 1, 2],
         groups: &[("res", "block")],
     },
     Example {
@@ -59,7 +61,7 @@ pub const EXAMPLES: &[Example] = &[
         purpose: "same big liquid with no planted signal — everything must sit at chance",
         file: "lsm_big_off.rhai",
         src: include_str!("../../examples/lsm_big_off.rhai"),
-        watch: &[],
+        watch: &[0, 1, 2],
         groups: &[("res", "block")],
     },
     Example {
@@ -67,7 +69,7 @@ pub const EXAMPLES: &[Example] = &[
         purpose: "hidden correlation on an adapting AdEx reservoir (1728 cells)",
         file: "lsm_adex.rhai",
         src: include_str!("../../examples/lsm_adex.rhai"),
-        watch: &[],
+        watch: &[0, 1, 2],
         groups: &[("res", "block")],
     },
     Example {

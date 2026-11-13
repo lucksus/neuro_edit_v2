@@ -335,11 +335,15 @@ impl EditorApp {
                 // Stage 22: the top bar keeps only menus + file name +
                 // status — every tool/run/view control lives in the
                 // fixed left dock now.
+                // File name, else the example/script that built this
+                // net (Stage 24d — a loaded example no longer reads
+                // "(new net)"), else a genuinely untitled net.
                 let name = self
                     .net_path
                     .as_deref()
                     .and_then(|p| std::path::Path::new(p).file_name())
                     .map(|n| n.to_string_lossy().into_owned())
+                    .or_else(|| self.net_label.clone())
                     .unwrap_or_else(|| "(new net)".into());
                 ui.label(
                     egui::RichText::new(if self.dirty() {

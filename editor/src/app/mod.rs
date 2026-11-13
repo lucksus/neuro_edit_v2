@@ -160,6 +160,10 @@ pub struct EditorApp {
     /// cluster, fed by `Shared` snapshots.
     sim: SimControls,
     pub net_path: Option<String>,
+    /// What produced the net when there's no file path — the example or
+    /// script name shown in the top bar instead of "(new net)"
+    /// (Stage 24d). Set on script Run / `--script`, cleared on New.
+    pub net_label: Option<String>,
 
     dlg: Option<Dialog>,
     /// Last net-replacement generation seen — a change means New/load/
@@ -704,6 +708,7 @@ impl EditorApp {
             plane_cfgs_last: Vec::new(),
             sim: SimControls::default(),
             net_path: None,
+            net_label: None,
             dlg: None,
             last_net_gen: 0,
             saved_version: 0,

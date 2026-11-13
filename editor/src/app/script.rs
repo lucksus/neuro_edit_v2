@@ -39,6 +39,13 @@ impl EditorApp {
     pub(super) fn run_script(&mut self) {
         let code = self.script.text.clone();
         self.send(ClientMsg::Eval { code });
+        // The eval rebuilds the net — the top bar names what produced
+        // it (the example's name for a bundled pick, the .rhai stem for
+        // a user script) instead of leaving "(new net)" (Stage 24d).
+        let name = self.script.name.trim();
+        if !name.is_empty() {
+            self.net_label = Some(name.to_string());
+        }
         // Auto-watch arms on Run: only a Geo newer than this version is
         // the eval's result — the pre-run net may already cover the ids.
         if self.script.example_watch.is_some() {

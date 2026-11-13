@@ -211,6 +211,7 @@ impl EditorApp {
             PendingAction::New => {
                 self.send(ClientMsg::NewNet);
                 self.net_path = None;
+                self.net_label = None;
             }
             PendingAction::Load(p) => self.load_net(p),
             PendingAction::Quit => {
