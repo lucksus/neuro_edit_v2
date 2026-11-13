@@ -579,7 +579,15 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                                     // carries them to every client, like the
                                     // Eval's post-bump Geo republish did.
                                     if matches!(applied, Applied::Stopped(_)) {
-                                        emit_b(&emit, con("! Runtime error: stopped by user"));
+                                        // What the Eval's `! {e}` printed for
+                                        // the same stop — rhai's Display adds
+                                        // the call position, always (1,5) for
+                                        // `net.create_connections(…)`.
+                                        emit_b(
+                                            &emit,
+                                            con("! Runtime error: stopped by user \
+                                                 (line 1, position 5)"),
+                                        );
                                     }
                                     bump(&env);
                                     let gen = env.net_gen.get();

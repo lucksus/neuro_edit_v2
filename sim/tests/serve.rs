@@ -1684,9 +1684,10 @@ fn create_connections_edit_stops_on_abort() {
     assert!(
         evs.iter().any(|e| matches!(
             &e.msg,
-            ServerMsg::Console(s) if s.contains("stopped by user")
+            ServerMsg::Console(s)
+                if s == "! Runtime error: stopped by user (line 1, position 5)"
         )),
-        "expected a 'stopped by user' console line: {evs:?}"
+        "expected the Eval's 'stopped by user' line: {evs:?}"
     );
     assert!(
         evs.iter()
