@@ -37,6 +37,9 @@ pub struct EditorApp {
     pub ctl: SimCtl,
     pub camera: Camera,
     pub geo: Option<Arc<GeoSnap>>,
+    /// `Hello.models` — the registry's descriptors; the inspector and
+    /// plot tabs are built from these, never hardcoded izh fields.
+    pub models: Vec<proto::ModelDesc>,
     /// Bumped on every geo assign — SceneKey input (view.rs reads it).
     pub(crate) geo_version: u64,
     /// Frame the camera on the next geometry publish (grid dialogs, load).
@@ -164,7 +167,11 @@ pub enum InsertKind {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PlotTab {
-    Voltage,
+    /// One tab per state slot of the watched neurons' model — the tab
+    /// label and y range come from `ModelDesc.state[s]` (slot 0 is the
+    /// membrane potential, today's v(t)).
+    State(usize),
+    /// x–y of state slots 0/1 — only offered when the model has ≥2.
     Phase,
     Raster,
     Readouts,
@@ -448,7 +455,7 @@ impl Default for PlotsUi {
             win: crate::plot::PlotWindow::default(),
             last_sim_t: 0.0,
             hist_resets_seen: 0,
-            tab: PlotTab::Voltage,
+            tab: PlotTab::State(0),
             raster_h: 100.0,
             ro_sel: 0,
         }
@@ -541,6 +548,7 @@ impl EditorApp {
             ctl,
             camera: Camera::default(),
             geo: None,
+            models: Vec::new(),
             geo_version: 0,
             frame_pending: false,
             last_snap_seq: 0,

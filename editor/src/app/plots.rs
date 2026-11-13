@@ -25,9 +25,21 @@ impl EditorApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if let Some(ic) = &self.icons {
+                        // One tab per state slot of the plot model —
+                        // labels and ranges ride the descriptors, so a
+                        // new model gets its tabs for free.
+                        let n_states = self.plot_n_states();
+                        let names: Vec<String> =
+                            (0..n_states.max(2)).map(|s| self.plot_state_name(s)).collect();
                         let t = &mut self.plots.tab;
-                        icons::selectable_value(ui, t, PlotTab::Voltage, &ic.voltage, "v(t)");
-                        icons::selectable_value(ui, t, PlotTab::Phase, &ic.phase, "v–u");
+                        for (s, name) in names.iter().enumerate().take(n_states) {
+                            let lbl = format!("{name}(t)");
+                            icons::selectable_value(ui, t, PlotTab::State(s), &ic.voltage, &lbl);
+                        }
+                        if n_states >= 2 {
+                            let lbl = format!("{}\u{2013}{}", names[0], names[1]);
+                            icons::selectable_value(ui, t, PlotTab::Phase, &ic.phase, &lbl);
+                        }
                         icons::selectable_value(ui, t, PlotTab::Raster, &ic.raster, "raster");
                         icons::selectable_value(ui, t, PlotTab::Readouts, &ic.readout, "readouts");
                         icons::selectable_value(ui, t, PlotTab::Samples, &ic.samples, "samples");
@@ -38,7 +50,10 @@ impl EditorApp {
                         ui.label(format!("{} job(s)", self.jobs.list.len()));
                     }
                     ui.separator();
-                    if matches!(self.plots.tab, PlotTab::Voltage | PlotTab::Phase | PlotTab::Raster) {
+                    if matches!(
+                        self.plots.tab,
+                        PlotTab::State(_) | PlotTab::Phase | PlotTab::Raster
+                    ) {
                         ui.separator();
                         ui.label("window");
                         ui.add(
@@ -51,11 +66,11 @@ impl EditorApp {
                                 self.plots.win.follow = true;
                             }
                         }
-                        if matches!(self.plots.tab, PlotTab::Voltage | PlotTab::Phase) {
+                        if matches!(self.plots.tab, PlotTab::State(_) | PlotTab::Phase) {
                             ui.checkbox(&mut self.plots.win.auto_y, "Auto Y");
                         }
                     }
-                    if matches!(self.plots.tab, PlotTab::Voltage | PlotTab::Phase) {
+                    if matches!(self.plots.tab, PlotTab::State(_) | PlotTab::Phase) {
                         let sel_n = self
                             .selection
                             .iter()
@@ -78,7 +93,7 @@ impl EditorApp {
                     }
                 });
                 match self.plots.tab {
-                    PlotTab::Voltage => {
+                    PlotTab::State(slot) => {
                         // Sliding window ending at "now" while following;
                         // the user's pan/zoom rules once follow is off.
                         let win = self.plots.win.bounds(self.plots.last_sim_t);
@@ -89,7 +104,8 @@ impl EditorApp {
                             ui.weak("no watched neurons — click a neuron to \
                                      watch it, or right-click -> \"Watch v(t)\"");
                         }
-                        let mut p = egui_plot::Plot::new("vplot")
+                        let y_range = self.plot_state_range(slot);
+                        let mut p = egui_plot::Plot::new("splot")
                             .height(140.0)
                             .y_axis_formatter(|y, range| {
                                 if crate::plot::y_label_hits_corner(&y, range) {
@@ -111,7 +127,7 @@ impl EditorApp {
                                 let Some(h) = self
                                     .plots
                                     .hist
-                                    .slot(0)
+                                    .slot(slot)
                                     .and_then(|s| s.get(&id))
                                 else {
                                     continue;
@@ -132,11 +148,9 @@ impl EditorApp {
                             if let Some((lo, hi)) = win {
                                 ui.set_plot_bounds_x(lo..=hi);
                                 if !auto_y {
-                                    // Fixed Izhikevich span: spikes can't
+                                    // Descriptor plot_range: spikes can't
                                     // bounce the axis entering/leaving.
-                                    ui.set_plot_bounds_y(
-                                        crate::plot::V_Y_RANGE.0..=crate::plot::V_Y_RANGE.1,
-                                    );
+                                    ui.set_plot_bounds_y(y_range.0..=y_range.1);
                                 }
                             }
                         });
@@ -158,8 +172,8 @@ impl EditorApp {
                                     format!("{:.0}", y.value)
                                 }
                             })
-                            .x_axis_label("v (mV)")
-                            .y_axis_label("u");
+                            .x_axis_label(self.plot_state_unit(0))
+                            .y_axis_label(self.plot_state_unit(1));
                         let _ = p.show(ui, |ui| {
                             if self.plots.hist.slot(1).is_none_or(|s| s.is_empty()) {
                                 ui.text(egui_plot::Text::new(
@@ -359,5 +373,58 @@ impl EditorApp {
                 ui.line(Line::new(name.clone(), pts));
             }
         });
+    }
+}
+
+impl EditorApp {
+    /// The model whose state descriptors drive the plot tabs: the first
+    /// watched neuron's model, else the first type in the net, else the
+    /// first registered model. Descriptor-driven — no model names here.
+    fn plot_model(&self) -> Option<&proto::ModelDesc> {
+        let by_id = |id: &str| self.models.iter().find(|m| m.id == id);
+        let g = self.geo.as_deref();
+        if let Some(&w) = self.watch_sent.first() {
+            let t = g.and_then(|g| {
+                g.ty.get(w as usize)
+                    .and_then(|&ty| g.types.get(ty as usize))
+            });
+            if let Some(m) = t.and_then(|t| by_id(&t.model)) {
+                return Some(m);
+            }
+        }
+        g.and_then(|g| g.types.first())
+            .and_then(|t| by_id(&t.model))
+            .or_else(|| self.models.first())
+    }
+
+    /// State slots the tabs cover — at least one so slot 0 (v) always
+    /// shows even before `Hello.models` lands.
+    fn plot_n_states(&self) -> usize {
+        self.plot_model().map(|m| m.state.len()).unwrap_or(0).max(1)
+    }
+
+    fn plot_state_name(&self, s: usize) -> String {
+        self.plot_model()
+            .and_then(|m| m.state.get(s))
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| format!("s{s}"))
+    }
+
+    /// `name (unit)` for axis labels.
+    fn plot_state_unit(&self, s: usize) -> String {
+        match self.plot_model().and_then(|m| m.state.get(s)) {
+            Some(d) if !d.unit.is_empty() => format!("{} ({})", d.name, d.unit),
+            Some(d) => d.name.clone(),
+            None => format!("s{s}"),
+        }
+    }
+
+    /// Y range from the descriptor's `plot_range` (the fixed Izhikevich
+    /// span is just what izh's slot 0 declares).
+    fn plot_state_range(&self, s: usize) -> (f64, f64) {
+        self.plot_model()
+            .and_then(|m| m.state.get(s))
+            .map(|d| (d.plot_range.0 as f64, d.plot_range.1 as f64))
+            .unwrap_or(crate::plot::V_Y_RANGE)
     }
 }

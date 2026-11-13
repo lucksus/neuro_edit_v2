@@ -28,6 +28,33 @@ impl EditorApp {
                         self.inspect_one(ui, sel[0]);
                     } else if !sel.is_empty() {
                         ui.label(format!("{} objects selected", sel.len()));
+                        // Retype every selected neuron in one edit.
+                        if let Some(g) = self.geo.clone() {
+                            let ids: Vec<u32> = sel
+                                .iter()
+                                .filter_map(|&i| match self.entity(i) {
+                                    Some(Entity::Neuron(id)) => Some(id),
+                                    _ => None,
+                                })
+                                .collect();
+                            if !ids.is_empty() && !g.types.is_empty() {
+                                ui.horizontal(|ui| {
+                                    ui.label("type:");
+                                    egui::ComboBox::from_id_salt("multi_type")
+                                        .selected_text("set…")
+                                        .show_ui(ui, |ui| {
+                                            for t in &g.types {
+                                                if ui.selectable_label(false, &t.name).clicked() {
+                                                    self.edit_net(NetEdit::SetNeuronType {
+                                                        ids: ids.clone(),
+                                                        ty: t.name.clone(),
+                                                    });
+                                                }
+                                            }
+                                        });
+                                });
+                            }
+                        }
                         if ui.button("Delete").clicked() {
                             self.delete_selection();
                         }
@@ -165,10 +192,32 @@ impl EditorApp {
                         self.edit_net(NetEdit::SetNeuronPos { id, pos: p });
                     }
                 });
-                // U2: the kind is editable — Dale's law re-signs its
-                // outgoing synapses at the next sim build.
+                // ---- type / model / params (protocol 2 descriptors) ----
+                // Everything below is built from `g.types` + `self.models`
+                // — a new registered model's fields appear with no editor
+                // change.
+                let ty_i = g.ty.get(i).copied().unwrap_or(0) as usize;
+                let trow = g.types.get(ty_i);
+                let mdesc = trow.and_then(|t| self.models.iter().find(|m| m.id == t.model));
                 ui.horizontal(|ui| {
-                    ui.label("kind:");
+                    ui.label("type:");
+                    let cur = trow.map(|t| t.name.clone()).unwrap_or_else(|| "—".into());
+                    egui::ComboBox::from_id_salt(("ntype", id))
+                        .selected_text(cur)
+                        .show_ui(ui, |ui| {
+                            for t in &g.types {
+                                let is = trow.is_some_and(|c| c.name == t.name);
+                                if ui.selectable_label(is, &t.name).clicked() && !is {
+                                    self.edit_net(NetEdit::SetNeuronType {
+                                        ids: vec![id],
+                                        ty: t.name.clone(),
+                                    });
+                                }
+                            }
+                        });
+                    // U2: the kind is editable — Dale's law re-signs its
+                    // outgoing synapses at the next sim build.
+                    ui.separator();
                     let mut inh = g.kind[i] != 0;
                     for (v, label) in [(false, "exc"), (true, "inh")] {
                         if ui.selectable_label(inh == v, label).clicked() && inh != v {
@@ -184,11 +233,69 @@ impl EditorApp {
                         }
                     }
                 });
+                if let (Some(t), Some(m)) = (trow, mdesc) {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("model: {}", m.label));
+                        if !m.presets.is_empty() {
+                            egui::ComboBox::from_id_salt(("preset", id))
+                                .selected_text("preset…")
+                                .show_ui(ui, |ui| {
+                                    for (pname, row) in &m.presets {
+                                        if ui.selectable_label(false, pname).clicked() {
+                                            self.edit_net(NetEdit::SetNeuronParams {
+                                                ids: vec![id],
+                                                params: Some(row.clone()),
+                                            });
+                                        }
+                                    }
+                                });
+                        }
+                    });
+                    // One field per ParamDesc — unit + range ride the
+                    // descriptor, doc rides the tooltip.
+                    let eff: Vec<f32> = g
+                        .params
+                        .get(i)
+                        .and_then(|p| p.clone())
+                        .unwrap_or_else(|| t.params.clone());
+                    let over = g.params.get(i).is_some_and(|p| p.is_some());
+                    for (pi, pd) in m.params.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            let mut v = eff.get(pi).copied().unwrap_or(pd.default);
+                            let speed = ((pd.max - pd.min) / 100.0).abs().max(0.001);
+                            let dv = egui::DragValue::new(&mut v)
+                                .speed(speed)
+                                .range(pd.min..=pd.max);
+                            let r = ui.add(dv).on_hover_text(&pd.doc);
+                            ui.label(format!("{} [{}]", pd.name, pd.unit));
+                            if r.changed() {
+                                let mut row = eff.clone();
+                                row.resize(m.params.len(), pd.default);
+                                row[pi] = v;
+                                self.edit_net(NetEdit::SetNeuronParams {
+                                    ids: vec![id],
+                                    params: Some(row),
+                                });
+                            }
+                        });
+                    }
+                    if over {
+                        ui.horizontal(|ui| {
+                            ui.weak("params: override");
+                            if ui.button("reset to type").clicked() {
+                                self.edit_net(NetEdit::SetNeuronParams {
+                                    ids: vec![id],
+                                    params: None,
+                                });
+                            }
+                        });
+                    }
+                }
                 // Discoverable watching: one click to the plots window.
-                if ui.button("Plot v(t)").clicked() {
+                if ui.button("Plot state").clicked() {
                     self.watch(vec![id]);
                     self.win.plots = true;
-                    self.plots.tab = PlotTab::Voltage;
+                    self.plots.tab = PlotTab::State(0);
                 }
                 ui.label("group memberships:".to_string());
                 for (gname, members) in &g.groups {

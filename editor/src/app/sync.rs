@@ -36,6 +36,7 @@ impl EditorApp {
             job_progress: std::collections::BTreeMap<u64, Vec<Vec<(String, f64)>>>,
             job_detail: Option<crate::snap::JobDetailSnap>,
             geo_new: Option<std::sync::Arc<GeoSnap>>,
+            models: Vec<proto::ModelDesc>,
             snap: crate::snap::Snap,
             running: bool,
             sim_built: bool,
@@ -60,6 +61,7 @@ impl EditorApp {
             job_progress,
             job_detail,
             geo_new,
+            models,
             snap,
             running,
             sim_built,
@@ -93,6 +95,7 @@ impl EditorApp {
                 job_progress: sh.job_progress.clone(),
                 job_detail: sh.job_detail.take(),
                 geo_new: sh.geo.clone(),
+                models: sh.models.clone(),
                 snap: sh.snap.clone(),
                 running: sh.running,
                 sim_built: sh.sim_built,
@@ -178,6 +181,9 @@ impl EditorApp {
         self.sim.noise_hz = cfg.noise_rate_hz;
         self.sim.noise_kick = cfg.noise_kick_mv;
         self.sim.backend = backend;
+        if !models.is_empty() {
+            self.models = models;
+        }
         let gen_bumped = net_gen != self.last_net_gen;
         if gen_bumped {
             self.last_net_gen = net_gen;
@@ -230,7 +236,7 @@ impl EditorApp {
                         self.selection = ids.iter().copied().collect();
                     }
                     self.win.plots = true;
-                    self.plots.tab = PlotTab::Voltage;
+                    self.plots.tab = PlotTab::State(0);
                 }
                 // Retire only after the watch has stayed applied across a
                 // quiet stretch — a net-gen bump inside the eval (net.clear)

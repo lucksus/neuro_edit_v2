@@ -736,9 +736,27 @@ impl Gpu {
         let mut entity_of_inst = Vec::with_capacity(inst.capacity());
         for (i, p) in geo.pos.iter().enumerate() {
             inst_half.push(nn_scale[i]);
+            // aux: bit0 kind, bit1 input/readout marker, bit3 = explicit
+            // type colour, bits 8..31 = RGB8. A type with no colour keeps
+            // the kind's warm/cool — the shader unpacks only when bit3 is
+            // set so old scenes render identically.
+            let kind = geo.kind.get(i).copied().unwrap_or(0) as u32;
+            let ty_col = geo
+                .ty
+                .get(i)
+                .and_then(|&ty| geo.types.get(ty as usize))
+                .and_then(|t| t.color);
+            let aux = kind
+                | ty_col
+                    .map(|c| {
+                        8u32 | (((c[0] * 255.0) as u32) << 8)
+                            | (((c[1] * 255.0) as u32) << 16)
+                            | (((c[2] * 255.0) as u32) << 24)
+                    })
+                    .unwrap_or(0);
             inst.push(Inst {
                 pos_scale: [p[0], p[1], p[2], nn_scale[i]],
-                aux: geo.kind.get(i).copied().unwrap_or(0) as u32,
+                aux,
                 _pad: [0; 3],
             });
             entity_of_inst.push(Entity::Neuron(i as u32));

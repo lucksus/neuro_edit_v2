@@ -19,7 +19,7 @@ struct Camera {
 
 struct Inst {
     pos_scale: vec4f, // xyz = pos, w = scale
-    aux: u32,         // bits 0..1 kind, bit 2 input marker
+    aux: u32,         // bits 0..1 kind, bit 2 input marker, bit 3 type colour, bits 8..31 RGB8
 }
 
 @group(0) @binding(1) var<storage, read> inst: array<Inst>;
@@ -118,6 +118,15 @@ fn vs_neuron(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -
     let kind = it.aux & 1u;
     let is_input = (it.aux & 2u) != 0u;
     var base = select(cam.exc_color.rgb, cam.inh_color.rgb, kind == 1u);
+    if (it.aux & 8u) != 0u {
+        // Explicit per-type colour (protocol 2 TypeRow.color) — packed
+        // RGB8 in bits 8..31 of aux.
+        base = vec3f(
+            f32((it.aux >> 8u) & 0xffu) / 255.0,
+            f32((it.aux >> 16u) & 0xffu) / 255.0,
+            f32((it.aux >> 24u) & 0xffu) / 255.0,
+        );
+    }
     if is_input {
         base = vec3f(0.95, 0.75, 0.2);
     }
