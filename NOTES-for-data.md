@@ -2247,3 +2247,88 @@ restyling). `files.rs` is the files window + ops + helpers + tests.
   revisit once the model abstraction lands.
 - Rhai `Eval` remains for console input, script Run, and examples —
   only the structured dialog mutations went typed.
+
+## Stage 19b — typed group edits behave exactly like the Evals they replaced
+
+Stage 19's typed `NetEdit` path dropped three behaviours the
+`format!`-built `Eval` had. Restored, commit by commit:
+
+- `0446de1` **console echo.** `script_equiv(&NetEdit)` in serve.rs
+  rebuilds the `net.*` call text (`{:?}` args — the same Debug
+  formatting the old `format!` used) and the Edit arm broadcasts
+  `> net.…` before applying, for `CreateConnections`,
+  `SetSynapseWeights`, `SetSynTauDist`, `SetExcInh`, `ScriptAdd`.
+- `c174914` **Stop/busy/panic parity.** For the script-equivalent
+  edits the Edit arm now runs the Eval arm's exact sequence:
+  `abort.store(false)` → `status_busy = true` + `status!()` → echo →
+  `catch_unwind` around the apply → `status_busy = false` +
+  `status!()`. `apply_edit` takes `cancel: &dyn Fn() -> bool` (the
+  worker's `env.cancel` — the same closure the Rhai registrations
+  poll), `CreateConnections` calls `create_connections_checked` (the
+  cancellable builder the script used), and a stopped build returns
+  `Applied::Stopped(GeoDelta)` so the partial synapses are kept AND
+  published — every client syncs to the net the worker actually
+  holds. Panic → `! script panicked (worker survived)`, same string
+  as the Eval arm.
+- `dcf3c89` **f32→f64 via shortest decimal.** `proto::f64_of(x)` =
+  `format!("{x:?}")` reparsed — the f64 the Rhai parser produced for
+  the same field. `0.3f32 as f64` is 0.30000001192092896, which
+  drifted RNG thresholds and stored weights/taus. The four group
+  dialogs now send `f64_of`. `w` stays f32 (the builder takes f32).
+- `306622b` **exact stopped text.** rhai's `EvalAltResult` Display
+  appends the call position; the dialog-built eval always printed
+  `! Runtime error: stopped by user (line 1, position 5)`. The
+  Stopped arm emits that byte-for-byte.
+- `c99d0c5` `cargo fmt` — Stage-19 leftovers (layout/mod/plots/sync +
+  most of dialogs.rs were committed unformatted).
+
+### Red → green evidence
+
+Red run: `git worktree` at `1e464ca`, the three tests grafted into
+`sim/tests/serve.rs` (the equivalence test's `NetEdit` used `x as f64`
+— what HEAD's dialogs actually put on the wire; `proto::f64_of`
+doesn't exist there).
+
+- `typed_group_edits_match_eval` — **RED**: `net.set_synapse_weights("g",
+  0.3, 0.1)` diverged; stored `w` 0.14547771 (Eval) vs 0.14547773
+  (typed `as f64`). → **GREEN**: all four edits byte-identical subnet
+  JSON Eval vs typed, same seed/net → same rng draws.
+- `create_connections_edit_stops_on_abort` (100×100 group, ~100M
+  pairs) — **RED**: 20s `until` timeout with zero events: the
+  unchecked builder ignored abort and no busy status was ever
+  emitted. → **GREEN** (~2.9s): `Status{busy:true}` first, abort
+  mid-build → GeoDelta within the bound, console line
+  `! Runtime error: stopped by user (line 1, position 5)`,
+  `Status{busy:false}`, `syn_added` sum == worker's
+  `net.synapse_count()`, partial count >0 and < all pairs.
+- `typed_edits_echo_script_line` — **RED**: `missing console echo
+  "> net.create_connections(\"g\", 0.3, 0.1, 0.5)"` (only the
+  GeoDelta arrived). → **GREEN**: all five edits emit the exact old
+  line, broadcast (`to: None`) like the Eval echo.
+
+### Gates
+
+- `cargo test --workspace`: green after every commit; 252 → **255**
+  (3 new serve tests). `worker_publishes_grid_traces` didn't flake in
+  any run.
+- `editor/web/build.sh`: clean after every commit.
+- `cargo fmt --all -- --check`: clean.
+
+### Caveats / judgement calls
+
+- Equivalence: the `create_connections`/`set_exc_inh` cases only
+  diverge probabilistically on HEAD — the drift shifts a threshold by
+  ~4e-8 relative, so a draw lands inside the gap ~never for 42 pairs
+  (in the red run those two cases actually matched; the weights/tau
+  cases diverge reliably because the drifted f64 is *stored* in the
+  JSON). After the fix all four are byte-identical, which is the
+  invariant the test pins.
+- The Eval arm's `= {d}` result echo and `publish_env` tail have no
+  typed counterpart: edits return no value, and `publish_env` only
+  refreshes `sim.*` state an edit can't touch.
+- `ScriptAdd` gets the echo + busy treatment too (it replaced an
+  Eval); only `CreateConnections` has a cancellable builder — the
+  others complete before a Stop could land.
+- Outer dispatch's existing `catch_unwind` is now redundant for the
+  five edits but left in place — it still guards the non-script
+  edits.
