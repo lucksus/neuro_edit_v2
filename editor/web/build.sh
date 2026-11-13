@@ -13,7 +13,7 @@ cargo build -p editor --release \
 mkdir -p editor/dist-web
 wasm-bindgen --target web \
   --out-dir editor/dist-web \
-  target/wasm32-unknown-unknown/release/editor.wasm
+  "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/editor.wasm"
 cp editor/web/index.html editor/dist-web/index.html
 cp editor/web/boot.mjs editor/dist-web/boot.mjs
 cp editor/web/webgpu-help.mjs editor/dist-web/webgpu-help.mjs
