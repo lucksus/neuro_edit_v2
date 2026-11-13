@@ -289,6 +289,27 @@ impl Sim {
         }
     }
 
+    /// The full stimulus program (constants + series + playheads) —
+    /// cloned for carryover when the sim is rebuilt on another
+    /// backend/config.
+    pub fn stimulus(&self) -> crate::stim::Stimulus {
+        match self {
+            Sim::Cpu(s) => s.stimulus.clone(),
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.stimulus.clone(),
+        }
+    }
+
+    /// External currents per neuron (host copy; on CUDA this is one
+    /// device→host read — meant for rebuild snapshots, not hot paths).
+    pub fn external(&self) -> Vec<f32> {
+        match self {
+            Sim::Cpu(s) => s.ext.clone(),
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.external(),
+        }
+    }
+
     /// Play a per-step series on `input` starting at the current step.
     pub fn play_input(&mut self, input: usize, series: Vec<f32>) {
         match self {
@@ -364,6 +385,19 @@ impl Sim {
             }
             #[cfg(feature = "cuda")]
             Sim::Cuda(s) => s.set_external(neuron, amps),
+        }
+    }
+
+    /// Set the whole external-current vector at once — the rebuild
+    /// carryover path (`DriveState::apply`).
+    pub fn set_external_all(&mut self, ext: &[f32]) {
+        match self {
+            Sim::Cpu(s) => {
+                let n = s.ext.len().min(ext.len());
+                s.ext[..n].copy_from_slice(&ext[..n]);
+            }
+            #[cfg(feature = "cuda")]
+            Sim::Cuda(s) => s.set_external_all(ext),
         }
     }
 

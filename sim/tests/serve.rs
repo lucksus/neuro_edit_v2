@@ -66,12 +66,12 @@ impl Rig {
     }
 
     /// Collect events until `f` matches (or the deadline hits).
-    fn until(&self, f: impl Fn(&ServerMsg) -> bool) -> Vec<ServerEvent> {
+    fn until(&self, mut f: impl FnMut(&ServerMsg) -> bool) -> Vec<ServerEvent> {
         self.until_ev(|e| f(&e.msg))
     }
 
     /// Same, with the event's routing visible to the predicate.
-    fn until_ev(&self, f: impl Fn(&ServerEvent) -> bool) -> Vec<ServerEvent> {
+    fn until_ev(&self, mut f: impl FnMut(&ServerEvent) -> bool) -> Vec<ServerEvent> {
         let mut out = Vec::new();
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
@@ -1188,5 +1188,137 @@ fn set_neuron_kind_edit_round_trips() {
         .unwrap();
     assert_eq!(d.neurons_changed.len(), 1);
     assert_eq!(d.neurons_changed[0].kind, 1, "delta carries inh kind");
+    rig.stop();
+}
+
+/// 2026-11-13 (Nico, live site): `SetBackend` drops the whole sim — and
+/// with it the stimulus program (`SetInputConst`, `PlayInput`,
+/// `SetExternal` all live inside the built `Sim`, not the `Env`). After
+/// CUDA→CPU no neuron showed excitation, and switching back didn't help
+/// because the second rebuild dropped the drive again. The run flag
+/// itself survives; the drive must too.
+fn backend_switch_case(first: BackendKind, second: BackendKind) {
+    let pb = |k: BackendKind| match k {
+        BackendKind::Cpu => proto::Backend::Cpu,
+        BackendKind::Cuda => proto::Backend::Cuda,
+    };
+    let mut net = Network::new();
+    for i in 0..8 {
+        net.add_neuron(
+            [i as f32 * 10.0, 0.0, 0.0],
+            net_format::NeuronKind::Excitatory,
+        );
+    }
+    net.add_input("stim", vec![(0, 30.0), (4, 30.0)], [0.0; 3]);
+    let rig = start_opts(
+        net,
+        ServeOpts {
+            backend: first,
+            seed: 1,
+            cfg: SimConfig::default(),
+            data_dir: None,
+            max_upload_bytes: usize::MAX,
+            quota_bytes: 0,
+            abort: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            sim_limits: sim::SimLimits::default(),
+        },
+    );
+    rig.send(ClientMsg::Subscribe);
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+    rig.send(ClientMsg::SetInputConst {
+        name: "stim".into(),
+        value: 1.0,
+    });
+    rig.send(ClientMsg::AutoRun(true));
+    // Spikes on the first backend — sanity that the drive works at all.
+    rig.until(|m| matches!(m, ServerMsg::Activity(a) if a.spikes_total > 0));
+
+    // first -> second, then second -> first: after each hop the rebuilt
+    // sim must keep spiking without re-setting the input.
+    let mut prev = first;
+    for to in [second, first] {
+        rig.send(ClientMsg::SetBackend(pb(to)));
+        // Status only re-emits on change — a same-kind flip produces none
+        // — and `status!()` runs at the NEXT loop top, so it can land
+        // after the Reset publish. Collect until both are in.
+        rig.send(ClientMsg::Reset);
+        let mut saw_status = to == prev;
+        let mut saw_t0 = false;
+        rig.until(|m| {
+            match m {
+                ServerMsg::Status { backend, .. } if *backend == pb(to) => {
+                    saw_status = true;
+                }
+                ServerMsg::Activity(a) if a.t_steps == 0 => saw_t0 = true,
+                _ => {}
+            }
+            saw_status && saw_t0
+        });
+        prev = to;
+        // The rebuilt sim's counters restart at 0 — spikes now must come
+        // from drive carried across the rebuild.
+        rig.until(|m| matches!(m, ServerMsg::Activity(a) if a.spikes_total > 0));
+    }
+    rig.stop();
+}
+
+#[test]
+fn backend_switch_keeps_drive() {
+    // Same-kind flips exercise the same rebuild path even without a GPU.
+    backend_switch_case(BackendKind::Cpu, BackendKind::Cpu);
+    #[cfg(feature = "cuda")]
+    if sim::cuda_available() {
+        backend_switch_case(BackendKind::Cpu, BackendKind::Cuda);
+        backend_switch_case(BackendKind::Cuda, BackendKind::Cpu);
+    } else {
+        eprintln!("no CUDA device — exercised the CPU->CPU rebuild path only");
+    }
+}
+
+/// Same bug through the script API: `sim.set_input` / `sim.set_external`
+/// must also survive a backend switch (scripts drive the same Sim).
+#[test]
+fn backend_switch_keeps_script_drive() {
+    // Flip to CUDA when a device is reachable, else CPU (the bug is in
+    // the rebuild, not the backend pair).
+    #[allow(unused_mut)]
+    let mut to = proto::Backend::Cpu;
+    #[cfg(feature = "cuda")]
+    if sim::cuda_available() {
+        to = proto::Backend::Cuda;
+    }
+    let mut net = Network::new();
+    for i in 0..8 {
+        net.add_neuron(
+            [i as f32 * 10.0, 0.0, 0.0],
+            net_format::NeuronKind::Excitatory,
+        );
+    }
+    let rig = start(net, None);
+    rig.send(ClientMsg::Subscribe);
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+    rig.send(ClientMsg::Eval {
+        code: r#"net.add_input("s", [[0, 30.0]]); sim.set_input("s", 1.0);
+                 sim.set_external(4, 30.0); print("driven")"#
+            .into(),
+    });
+    rig.until(|m| matches!(m, ServerMsg::Console(s) if s == "driven"));
+    rig.send(ClientMsg::AutoRun(true));
+    rig.until(|m| matches!(m, ServerMsg::Activity(a) if a.spikes_total > 0));
+
+    rig.send(ClientMsg::SetBackend(to));
+    rig.send(ClientMsg::Reset);
+    let mut saw_status = to == proto::Backend::Cpu;
+    let mut saw_t0 = false;
+    rig.until(|m| {
+        match m {
+            ServerMsg::Status { backend, .. } if *backend == to => saw_status = true,
+            ServerMsg::Activity(a) if a.t_steps == 0 => saw_t0 = true,
+            _ => {}
+        }
+        saw_status && saw_t0
+    });
+    rig.until(|m| matches!(m, ServerMsg::Activity(a) if a.spikes_total > 0));
     rig.stop();
 }

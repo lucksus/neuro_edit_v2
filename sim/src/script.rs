@@ -80,6 +80,9 @@ pub struct Env {
     /// it, 0 = unlimited (local mode). Same accounting the protocol
     /// file commands use.
     pub quota_bytes: Rc<RefCell<u64>>,
+    /// Drive program saved by the last sim drop, reapplied to the next
+    /// build — see `DriveSlot`.
+    pub drive: DriveSlot,
 }
 
 impl Env {
@@ -133,6 +136,7 @@ impl Env {
             }) as JobSinkFn))
         };
         let job_dir: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let drive: DriveSlot = Rc::new(RefCell::new(None));
         register_api(
             &mut engine,
             net.clone(),
@@ -150,6 +154,7 @@ impl Env {
             job_dir.clone(),
             sim_limits.clone(),
             quota_bytes.clone(),
+            drive.clone(),
         );
         Env {
             engine,
@@ -169,6 +174,7 @@ impl Env {
             job_dir,
             sim_limits,
             quota_bytes,
+            drive,
         }
     }
 
@@ -207,7 +213,8 @@ impl Env {
             .borrow()
             .check(&self.net.borrow(), cfg.dt_ms)
             .map_err(anyhow::Error::msg)?;
-        let s = Sim::new(&self.net.borrow(), cfg, self.backend.get())?;
+        let mut s = Sim::new(&self.net.borrow(), cfg, self.backend.get())?;
+        apply_drive(&self.drive, &mut s, &self.net);
         let h = Rc::new(RefCell::new(s));
         *self.sim.borrow_mut() = Some(h.clone());
         Ok(h)
@@ -228,9 +235,10 @@ impl Env {
         self.sim.borrow().as_ref().cloned()
     }
 
-    /// Mark the sim stale — next `sim.run` rebuilds from the edited net.
+    /// Mark the sim stale — stash its drive program, then next `sim.run`
+    /// rebuilds from the edited net with the drive re-applied.
     pub fn invalidate_sim(&self) {
-        *self.sim.borrow_mut() = None;
+        stash_drive(&self.sim, &self.drive, &self.net);
     }
 
     fn scope(&self) -> rhai::Scope<'_> {
@@ -432,6 +440,28 @@ fn nid(id: i64, n: usize) -> Result<u32, Box<rhai::EvalAltResult>> {
 /// `Env` creation and scripts kept using the old backend).
 pub type BackendCell = Rc<std::cell::Cell<BackendKind>>;
 
+/// The drive program saved by the last sim drop — inputs keyed by name,
+/// ext by neuron (`stim::DriveState`). Reapplied to the next built sim so
+/// a backend switch / dt change / net edit doesn't silently un-drive the
+/// network (2026-11-13, Nico's report: toggling CUDA→CPU killed all
+/// excitation because the stimulus only lived inside the dropped sim).
+pub type DriveSlot = Rc<RefCell<Option<crate::stim::DriveState>>>;
+
+/// Stash `slot`'s sim drive into `drive` before dropping it — every
+/// sim-drop path funnels here or through `Env::invalidate_sim`.
+fn stash_drive(slot: &SimSlot, drive: &DriveSlot, net: &NetHandle) {
+    if let Some(h) = slot.borrow_mut().take() {
+        *drive.borrow_mut() = Some(crate::stim::DriveState::capture(&h.borrow(), &net.borrow()));
+    }
+}
+
+/// Re-apply a stashed drive onto a just-built sim, if one is waiting.
+fn apply_drive(drive: &DriveSlot, sim: &mut Sim, net: &NetHandle) {
+    if let Some(d) = drive.borrow_mut().take() {
+        d.apply(sim, &net.borrow());
+    }
+}
+
 /// Build or fetch the sim inside the slot (mirrors `Env::sim_handle`).
 fn ensure_sim(
     slot: &SimSlot,
@@ -439,6 +469,7 @@ fn ensure_sim(
     cfg: &CfgHandle,
     kind: &BackendCell,
     limits: &Rc<RefCell<crate::SimLimits>>,
+    drive: &DriveSlot,
 ) -> Result<Rc<RefCell<Sim>>, Box<rhai::EvalAltResult>> {
     if let Some(h) = slot.borrow().as_ref() {
         return Ok(h.clone());
@@ -448,16 +479,18 @@ fn ensure_sim(
         .borrow()
         .check(&net.borrow(), c.dt_ms)
         .map_err(s_err)?;
-    let s = Sim::new(&net.borrow(), c, kind.get())
+    let mut s = Sim::new(&net.borrow(), c, kind.get())
         .map_err(|e| -> Box<rhai::EvalAltResult> { e.to_string().into() })?;
+    apply_drive(drive, &mut s, net);
     let h = Rc::new(RefCell::new(s));
     *slot.borrow_mut() = Some(h.clone());
     Ok(h)
 }
 
-/// Net mutated: drop the stale sim and bump the version (editor republish).
-fn invalidate(s: &SimSlot, ver: &Rc<std::cell::Cell<u64>>) {
-    *s.borrow_mut() = None;
+/// Net mutated: stash the drive, drop the stale sim, bump the version
+/// (editor republish).
+fn invalidate(s: &SimSlot, n: &NetHandle, d: &DriveSlot, ver: &Rc<std::cell::Cell<u64>>) {
+    stash_drive(s, d, n);
     ver.set(ver.get() + 1);
 }
 
@@ -654,6 +687,7 @@ pub fn register_api(
     job_dir: Rc<RefCell<Option<String>>>,
     sim_limits: Rc<RefCell<crate::SimLimits>>,
     quota_bytes: Rc<RefCell<u64>>,
+    drive: DriveSlot,
 ) {
     engine
         .register_type_with_name::<NetHandle>("Net")
@@ -670,22 +704,27 @@ pub fn register_api(
 
     // ---- net methods ----
     {
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
         engine.register_fn(
             "add_neuron",
             move |n: &mut NetHandle, x: Dynamic, y: Dynamic, z: Dynamic| -> rhai::INT {
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 let p = [d_f64(&x) as f32, d_f64(&y) as f32, d_f64(&z) as f32];
                 n.borrow_mut().add_neuron(p, NeuronKind::Excitatory) as rhai::INT
             },
         );
     }
     {
-        let (s, v, g) = (sim.clone(), net_version.clone(), net_gen.clone());
+        let (s, v, g, dr) = (
+            sim.clone(),
+            net_version.clone(),
+            net_gen.clone(),
+            drive.clone(),
+        );
         engine.register_fn("clear", move |n: &mut NetHandle| {
             *n.borrow_mut() = Network::new();
             g.set(g.get() + 1);
-            invalidate(&s, &v);
+            invalidate(&s, n, &dr, &v);
         });
     }
     engine.register_fn("neuron_count", |n: &mut NetHandle| -> rhai::INT {
@@ -698,7 +737,7 @@ pub fn register_api(
         n.borrow().inputs.len() as rhai::INT
     });
     {
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
         engine.register_fn(
             "connect",
             move |n: &mut NetHandle,
@@ -711,13 +750,18 @@ pub fn register_api(
                 if a == b {
                     return Err(format!("self-synapse on neuron {a}").into());
                 }
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 Ok(n.borrow_mut().connect(a, b, d_f64(&w) as f32) as rhai::INT)
             },
         );
     }
     {
-        let (s, v, c) = (sim.clone(), net_version.clone(), cancel.clone());
+        let (s, v, c, dr) = (
+            sim.clone(),
+            net_version.clone(),
+            cancel.clone(),
+            drive.clone(),
+        );
         engine.register_fn(
             "create_2d_grid",
             move |n: &mut NetHandle,
@@ -727,7 +771,7 @@ pub fn register_api(
                   d: Dynamic|
                   -> Result<(), Box<rhai::EvalAltResult>> {
                 net_format::check_grid_dims([w, h, 1]).map_err(s_err)?;
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 let cancelled = builders::create_2d_grid_checked(
                     &mut n.borrow_mut(),
                     g,
@@ -746,7 +790,12 @@ pub fn register_api(
         );
     }
     {
-        let (s, v, c) = (sim.clone(), net_version.clone(), cancel.clone());
+        let (s, v, c, dr) = (
+            sim.clone(),
+            net_version.clone(),
+            cancel.clone(),
+            drive.clone(),
+        );
         engine.register_fn(
             "create_3d_grid",
             move |n: &mut NetHandle,
@@ -757,7 +806,7 @@ pub fn register_api(
                   d: Dynamic|
                   -> Result<(), Box<rhai::EvalAltResult>> {
                 net_format::check_grid_dims([w, h, dep]).map_err(s_err)?;
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 let cancelled = builders::create_3d_grid_checked(
                     &mut n.borrow_mut(),
                     g,
@@ -777,11 +826,12 @@ pub fn register_api(
         );
     }
     {
-        let (r, s, v, c) = (
+        let (r, s, v, c, dr) = (
             rng.clone(),
             sim.clone(),
             net_version.clone(),
             cancel.clone(),
+            drive.clone(),
         );
         engine.register_fn(
             "create_connections",
@@ -792,7 +842,7 @@ pub fn register_api(
                   w: Dynamic|
                   -> Result<(), Box<rhai::EvalAltResult>> {
                 group_or_err(n, g)?;
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 let cancelled = builders::create_connections_checked(
                     &mut n.borrow_mut(),
                     g,
@@ -811,7 +861,7 @@ pub fn register_api(
         );
     }
     {
-        let (r, s, v) = (rng.clone(), sim.clone(), net_version.clone());
+        let (r, s, v, dr) = (rng.clone(), sim.clone(), net_version.clone(), drive.clone());
         engine.register_fn(
             "set_synapse_weights",
             move |n: &mut NetHandle,
@@ -820,7 +870,7 @@ pub fn register_api(
                   sd: Dynamic|
                   -> Result<(), Box<rhai::EvalAltResult>> {
                 group_or_err(n, g)?;
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 builders::set_synapse_weights(
                     &mut n.borrow_mut(),
                     g,
@@ -836,7 +886,7 @@ pub fn register_api(
     // tau semantics: >0 gives that synapse its own exponential current
     // trace; 0 returns it to the merged global synapse_tau path.
     {
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
         engine.register_fn(
             "set_syn_tau",
             move |n: &mut NetHandle,
@@ -846,14 +896,14 @@ pub fn register_api(
                   -> Result<(), Box<rhai::EvalAltResult>> {
                 group_or_err(n, g1)?;
                 group_or_err(n, g2)?;
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 builders::set_synapse_tau(&mut n.borrow_mut(), g1, g2, d_f64(&tau));
                 Ok(())
             },
         );
     }
     {
-        let (r, s, v) = (rng.clone(), sim.clone(), net_version.clone());
+        let (r, s, v, dr) = (rng.clone(), sim.clone(), net_version.clone(), drive.clone());
         engine.register_fn(
             "set_syn_tau_dist",
             move |n: &mut NetHandle,
@@ -864,7 +914,7 @@ pub fn register_api(
                   -> Result<(), Box<rhai::EvalAltResult>> {
                 group_or_err(n, g1)?;
                 group_or_err(n, g2)?;
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 builders::set_synapse_tau_dist(
                     &mut n.borrow_mut(),
                     g1,
@@ -878,7 +928,7 @@ pub fn register_api(
         );
     }
     {
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
         engine.register_fn(
             "set_syn_tau_one",
             move |n: &mut NetHandle,
@@ -889,7 +939,7 @@ pub fn register_api(
                 let len = n.borrow().neurons.len();
                 // Validate before casting — a negative id would wrap.
                 let (src, tgt) = (nid(src, len)?, nid(tgt, len)?);
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 let mut nn = n.borrow_mut();
                 for syn in &mut nn.synapses {
                     if syn.src == src && syn.tgt == tgt {
@@ -901,11 +951,11 @@ pub fn register_api(
         );
     }
     {
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
         engine.register_fn(
             "set_syn_tau_idx",
             move |n: &mut NetHandle, idx: rhai::INT, tau: Dynamic| {
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 if let Some(syn) = n.borrow_mut().synapses.get_mut(idx as usize) {
                     syn.tau_ms = (d_f64(&tau) as f32).max(0.0);
                 }
@@ -913,7 +963,7 @@ pub fn register_api(
         );
     }
     {
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
         engine.register_fn(
             "set_syn_tau_inh",
             move |n: &mut NetHandle,
@@ -921,7 +971,7 @@ pub fn register_api(
                   tau: Dynamic|
                   -> Result<(), Box<rhai::EvalAltResult>> {
                 group_or_err(n, g)?;
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 builders::set_synapse_tau_on_inhibitory(&mut n.borrow_mut(), g, d_f64(&tau));
                 Ok(())
             },
@@ -940,7 +990,7 @@ pub fn register_api(
         },
     );
     {
-        let (r, s, v) = (rng.clone(), sim.clone(), net_version.clone());
+        let (r, s, v, dr) = (rng.clone(), sim.clone(), net_version.clone(), drive.clone());
         engine.register_fn(
             "set_exc_inh",
             move |n: &mut NetHandle,
@@ -948,14 +998,14 @@ pub fn register_api(
                   frac: Dynamic|
                   -> Result<(), Box<rhai::EvalAltResult>> {
                 group_or_err(n, g)?;
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 builders::set_exc_inh(&mut n.borrow_mut(), g, d_f64(&frac), &mut r.borrow_mut());
                 Ok(())
             },
         );
     }
     {
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
         engine.register_fn(
             "set_izh",
             move |n: &mut NetHandle,
@@ -966,7 +1016,7 @@ pub fn register_api(
                   d: Dynamic|
                   -> Result<(), Box<rhai::EvalAltResult>> {
                 let id = nid(id, n.borrow().neurons.len())?;
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 n.borrow_mut().neuron_mut(id).model = net_format::NeuronModel::Izhikevich {
                     a: d_f64(&a) as f32,
                     b: d_f64(&b) as f32,
@@ -978,7 +1028,7 @@ pub fn register_api(
         );
     }
     {
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
         engine.register_fn(
             "set_kind",
             move |n: &mut NetHandle,
@@ -998,7 +1048,7 @@ pub fn register_api(
                 };
                 // Dale's law: flipping the kind re-signs the outgoing
                 // weights at the next sim build — invalidate first.
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 n.borrow_mut().set_kind(id, kind);
                 Ok(())
             },
@@ -1017,21 +1067,21 @@ pub fn register_api(
         );
         // M2: conduction speed and per-edge delays are script-tunable;
         // both invalidate so the next build re-derives delay steps.
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
         engine.register_fn(
             "set_conduction_speed",
             move |n: &mut NetHandle, speed: f64| -> Result<(), Box<rhai::EvalAltResult>> {
                 if !(speed.is_finite() && speed > 0.0) {
                     return Err(s_err("conduction speed must be > 0"));
                 }
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 let mut g = n.borrow_mut();
                 g.meta.conduction_speed = speed as f32;
                 g.refresh_delays();
                 Ok(())
             },
         );
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
         engine.register_fn(
             "set_delay",
             move |n: &mut NetHandle,
@@ -1056,25 +1106,25 @@ pub fn register_api(
                 if !found {
                     return Err(s_err(format!("no synapse {src} -> {tgt}")));
                 }
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 Ok(())
             },
         );
     }
     {
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
         engine.register_fn(
             "delete_neuron",
             move |n: &mut NetHandle, id: rhai::INT| -> Result<(), Box<rhai::EvalAltResult>> {
                 let id = nid(id, n.borrow().neurons.len())?;
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 n.borrow_mut().delete_neuron(id);
                 Ok(())
             },
         );
     }
     {
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
         engine.register_fn(
             "delete_neurons",
             move |n: &mut NetHandle, ids: rhai::Array| -> Result<(), Box<rhai::EvalAltResult>> {
@@ -1083,14 +1133,14 @@ pub fn register_api(
                     .iter()
                     .map(|d| nid(d_i64(d), len))
                     .collect::<Result<_, _>>()?;
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 n.borrow_mut().delete_neurons(ids);
                 Ok(())
             },
         );
     }
     {
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
         engine.register_fn(
             "set_pos",
             move |n: &mut NetHandle,
@@ -1100,7 +1150,7 @@ pub fn register_api(
                   z: Dynamic|
                   -> Result<(), Box<rhai::EvalAltResult>> {
                 let id = nid(id, n.borrow().neurons.len())?;
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 let mut g = n.borrow_mut();
                 g.neuron_mut(id).pos = [d_f64(&x) as f32, d_f64(&y) as f32, d_f64(&z) as f32];
                 g.refresh_delays_of(id);
@@ -1171,7 +1221,7 @@ pub fn register_api(
             .collect()
     });
     {
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
         engine.register_fn(
             "add_to_group",
             move |n: &mut NetHandle,
@@ -1184,7 +1234,7 @@ pub fn register_api(
                     .map(|d| nid(d_i64(d), len))
                     .collect::<Result<_, _>>()?;
                 // Membership feeds grid readouts — drop the sim and bump.
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 let mut b = n.borrow_mut();
                 let gi = b.add_group(g);
                 b.groups[gi].members.extend(ids);
@@ -1194,7 +1244,7 @@ pub fn register_api(
         );
     }
     {
-        let (s, v) = (sim.clone(), net_version.clone());
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
         engine.register_fn(
             "add_input",
             move |n: &mut NetHandle,
@@ -1210,7 +1260,7 @@ pub fn register_api(
                         }
                     }
                 }
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 n.borrow_mut().add_input(name, tw, [0.0; 3]);
                 Ok(())
             },
@@ -1299,12 +1349,13 @@ pub fn register_api(
         );
     }
     {
-        let (s, v, g, dd, c) = (
+        let (s, v, g, dd, c, dr) = (
             sim.clone(),
             net_version.clone(),
             net_gen.clone(),
             data_dir.clone(),
             cfg.clone(),
+            drive.clone(),
         );
         engine.register_fn(
             "load",
@@ -1316,7 +1367,7 @@ pub fn register_api(
                 crate::meta_to_cfg(&loaded.meta, &mut c.borrow_mut());
                 *n.borrow_mut() = loaded;
                 g.set(g.get() + 1);
-                invalidate(&s, &v);
+                invalidate(&s, n, &dr, &v);
                 Ok(())
             },
         );
@@ -1336,45 +1387,63 @@ pub fn register_api(
 
     // ---- sim methods ----
     {
-        let (s, n, c, lim) = (sim.clone(), net.clone(), cfg.clone(), sim_limits.clone());
+        let (s, n, c, lim, dr) = (
+            sim.clone(),
+            net.clone(),
+            cfg.clone(),
+            sim_limits.clone(),
+            drive.clone(),
+        );
         let b = backend.clone();
         let (p, pc) = (progress.clone(), progress_chunk.clone());
         engine.register_fn(
             "run",
             move |_: &mut SimSlot, ms: Dynamic| -> Result<(), Box<rhai::EvalAltResult>> {
-                let h = ensure_sim(&s, &n, &c, &b, &lim)?;
+                let h = ensure_sim(&s, &n, &c, &b, &lim, &dr)?;
                 let steps = (d_f64(&ms) as f32 / c.borrow().dt_ms).round().max(0.0) as usize;
                 run_chunked(&h, steps, &p, &pc).map_err(s_err)
             },
         );
     }
     {
-        let (s, n, c, lim) = (sim.clone(), net.clone(), cfg.clone(), sim_limits.clone());
+        let (s, n, c, lim, dr) = (
+            sim.clone(),
+            net.clone(),
+            cfg.clone(),
+            sim_limits.clone(),
+            drive.clone(),
+        );
         let b = backend.clone();
         let (p, pc) = (progress.clone(), progress_chunk.clone());
         engine.register_fn(
             "run_steps",
             move |_: &mut SimSlot, steps: rhai::INT| -> Result<(), Box<rhai::EvalAltResult>> {
-                let h = ensure_sim(&s, &n, &c, &b, &lim)?;
+                let h = ensure_sim(&s, &n, &c, &b, &lim, &dr)?;
                 run_chunked(&h, steps.max(0) as usize, &p, &pc).map_err(s_err)
             },
         );
     }
     {
-        let (s, n, c, lim) = (sim.clone(), net.clone(), cfg.clone(), sim_limits.clone());
+        let (s, n, c, lim, dr) = (
+            sim.clone(),
+            net.clone(),
+            cfg.clone(),
+            sim_limits.clone(),
+            drive.clone(),
+        );
         let b = backend.clone();
         engine.register_fn(
             "build",
             move |_: &mut SimSlot| -> Result<(), Box<rhai::EvalAltResult>> {
-                ensure_sim(&s, &n, &c, &b, &lim)?;
+                ensure_sim(&s, &n, &c, &b, &lim, &dr)?;
                 Ok(())
             },
         );
     }
     {
-        let s = sim.clone();
+        let (s, n, dr) = (sim.clone(), net.clone(), drive.clone());
         engine.register_fn("rebuild", move |_: &mut SimSlot| {
-            *s.borrow_mut() = None;
+            stash_drive(&s, &dr, &n);
         });
     }
     engine.register_fn("time", |s: &mut SimSlot| -> f64 {
@@ -1479,7 +1548,13 @@ pub fn register_api(
             .unwrap_or_default()
     });
     {
-        let (s, n, c, lim) = (sim.clone(), net.clone(), cfg.clone(), sim_limits.clone());
+        let (s, n, c, lim, dr) = (
+            sim.clone(),
+            net.clone(),
+            cfg.clone(),
+            sim_limits.clone(),
+            drive.clone(),
+        );
         let b = backend.clone();
         engine.register_fn(
             "set_input",
@@ -1491,14 +1566,20 @@ pub fn register_api(
                     Some(i) => i,
                     None => return Err(s_err(format!("unknown input \"{name}\""))),
                 };
-                let h = ensure_sim(&s, &n, &c, &b, &lim)?;
+                let h = ensure_sim(&s, &n, &c, &b, &lim, &dr)?;
                 h.borrow_mut().set_input_constant(idx, d_f64(&x) as f32);
                 Ok(())
             },
         );
     }
     {
-        let (s, n, c, lim) = (sim.clone(), net.clone(), cfg.clone(), sim_limits.clone());
+        let (s, n, c, lim, dr) = (
+            sim.clone(),
+            net.clone(),
+            cfg.clone(),
+            sim_limits.clone(),
+            drive.clone(),
+        );
         let b = backend.clone();
         engine.register_fn(
             "play_input",
@@ -1511,14 +1592,20 @@ pub fn register_api(
                     None => return Err(s_err(format!("unknown input \"{name}\""))),
                 };
                 let series: Vec<f32> = arr.iter().map(|d| d_f64(d) as f32).collect();
-                let h = ensure_sim(&s, &n, &c, &b, &lim)?;
+                let h = ensure_sim(&s, &n, &c, &b, &lim, &dr)?;
                 h.borrow_mut().play_input(idx, series);
                 Ok(())
             },
         );
     }
     {
-        let (s, n, c, lim) = (sim.clone(), net.clone(), cfg.clone(), sim_limits.clone());
+        let (s, n, c, lim, dr) = (
+            sim.clone(),
+            net.clone(),
+            cfg.clone(),
+            sim_limits.clone(),
+            drive.clone(),
+        );
         let b = backend.clone();
         engine.register_fn(
             "set_external",
@@ -1526,7 +1613,7 @@ pub fn register_api(
                   id: rhai::INT,
                   amps: Dynamic|
                   -> Result<(), Box<rhai::EvalAltResult>> {
-                let h = ensure_sim(&s, &n, &c, &b, &lim)?;
+                let h = ensure_sim(&s, &n, &c, &b, &lim, &dr)?;
                 let n_len = h.borrow().v().len();
                 h.borrow_mut()
                     .set_external(nid(id, n_len)? as usize, d_f64(&amps) as f32);
@@ -1561,7 +1648,7 @@ pub fn register_api(
         });
     }
     {
-        let (c, s) = (cfg.clone(), sim.clone());
+        let (c, s, n, dr) = (cfg.clone(), sim.clone(), net.clone(), drive.clone());
         engine.register_fn("set_dt", move |_: &mut SimSlot, dt: Dynamic| {
             let d = d_f64(&dt) as f32;
             if !crate::valid_dt_ms(d) {
@@ -1572,15 +1659,15 @@ pub fn register_api(
                 )));
             }
             c.borrow_mut().dt_ms = d;
-            *s.borrow_mut() = None; // ring depth depends on dt
+            stash_drive(&s, &dr, &n); // ring depth depends on dt
             Ok(())
         });
     }
     {
-        let (c, s) = (cfg.clone(), sim.clone());
+        let (c, s, n, dr) = (cfg.clone(), sim.clone(), net.clone(), drive.clone());
         engine.register_fn("set_int_weights", move |_: &mut SimSlot, on: rhai::INT| {
             c.borrow_mut().int_weights = on != 0;
-            *s.borrow_mut() = None; // switches the kernel + ring semantics
+            stash_drive(&s, &dr, &n); // switches the kernel + ring semantics
         });
     }
     // M3: the persisted settings are readable, so a script can confirm

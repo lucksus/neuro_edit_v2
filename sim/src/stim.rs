@@ -99,3 +99,163 @@ impl Stimulus {
         out
     }
 }
+
+/// The drive programmed into a sim (`set_input` constants, `play_input`
+/// series, `set_external` currents), detached so a sim rebuild — backend
+/// switch, dt change, net edit — can re-apply it. Constants and series
+/// are keyed by input NAME so they survive input-list edits; `ext` stays
+/// neuron-indexed.
+#[derive(Clone, Debug, Default)]
+pub struct DriveState {
+    /// input name -> constant value. Only entries with no queued series —
+    /// a series shadows the constant the way `Stimulus::value` does.
+    pub consts: Vec<(String, f32)>,
+    /// input name -> series tail still to play, rebased to the new sim's
+    /// step 0. A fully-consumed series is kept as `[0.0]` so the shadowed
+    /// constant does not resurrect after the rebuild.
+    pub series: Vec<(String, Vec<f32>)>,
+    /// neuron index -> external current (nonzero entries only).
+    pub ext: Vec<(u32, f32)>,
+}
+
+impl DriveState {
+    /// Detach `sim`'s drive, keying inputs by `net`'s input names. A
+    /// half-played series is truncated to its remaining tail so the
+    /// rebuilt sim continues playback where the old one stopped.
+    pub fn capture(sim: &crate::Sim, net: &net_format::Network) -> DriveState {
+        let stim = sim.stimulus();
+        let t = sim.step_count();
+        let mut d = DriveState::default();
+        for (i, inp) in net.inputs.iter().enumerate() {
+            match stim.series.get(i) {
+                Some(ser) if !ser.is_empty() => {
+                    let start = stim.play_start.get(i).copied().unwrap_or(0);
+                    let tail = if t > start {
+                        let done = (t - start) as usize;
+                        if done < ser.len() {
+                            ser[done..].to_vec()
+                        } else {
+                            vec![0.0]
+                        }
+                    } else {
+                        ser.clone()
+                    };
+                    d.series.push((inp.name.clone(), tail));
+                }
+                _ => {
+                    let c = stim.constants.get(i).copied().unwrap_or(0.0);
+                    if c != 0.0 {
+                        d.consts.push((inp.name.clone(), c));
+                    }
+                }
+            }
+        }
+        for (i, &a) in sim.external().iter().enumerate() {
+            if a != 0.0 {
+                d.ext.push((i as u32, a));
+            }
+        }
+        d
+    }
+
+    /// Re-apply onto a freshly built sim (its step count is 0, so each
+    /// saved tail starts playing immediately).
+    pub fn apply(&self, sim: &mut crate::Sim, net: &net_format::Network) {
+        for (name, v) in &self.consts {
+            if let Some(i) = net.input_index(name) {
+                sim.set_input_constant(i, *v);
+            }
+        }
+        for (name, tail) in &self.series {
+            if let Some(i) = net.input_index(name) {
+                sim.play_input(i, tail.clone());
+            }
+        }
+        if !self.ext.is_empty() {
+            let mut ext = vec![0.0f32; net.neurons.len()];
+            for &(nid, a) in &self.ext {
+                if let Some(e) = ext.get_mut(nid as usize) {
+                    *e = a;
+                }
+            }
+            sim.set_external_all(&ext);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use net_format::Network;
+
+    fn driven_sim() -> (Network, crate::Sim) {
+        let mut net = Network::new();
+        net.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
+        net.add_neuron([10.0; 3], net_format::NeuronKind::Excitatory);
+        net.add_input("a", vec![(0, 10.0)], [0.0; 3]);
+        net.add_input("b", vec![(1, 10.0)], [0.0; 3]);
+        let mut s = crate::Sim::new(&net, crate::SimConfig::default(), crate::BackendKind::Cpu)
+            .unwrap();
+        s.set_input_constant(0, 1.0);
+        s.play_input(1, vec![5.0; 10]); // plays from t=0
+        s.set_external(1, 3.0);
+        (net, s)
+    }
+
+    #[test]
+    fn capture_keys_consts_by_name_and_trims_series_tail() {
+        let (net, mut s) = driven_sim();
+        s.run_steps(4).unwrap(); // "b"'s 10-step series is 6 from done
+        let d = DriveState::capture(&s, &net);
+        assert_eq!(d.consts, vec![("a".to_string(), 1.0)]);
+        assert_eq!(d.series, vec![("b".to_string(), vec![5.0; 6])]);
+        assert_eq!(d.ext, vec![(1, 3.0)]);
+    }
+
+    #[test]
+    fn apply_restores_drive_onto_fresh_sim() {
+        let (net, mut s) = driven_sim();
+        s.run_steps(4).unwrap();
+        let d = DriveState::capture(&s, &net);
+        let mut s2 =
+            crate::Sim::new(&net, crate::SimConfig::default(), crate::BackendKind::Cpu).unwrap();
+        d.apply(&mut s2, &net);
+        let st = s2.stimulus();
+        assert_eq!(st.constants[0], 1.0);
+        assert_eq!(st.series[1], vec![5.0; 6]);
+        assert_eq!(s2.external()[1], 3.0);
+    }
+
+    #[test]
+    fn finished_series_stays_zero_and_does_not_resurrect_constant() {
+        let (net, mut s) = driven_sim();
+        s.set_input_constant(1, 9.0); // shadowed by the queued series
+        s.run_steps(12).unwrap(); // "b"'s series ran out
+        let d = DriveState::capture(&s, &net);
+        // a consumed series must capture as non-empty so `value` keeps
+        // returning 0 instead of falling back to the constant
+        assert_eq!(d.series, vec![("b".to_string(), vec![0.0])]);
+        let mut s2 =
+            crate::Sim::new(&net, crate::SimConfig::default(), crate::BackendKind::Cpu).unwrap();
+        d.apply(&mut s2, &net);
+        s2.run_steps(5).unwrap();
+        let st = s2.stimulus();
+        assert_eq!(st.value(1, s2.step_count()), 0.0);
+    }
+
+    #[test]
+    fn apply_drops_inputs_the_new_net_lacks() {
+        let (net, s) = driven_sim();
+        let d = DriveState::capture(&s, &net);
+        let mut net2 = Network::new();
+        net2.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
+        net2.add_input("a", vec![(0, 10.0)], [0.0; 3]); // no "b", one neuron
+        let mut s2 =
+            crate::Sim::new(&net2, crate::SimConfig::default(), crate::BackendKind::Cpu).unwrap();
+        d.apply(&mut s2, &net2);
+        let st = s2.stimulus();
+        assert_eq!(st.constants[0], 1.0);
+        assert_eq!(st.series.len(), 1); // "b" series silently dropped
+        assert!(s2.external().iter().all(|&v| v == 0.0)); // neuron 1 gone, no panic
+    }
+}

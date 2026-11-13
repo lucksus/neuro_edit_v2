@@ -38,6 +38,9 @@ pub struct CudaSim {
     s: CudaSlice<f32>,
     trace: CudaSlice<f32>,
     ext: CudaSlice<f32>,
+    /// Host mirror of `ext` — every writer keeps both in sync so
+    /// `external()` (rebuild snapshots) costs no device readback.
+    ext_host: Vec<f32>,
     /// Delay ring: f32 elements, or i32 fixed-point (scale 4096) when
     /// `cfg.int_weights` — same 4-byte words either way.
     ring: CudaSlice<u32>,
@@ -175,6 +178,7 @@ impl CudaSim {
             s: stream.alloc_zeros(na)?,
             trace: stream.alloc_zeros(na)?,
             ext: stream.alloc_zeros(na)?,
+            ext_host: vec![0.0; na],
             ring: stream.alloc_zeros((d * n).max(1))?,
             a: stream.clone_htod(&pad(params.a.clone()))?,
             b: stream.clone_htod(&pad(params.b.clone()))?,
@@ -770,18 +774,27 @@ impl CudaSim {
     }
 
     pub fn set_external(&mut self, neuron: usize, amps: f32) {
-        let mut host = self.stream.clone_dtoh(&self.ext).unwrap();
-        if let Some(h) = host.get_mut(neuron) {
+        if let Some(h) = self.ext_host.get_mut(neuron) {
             *h = amps;
-            self.stream.memcpy_htod(&host, &mut self.ext).unwrap();
+            self.stream
+                .memcpy_htod(&self.ext_host, &mut self.ext)
+                .unwrap();
         }
     }
 
     /// Set the whole external-current vector at once (cheap path).
     pub fn set_external_all(&mut self, ext: &[f32]) {
+        let n = self.ext_host.len().min(ext.len());
+        self.ext_host[..n].copy_from_slice(&ext[..n]);
         self.stream
-            .memcpy_htod(&ext.to_vec(), &mut self.ext)
+            .memcpy_htod(&self.ext_host, &mut self.ext)
             .unwrap();
+    }
+
+    /// Host copy of the external currents — for rebuild snapshots
+    /// (`DriveState::capture`), not hot paths.
+    pub fn external(&self) -> Vec<f32> {
+        self.ext_host.clone()
     }
 
     /// Change the background noise rate on the live sim (kernel args read cfg).
