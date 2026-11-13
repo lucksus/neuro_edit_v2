@@ -701,7 +701,6 @@ pub(super) fn show_disconnect_banner(connected: bool, login_open: bool) -> bool 
 mod tests {
     use super::*;
 
-    #[test]
     /// Stage 15 B: `toolbar_group` units inside `horizontal_wrapped` wrap
     /// whole — a group never splits its icon/control across two rows, and
     /// a group that doesn't fit moves to the next row instead of
@@ -747,7 +746,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn reconnect_backoff_doubles_to_60() {
         let mut d = 0.0;
         let seq: Vec<u64> = (0..8)
@@ -759,7 +757,6 @@ mod tests {
         assert_eq!(seq, vec![2, 4, 8, 16, 32, 60, 60, 60]);
     }
 
-    #[test]
     #[test]
     fn disconnect_banner_gating() {
         assert!(show_disconnect_banner(false, false));

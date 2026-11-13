@@ -290,7 +290,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[test]
     fn watch_takes_lowest_ids_not_hash_order() {
         // U8: selection is a HashSet — iterating it gave an arbitrary
         // 8 of the selected neurons. Now the 8 lowest ids win.

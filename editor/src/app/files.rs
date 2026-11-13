@@ -633,7 +633,6 @@ mod tests {
     use crate::simctl::SimCtl;
 
     #[test]
-    #[test]
     fn upload_slot_frees_on_written_and_error() {
         // Q8: the upload slot must clear when its FileWritten (or an
         // "upload …" error) arrives — otherwise the second queued upload
@@ -663,6 +662,7 @@ mod tests {
         assert!(app.files.upload.is_none(), "slot freed on FileWritten");
     }
 
+    #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn local_file_errors_reach_status() {
         // Q14: local-mode file ops used to discard errors (`let _ =`)

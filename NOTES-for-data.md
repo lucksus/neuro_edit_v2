@@ -2159,3 +2159,91 @@ Green: `cargo test -p sim --test examples` 5/5, `--test serve` 29/29
 Not verified: the wasm UI itself (headless tests cover the worker
 path it drives); `grid_wave`'s wave *visual* (the test asserts the
 underlying activity/spike gradient, not pixels).
+
+## Stage 19 — split editor/src/app.rs (review/fable-review-1112.md §3.4)
+
+`app.rs` (4532 lines, one struct ~110 fields) → `editor/src/app/` modules +
+field sub-structs. Behaviour-preserving except the C15/C16 typed-edit work.
+Commits (`5b826b2^..3ea1fba`, then the attr fix):
+
+- `5b826b2` brief + `app.rs` → `app/{mod,layout}.rs` (free fns + tests first)
+- `2d92f49` `sync.rs` — sync_shared, plane_frame, plane-bit helpers
+- `1d5d7a2` `sync_shared` takes the `Shared` write lock once: copies
+  consumables + snapshots into a local `Taken`, drops the lock, then acts.
+  Previously it dropped/re-acquired around side effects — and held the lock
+  while `save_download` opened a blocking native file dialog.
+- `64bf48b` `actions.rs` — selection/watch, insert/connect, load/save, clipboard
+- `e63185f` `toolbar.rs` — toolbar, status/hints bars, disconnect banner
+- `0cd4fef` `inspector.rs` — inspector, inspect_one, inputs_window
+- `9607ccf` `files.rs` — files window, upload/download, ops + helpers
+- `dd72e61` `login.rs` — native login flow (module cfg-gated like its call site)
+- `d73da02` `help.rs`, `87710b6` `console.rs`, `ffeafdc` `script.rs`,
+  `97ed9e4` `plots.rs`, `00d3344` `jobs.rs`
+- `4dfbe31` `dialogs.rs` — `dialog()` split into one `dlg_*` fn per variant
+- `5ef34b2` typed `NetEdit`: `CreateConnections`, `SetSynapseWeights`,
+  `SetSynTauDist`, `SetExcInh`, `ScriptAdd` handled in `sim/src/serve.rs`
+  (`apply_edit` now takes the worker rng so the probabilistic builders stay
+  deterministic — same model as Rhai). Unknown-group wording matches
+  `group_or_err` ("unknown group \"x\""). 5 wire tests in serve.rs.
+  Old script functions still work (Rhai API unchanged).
+- `958b430` editor switches the four group dialogs + script "Save to net"
+  from `format!`-built `ClientMsg::Eval` to `send_edit` — same clicks, same
+  status strings. Real script runs (Run/console) still go through `Eval`.
+- `360f958`..`34bd761` field sub-structs, one per commit: `file_list`+`recent`
+  → `FilesUi`; speed/backend/running/busy/dt/noise → `SimControls`;
+  hist/win/tab/raster_h/ro_sel → `PlotsUi`; dlg/token/connect/reconnect →
+  `LoginUi`; list/progress/detail/sel/fetched → `JobsUi`; text/name/file +
+  example-watch handshake → `ScriptUi`; input/history/err-seen → `ConsoleUi`;
+  `show_*`+manual_page → `Windows` (runtime mirror of persisted `WindowVis`;
+  `pub` because view.rs's number-key shortcuts toggle it). Inner field names
+  drop the redundant prefix (`self.jobs.list`, `self.plots.tab`,
+  `self.login.dlg`, `self.win.console`).
+- `3ea1fba` `layout.rs`: every window's default rect in one `default_rects`
+  table; `default_open_windows_never_overlap` asserts the default-open set
+  (Inspector/Plots/Console) is pairwise-disjoint at 800x700 and 1440x900
+  plus a width sweep (was: plots/console-only sweep).
+- attr fix: scripted extraction had duplicated `#[test]` on 5 moved tests
+  (they registered twice: lib showed 64) and dropped `#[test]` on
+  `local_file_errors_reach_status`. Both restored — editor lib is exactly
+  the pre-split 59.
+
+### Sizes (lines)
+
+```
+ 837 mod.rs*    766 toolbar.rs*   713 files.rs*
+ 443 dialogs.rs 442 sync.rs       354 plots.rs
+ 352 layout.rs  304 actions.rs    230 inspector.rs
+ 154 script.rs  125 login.rs      124 jobs.rs
+ 116 help.rs    110 console.rs
+```
+
+*over ~700: `mod.rs` is the struct + `new()` + `update()`/`save()` + the
+sub-struct/enum definitions — the grouping destination, not moved UI code.
+`toolbar.rs` is one ~450-line `toolbar()` egui block (irreducible without
+restyling). `files.rs` is the files window + ops + helpers + tests.
+
+### Tests / gates
+
+- `cargo test --workspace`: 33 suites, **247 → 252** (+5 `NetEdit` wire
+  tests). editor lib 59 → 59 (same set, one renamed).
+- `editor/web/build.sh`: clean after every commit.
+- Known flake (pre-existing): `worker_publishes_grid_traces` fails under
+  parallel load ~1 in 4 full-suite runs; passes standalone every time.
+  Worker-side timing race, untouched by this stage.
+
+### Screenshots
+
+`--screenshot --script examples/grid_wave.rhai --after-ms 500 --planes`,
+800x700 + 1440x900. SHA-256 **identical** before/after:
+`578633f4…f95` (800), `198dbfb5…fae6` (1440). No pixel diff.
+
+### Not moved / notes
+
+- `secure_storage_file`, `paste_events`, `usable_rect`/`clamp_window_rect`/
+  `app_win` stayed in `layout.rs` as shared misc utils (they're not
+  layout-table entries but are the file's stated "misc helpers" role).
+- `EditorApp` still owns scene/pick/plane/selection fields (~60) — those
+  belong to the viewport, not a UI-window group; the guided-UI stage can
+  revisit once the model abstraction lands.
+- Rhai `Eval` remains for console input, script Run, and examples —
+  only the structured dialog mutations went typed.
