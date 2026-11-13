@@ -184,11 +184,11 @@ impl EditorApp {
                         ui.add(egui::DragValue::new(lambda).prefix("lambda "));
                         ui.add(egui::DragValue::new(w).prefix("w "));
                         if ui.button("Create").clicked() {
-                            let (g, sc, la, ww) = (group.clone(), *scaling, *lambda, *w);
-                            self.send(ClientMsg::Eval {
-                                code: format!(
-                                    "net.create_connections({g:?}, {sc:?}, {la:?}, {ww:?})"
-                                ),
+                            self.edit_net(NetEdit::CreateConnections {
+                                group: group.clone(),
+                                scaling: *scaling as f64,
+                                lambda: *lambda as f64,
+                                w: *w,
                             });
                             *keep = false;
                         }
@@ -206,9 +206,10 @@ impl EditorApp {
                         ui.add(egui::DragValue::new(mean).prefix("mean "));
                         ui.add(egui::DragValue::new(sd).prefix("sd "));
                         if ui.button("Apply").clicked() {
-                            let (g, m, s) = (group.clone(), *mean, *sd);
-                            self.send(ClientMsg::Eval {
-                                code: format!("net.set_synapse_weights({g:?}, {m:?}, {s:?})"),
+                            self.edit_net(NetEdit::SetSynapseWeights {
+                                group: group.clone(),
+                                mean: *mean as f64,
+                                sd: *sd as f64,
                             });
                             *keep = false;
                         }
@@ -231,9 +232,11 @@ impl EditorApp {
                         ui.add(egui::DragValue::new(mean).prefix("mean ms "));
                         ui.add(egui::DragValue::new(sd).prefix("sd "));
                         if ui.button("Apply").clicked() {
-                            let (a, b, m, s) = (src.clone(), dst.clone(), *mean, *sd);
-                            self.send(ClientMsg::Eval {
-                                code: format!("net.set_syn_tau_dist({a:?}, {b:?}, {m:?}, {s:?})"),
+                            self.edit_net(NetEdit::SetSynTauDist {
+                                src: src.clone(),
+                                dst: dst.clone(),
+                                mean: *mean as f64,
+                                sd: *sd as f64,
                             });
                             *keep = false;
                         }
@@ -250,9 +253,9 @@ impl EditorApp {
                         });
                         ui.add(egui::Slider::new(frac, 0.0..=1.0).text("inh frac"));
                         if ui.button("Apply").clicked() {
-                            let (g, f) = (group.clone(), *frac);
-                            self.send(ClientMsg::Eval {
-                                code: format!("net.set_exc_inh({g:?}, {f:?})"),
+                            self.edit_net(NetEdit::SetExcInh {
+                                group: group.clone(),
+                                frac: *frac as f64,
                             });
                             *keep = false;
                         }

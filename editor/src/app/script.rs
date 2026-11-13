@@ -3,7 +3,7 @@
 
 use eframe::egui;
 
-use proto::ClientMsg;
+use proto::{ClientMsg, NetEdit};
 
 use super::files::dir_of;
 use super::layout::{app_win, clamp_window_rect, usable_rect};
@@ -73,11 +73,9 @@ impl EditorApp {
                         self.show_plots = true;
                     }
                     if ui.button("Save to net").clicked() {
-                        self.send(ClientMsg::Eval {
-                            code: format!(
-                                "net.script_add({:?}, {:?})",
-                                self.script_name, self.script_text
-                            ),
+                        self.edit_net(NetEdit::ScriptAdd {
+                            name: self.script_name.clone(),
+                            src: self.script_text.clone(),
                         });
                         self.status = format!("script {:?} saved to net", self.script_name);
                     }
