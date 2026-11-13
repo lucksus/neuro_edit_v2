@@ -217,3 +217,50 @@ fn worker_cuda_smoke() {
         (s.snap.time_ms >= 49.9 && s.geo.as_ref().is_some_and(|g| g.pos.len() == 64)).then_some(())
     });
 }
+
+/// Protocol 2 hydration: `Hello.models` and `Geo.types/ty/params` must
+/// reach the shared snapshot — the inspector and plot tabs are built
+/// from these, never from hardcoded izh fields.
+#[test]
+fn worker_publishes_models_and_types() {
+    let ctl = SimCtl::start(Network::new(), BackendKind::Cpu, 1);
+    ctl.send(Cmd::Eval {
+        code: r#"
+        net.def_type("fs", "izh", #{a: 0.1, d: 2.0}, "inh");
+        net.add_neuron(0.0, 0.0, 0.0);
+        net.set_type(0, "fs");
+        "#
+        .to_string(),
+    });
+    wait_for(Duration::from_secs(10), || {
+        let s = ctl.shared.read().ok()?;
+        let g = s.geo.as_ref()?;
+        (g.types.iter().any(|t| t.name == "fs") && !g.ty.is_empty()).then_some(())
+    });
+    let s = ctl.shared.read().unwrap();
+    assert!(
+        s.models
+            .iter()
+            .any(|m| m.id == "izh" && m.params.len() == 4),
+        "model descriptors must ride Hello into shared"
+    );
+    let g = s.geo.as_ref().unwrap();
+    let fs = g.types.iter().position(|t| t.name == "fs").unwrap();
+    assert_eq!(g.ty[0] as usize, fs);
+    // generic watched slots: Watch → Activity.watched → snap.watched —
+    // the per-neuron series has one row per state slot (izh: 2). Sample
+    // content is asserted in sim/tests/serve.rs; the transport check
+    // here is the slot-row shape reaching the snapshot intact.
+    drop(s);
+    ctl.send(Cmd::Watch(vec![0]));
+    ctl.send(Cmd::RunMs(5.0));
+    wait_for(Duration::from_secs(10), || {
+        let s = ctl.shared.read().ok()?;
+        s.snap
+            .watched
+            .iter()
+            .find(|(id, _)| *id == 0)
+            .is_some_and(|(_, w)| w.len() >= 2)
+            .then_some(())
+    });
+}

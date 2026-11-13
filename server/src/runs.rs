@@ -255,7 +255,7 @@ impl Runs {
                     std::rc::Rc::new(std::cell::RefCell::new(move |ev: ServerEvent| {
                         let bytes = proto::encode(&ev.msg);
                         let mut cls = cls.lock().unwrap();
-                        crate::fanout(&mut cls, ev.to, &bytes);
+                        crate::fanout(&mut cls, &ev, &bytes);
                     }));
                 sim::serve::run(Network::new(), opts, cmd_rx, emit);
             })

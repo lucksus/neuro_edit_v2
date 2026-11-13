@@ -105,13 +105,17 @@ impl EditorApp {
                             p = p.auto_bounds(egui::Vec2b::new(false, false));
                         }
                         let pr = p.show(ui, |ui| {
-                            if self.plots.hist.v.is_empty() {
-                                // Discoverable watching (Stage 13 E): the
-                            }
                             // watch_sent order → stable per-neuron colors,
                             // shared with the phase tab.
                             for (ci, &id) in self.watch_sent.iter().enumerate() {
-                                let Some(h) = self.plots.hist.v.get(&id) else { continue };
+                                let Some(h) = self
+                                    .plots
+                                    .hist
+                                    .slot(0)
+                                    .and_then(|s| s.get(&id))
+                                else {
+                                    continue;
+                                };
                                 let pts: PlotPoints = match win {
                                     Some((lo, hi)) => h
                                         .iter()
@@ -157,7 +161,7 @@ impl EditorApp {
                             .x_axis_label("v (mV)")
                             .y_axis_label("u");
                         let _ = p.show(ui, |ui| {
-                            if self.plots.hist.u.is_empty() {
+                            if self.plots.hist.slot(1).is_none_or(|s| s.is_empty()) {
                                 ui.text(egui_plot::Text::new(
                                     "hint",
                                     egui_plot::PlotPoint::new(-30.0, -10.0),
@@ -165,9 +169,10 @@ impl EditorApp {
                                 ));
                             }
                             for (ci, &id) in self.watch_sent.iter().enumerate() {
-                                let (Some(vs), Some(us)) =
-                                    (self.plots.hist.v.get(&id), self.plots.hist.u.get(&id))
-                                else {
+                                let (Some(vs), Some(us)) = (
+                                    self.plots.hist.slot(0).and_then(|s| s.get(&id)),
+                                    self.plots.hist.slot(1).and_then(|s| s.get(&id)),
+                                ) else {
                                     continue;
                                 };
                                 let col = crate::plot::watch_color(ci);

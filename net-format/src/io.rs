@@ -9,7 +9,7 @@ use std::path::Path;
 use crate::Network;
 
 const MAGIC: &[u8; 4] = b"NE2\0";
-const FORMAT_VERSION: u32 = 4;
+const FORMAT_VERSION: u32 = 5;
 
 /// `Neuron` as serialized through format v3 — model+kind inline per
 /// neuron, before the type table existed.
@@ -63,6 +63,7 @@ fn lift_neurons(v3: Vec<NeuronV3>) -> (Vec<crate::NeuronType>, Vec<crate::Neuron
                 model: "izh".into(),
                 params: p.to_vec(),
                 kind: nv.kind,
+                color: None,
             });
             types.len() as u16 - 1
         });
@@ -194,6 +195,58 @@ fn load_v3(r: &mut impl Read) -> Result<Network, LoadError> {
     Ok(net)
 }
 
+/// `NeuronType` as serialized by format v4 — before `color` existed.
+#[derive(serde::Deserialize)]
+struct NeuronTypeV4 {
+    name: String,
+    model: String,
+    params: Vec<f32>,
+    kind: crate::NeuronKind,
+}
+
+/// The v4 `Network` layout — identical field order, `types` in the
+/// colour-less v4 shape.
+#[derive(serde::Deserialize)]
+struct NetworkV4 {
+    types: Vec<NeuronTypeV4>,
+    neurons: Vec<crate::Neuron>,
+    synapses: Vec<crate::Synapse>,
+    groups: Vec<crate::Group>,
+    inputs: Vec<crate::Input>,
+    samples: Vec<crate::Samples>,
+    readouts: Vec<crate::Readout>,
+    scripts: Vec<(String, String)>,
+    meta: crate::Meta,
+}
+
+/// Decode a v4 stream — every field is today's layout except `types`,
+/// whose rows gain `color: None` (derive from kind, as before).
+fn load_v4(r: &mut impl Read) -> Result<Network, LoadError> {
+    let n: NetworkV4 =
+        bincode::deserialize_from(r).map_err(|e| LoadError::Decode(e.to_string()))?;
+    Ok(Network {
+        types: n
+            .types
+            .into_iter()
+            .map(|t| crate::NeuronType {
+                name: t.name,
+                model: t.model,
+                params: t.params,
+                kind: t.kind,
+                color: None,
+            })
+            .collect(),
+        neurons: n.neurons,
+        synapses: n.synapses,
+        groups: n.groups,
+        inputs: n.inputs,
+        samples: n.samples,
+        readouts: n.readouts,
+        scripts: n.scripts,
+        meta: n.meta,
+    })
+}
+
 #[derive(Debug)]
 pub enum LoadError {
     Io(io::Error),
@@ -251,6 +304,7 @@ pub fn load(path: impl AsRef<Path>) -> Result<Network, LoadError> {
         1 => load_v1(&mut r)?,
         2 => load_v2(&mut r)?,
         3 => load_v3(&mut r)?,
+        4 => load_v4(&mut r)?,
         FORMAT_VERSION => {
             bincode::deserialize_from(&mut r).map_err(|e| LoadError::Decode(e.to_string()))?
         }

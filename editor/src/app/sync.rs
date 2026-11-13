@@ -272,20 +272,13 @@ impl EditorApp {
                 .filter(|(_, c)| **c > 0)
                 .map(|(i, _)| i as u32)
                 .collect();
-            // watched_v/_u are parallel vectors on the wire — pair by id,
-            // u missing ⇒ empty series (older servers).
-            let watched: Vec<(u32, &[f32], &[f32])> = snap
-                .watched_v
+            // `watched` carries one series per state slot per neuron —
+            // PlotHist indexes them by slot; the tabs name/range them
+            // off the neuron's model StateDescs.
+            let watched: Vec<(u32, &[Vec<f32>])> = snap
+                .watched
                 .iter()
-                .map(|(id, vs)| {
-                    let us = snap
-                        .watched_u
-                        .iter()
-                        .find(|(i, _)| i == id)
-                        .map(|(_, us)| us.as_slice())
-                        .unwrap_or(&[]);
-                    (*id, vs.as_slice(), us)
-                })
+                .map(|(id, s)| (*id, s.as_slice()))
                 .collect();
             self.plots
                 .hist

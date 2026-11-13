@@ -96,8 +96,9 @@ impl EditorApp {
         if ids != self.watch_sent {
             self.watch_sent = ids.clone();
             self.send(ClientMsg::Watch(ids));
-            self.plots.hist.v.retain(|k, _| self.watch_sent.contains(k));
-            self.plots.hist.u.retain(|k, _| self.watch_sent.contains(k));
+            for s in &mut self.plots.hist.slots {
+                s.retain(|k, _| self.watch_sent.contains(k));
+            }
         }
     }
 

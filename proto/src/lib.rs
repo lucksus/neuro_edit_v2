@@ -13,7 +13,13 @@
 use serde::{Deserialize, Serialize};
 
 /// Bump when any wire type changes shape or meaning.
-pub const PROTO_VERSION: u32 = 1;
+///
+/// 2: neuron-model abstraction — `Hello` carries model descriptors,
+/// `Geo`/`GeoDelta` carry the type table + per-neuron `ty`/`params`,
+/// `Activity::watched` replaces fixed `watched_v`/`watched_u`, and
+/// `NetEdit` gains the type/param edits. v1 bundles are refused at
+/// Hello time (they must not decode v2 frames) and told to reload.
+pub const PROTO_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // shared wire copies of host types (proto must not depend on `sim`)
@@ -23,13 +29,16 @@ pub const PROTO_VERSION: u32 = 1;
 pub enum NeuronKind {
     Excitatory,
     Inhibitory,
+    /// Dale-law-neutral annotation neurons (no signed synapses).
+    Regular,
 }
 
 impl From<net_format::NeuronKind> for NeuronKind {
     fn from(k: net_format::NeuronKind) -> Self {
         match k {
+            net_format::NeuronKind::Excitatory => Self::Excitatory,
             net_format::NeuronKind::Inhibitory => Self::Inhibitory,
-            _ => Self::Excitatory,
+            net_format::NeuronKind::Regular => Self::Regular,
         }
     }
 }
@@ -37,10 +46,63 @@ impl From<net_format::NeuronKind> for NeuronKind {
 impl From<NeuronKind> for net_format::NeuronKind {
     fn from(k: NeuronKind) -> Self {
         match k {
-            NeuronKind::Inhibitory => Self::Inhibitory,
             NeuronKind::Excitatory => Self::Excitatory,
+            NeuronKind::Inhibitory => Self::Inhibitory,
+            NeuronKind::Regular => Self::Regular,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// model descriptors (proto mirrors of `sim::model` — proto can't depend
+// on sim, so the worker translates the registry into these structs)
+// ---------------------------------------------------------------------------
+
+/// One parameter of a neuron model, mirrored from `ParamDef`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ParamDesc {
+    pub name: String,
+    pub unit: String,
+    pub default: f32,
+    pub min: f32,
+    pub max: f32,
+    pub doc: String,
+}
+
+/// One state slot of a neuron model — slot 0 is always the membrane
+/// potential. `plot_range` seeds the editor's y axis.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StateDesc {
+    pub name: String,
+    pub unit: String,
+    pub plot_range: (f32, f32),
+}
+
+/// A registered neuron model as the client needs it: everything the
+/// inspector and the plot tabs are built from. `id` is the file-format
+/// key (never renamed); `label` is for display.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelDesc {
+    pub id: String,
+    pub label: String,
+    pub params: Vec<ParamDesc>,
+    pub state: Vec<StateDesc>,
+    /// (preset name, full param row).
+    pub presets: Vec<(String, Vec<f32>)>,
+}
+
+/// One neuron-type row (the wire copy of `net_format::NeuronType`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TypeRow {
+    pub name: String,
+    /// Registered model id ("izh", …).
+    pub model: String,
+    /// Param row in the model's descriptor order.
+    pub params: Vec<f32>,
+    /// Dale kind — drives synapse signs and the default colour.
+    pub kind: NeuronKind,
+    /// Display colour override; `None` derives one from the kind.
+    pub color: Option<[f32; 3]>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,9 +182,16 @@ pub struct Geo {
     /// means every neuron-id-keyed client state is stale.
     pub gen: u64,
     pub pos: Vec<[f32; 3]>,
-    /// 0 = excitatory, 1 = inhibitory.
+    /// 0 = excitatory, 1 = inhibitory (Dale sign — from the type).
     pub kind: Vec<u8>,
     pub names: Vec<String>,
+    /// The net's type table — `ty[i]` indexes it.
+    pub types: Vec<TypeRow>,
+    /// Type index per neuron.
+    pub ty: Vec<u16>,
+    /// Per-neuron parameter overrides (`None` = the type's row).
+    /// Parallel to `pos` — most entries are `None`.
+    pub params: Vec<Option<Vec<f32>>>,
     /// (src, tgt) pairs, source order.
     pub syn: Vec<(u32, u32)>,
     /// Per-synapse delay in sim steps (spike-dot travel time).
@@ -147,13 +216,18 @@ pub struct Geo {
     pub dt_ms: f32,
 }
 
-/// A changed neuron row (id stays stable; pos/kind/name may differ).
+/// A changed neuron row (id stays stable; pos/kind/ty/params/name may
+/// differ).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NeuronRow {
     pub id: u32,
     pub pos: [f32; 3],
     pub kind: u8,
     pub name: String,
+    /// Index into `Geo.types`.
+    pub ty: u16,
+    /// Per-neuron override — `None` means "use the type's row".
+    pub params: Option<Vec<f32>>,
 }
 
 /// A changed synapse row for deltas.
@@ -190,6 +264,9 @@ pub struct GeoDelta {
     pub grids_changed: Vec<Grid>,
     /// Group indices whose grid metadata was invalidated.
     pub grids_removed: Vec<u32>,
+    /// Full type-table replacement when a type edit lands (small table —
+    /// always the whole thing, never a diff).
+    pub types: Option<Vec<TypeRow>>,
     /// Full replacement when changed (small collections).
     pub inputs: Option<Vec<Input>>,
     pub readouts: Option<Vec<(String, Vec<u32>, Vec<f32>)>>,
@@ -339,6 +416,37 @@ pub enum NetEdit {
     ScriptAdd {
         name: String,
         src: String,
+    },
+    /// Create or replace a type row by name — `net.def_type` behind the
+    /// inspector. `params` is a full row in the model's descriptor
+    /// order; `color` of `None` derives the display colour from `kind`.
+    UpsertType {
+        name: String,
+        model: String,
+        params: Vec<f32>,
+        kind: NeuronKind,
+        color: Option<[f32; 3]>,
+    },
+    /// Point neurons at an existing type by name (`net.set_type`).
+    /// Clears any per-neuron override.
+    SetNeuronType {
+        ids: Vec<u32>,
+        ty: String,
+    },
+    /// Per-neuron param override (`net.set_param`) — a full row in the
+    /// type's model order; `None` clears the override back to the type.
+    SetNeuronParams {
+        ids: Vec<u32>,
+        params: Option<Vec<f32>>,
+    },
+    /// Set weight/tau/delay on every from→to synapse (multi-edges
+    /// included). `None` leaves a field as is.
+    SetSynapse {
+        from: u32,
+        to: u32,
+        w: Option<f32>,
+        tau_ms: Option<f32>,
+        delay_ms: Option<f32>,
     },
 }
 
@@ -523,22 +631,25 @@ pub struct Activity {
     /// just gets stamped 1.0 client-side instead of shipping every fading
     /// value over the wire each frame.
     pub spike_bits: Vec<u8>,
-    /// New v samples for watched neurons, per id.
-    pub watched_v: Vec<(u32, Vec<f32>)>,
-    /// New u (recovery) samples for watched neurons — same ids and
-    /// lengths as `watched_v`, feeding the editor's v–u phase plot.
-    pub watched_u: Vec<(u32, Vec<f32>)>,
+    /// New state samples for watched neurons: `(id, series)` where
+    /// `series[s]` is state slot `s`'s new samples since the previous
+    /// Activity — one tab on the plots window per slot, named and
+    /// ranged by the neuron's model `StateDesc`s.
+    pub watched: Vec<(u32, Vec<Vec<f32>>)>,
     /// Live constant drive per input (same order as `Geo.inputs`).
     pub input_values: Vec<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ServerMsg {
-    /// Answer to `ClientMsg::Hello`.
+    /// Answer to `ClientMsg::Hello`. `models` is the server's neuron-model
+    /// registry — the inspector and plot tabs are built from it, so a
+    /// new model needs no client change.
     Hello {
         proto: u32,
         net_version: u64,
         net_gen: u64,
+        models: Vec<ModelDesc>,
     },
     /// Full geometry — on connect, on net replacement, and for edits that
     /// can't be expressed as a delta (neuron deletion renumbers).
@@ -654,16 +765,25 @@ pub struct FileEntry {
 pub struct ServerEvent {
     pub to: Option<u64>,
     pub msg: ServerMsg,
+    /// Clients excluded from a `to: None` broadcast — the sim worker
+    /// stamps refused (stale-protocol) clients here so a v2 frame can
+    /// never reach a bundle that would mis-decode it.
+    pub except: Vec<u64>,
 }
 
 impl ServerEvent {
     pub fn broadcast(msg: ServerMsg) -> Self {
-        Self { to: None, msg }
+        Self {
+            to: None,
+            msg,
+            except: Vec::new(),
+        }
     }
     pub fn to(client: u64, msg: ServerMsg) -> Self {
         Self {
             to: Some(client),
             msg,
+            except: Vec::new(),
         }
     }
 }
@@ -927,6 +1047,24 @@ mod tests {
             pos: vec![[0.0; 3], [5.0, 0.0, 0.0]],
             kind: vec![0, 1],
             names: vec!["a".into(), "b".into()],
+            types: vec![
+                TypeRow {
+                    name: "exc".into(),
+                    model: "izh".into(),
+                    params: vec![0.02, 0.2, -65.0, 8.0],
+                    kind: NeuronKind::Excitatory,
+                    color: None,
+                },
+                TypeRow {
+                    name: "inh".into(),
+                    model: "izh".into(),
+                    params: vec![0.1, 0.2, -65.0, 2.0],
+                    kind: NeuronKind::Inhibitory,
+                    color: Some([0.5, 0.6, 1.0]),
+                },
+            ],
+            ty: vec![0, 1],
+            params: vec![None, Some(vec![0.1, 0.2, -60.0, 2.0])],
             syn: vec![(0, 1)],
             syn_delay_steps: vec![3],
             disp_edges: vec![(1, 3)],
@@ -956,6 +1094,31 @@ mod tests {
                 proto: PROTO_VERSION,
                 net_version: 12,
                 net_gen: 2,
+                models: vec![ModelDesc {
+                    id: "izh".into(),
+                    label: "Izhikevich".into(),
+                    params: vec![ParamDesc {
+                        name: "a".into(),
+                        unit: "".into(),
+                        default: 0.02,
+                        min: 0.0,
+                        max: 0.2,
+                        doc: "recovery scale".into(),
+                    }],
+                    state: vec![
+                        StateDesc {
+                            name: "v".into(),
+                            unit: "mV".into(),
+                            plot_range: (-90.0, 40.0),
+                        },
+                        StateDesc {
+                            name: "u".into(),
+                            unit: "mV".into(),
+                            plot_range: (-20.0, 10.0),
+                        },
+                    ],
+                    presets: vec![("regular spiking".into(), vec![0.02, 0.2, -65.0, 8.0])],
+                }],
             },
             ServerMsg::Geo(Box::new(geo)),
             ServerMsg::GeoDelta(Box::new(GeoDelta {
@@ -966,6 +1129,8 @@ mod tests {
                     pos: [9.0; 3],
                     kind: 0,
                     name: "c".into(),
+                    ty: 0,
+                    params: None,
                 }],
                 syn_added: vec![SynRow {
                     src: 0,
@@ -1003,8 +1168,7 @@ mod tests {
                 rate_hz: 55.5,
                 steps_per_sec: 1234.0,
                 spike_bits: vec![0b101],
-                watched_v: vec![(3, vec![-70.0, -55.0])],
-                watched_u: vec![(3, vec![-14.0, -13.0])],
+                watched: vec![(3, vec![vec![-70.0, -55.0], vec![-14.0, -13.0]])],
                 input_values: vec![0.7],
             })),
             ServerMsg::GridTraces {

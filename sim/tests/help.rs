@@ -48,3 +48,13 @@ fn help_unknown_topic_lists_topics() {
     assert!(s.contains("net"), "{s}");
     assert!(s.contains("sim"), "{s}");
 }
+
+/// Review 1.3e surface must be discoverable: `help("types")` lists the
+/// model/type API a script author needs for the new registry.
+#[test]
+fn help_types_lists_type_api() {
+    let s = env().eval_str("help(\"types\")").unwrap().to_string();
+    for f in ["models()", "def_type", "set_type", "set_param", "type_name"] {
+        assert!(s.contains(f), "help(types) missing {f}: {s}");
+    }
+}

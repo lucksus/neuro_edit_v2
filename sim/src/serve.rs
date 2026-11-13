@@ -142,6 +142,21 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
     } = opts;
     // `SetQuota` (admin push) adjusts this live — hence `mut`.
     let mut quota_bytes = quota_bytes;
+    // Client ids whose Hello carried a wrong `PROTO_VERSION`. Broadcast
+    // events get these stamped onto `except` (below) so a v2 frame can
+    // never reach a bundle that would mis-decode it; their later
+    // ClientMsgs are dropped in the dispatch loop.
+    let refused_clients: Rc<std::cell::RefCell<HashSet<u64>>> = Default::default();
+    let emit: Emit = {
+        let inner = emit;
+        let rf = refused_clients.clone();
+        Rc::new(std::cell::RefCell::new(move |mut ev: ServerEvent| {
+            if ev.to.is_none() {
+                ev.except = rf.borrow().iter().copied().collect();
+            }
+            (inner.borrow_mut())(ev);
+        }))
+    };
     let mut env = Env::with_print(net, backend, seed, {
         let e = emit.clone();
         Rc::new(move |s: &str| emit_b(&e, con(s)))
@@ -308,28 +323,39 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
             if shutdown.load(Ordering::Relaxed) && !matches!(c, ClientMsg::Bye) {
                 continue;
             }
+            // A client whose Hello carried the wrong PROTO_VERSION is
+            // refused: it already got an Error explaining the reload, and
+            // must never be sent v2 frames it would mis-decode (stale
+            // deployed web bundles have hit exactly this). Its later
+            // messages are dropped until it reconnects and re-hellos.
+            if refused_clients.borrow().contains(&client) {
+                // A refused client can still hang up — Bye must reach
+                // the loop or a stale bundle's disconnect would wedge
+                // the worker in `join`.
+                if matches!(c, ClientMsg::Bye) {
+                    quit = true;
+                }
+                continue;
+            }
             // One bad message must not kill the worker: a panic anywhere
             // in dispatch (edit apply, file op, snapshot) is reported and
             // the loop continues with the next command.
-            let client_proto = match &c {
-                ClientMsg::Hello { proto } => Some(*proto),
-                _ => None,
-            };
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match c {
+                    ClientMsg::Hello {
+                        proto: client_proto,
+                    } if client_proto != proto::PROTO_VERSION => {
+                        emit_to(
+                            &emit,
+                            client,
+                            ServerMsg::Error(format!(
+                                "protocol mismatch: client speaks {client_proto}, server {} — reload the page",
+                                proto::PROTO_VERSION
+                            )),
+                        );
+                        refused_clients.borrow_mut().insert(client);
+                    }
                     ClientMsg::Hello { .. } | ClientMsg::Subscribe => {
-                        if let Some(p) = client_proto {
-                            if p != proto::PROTO_VERSION {
-                                emit_to(
-                                    &emit,
-                                    client,
-                                    ServerMsg::Error(format!(
-                                        "protocol mismatch: client {p}, server {}",
-                                        proto::PROTO_VERSION
-                                    )),
-                                );
-                            }
-                        }
                         let geo = geo_snap(&env);
                         let (seq, grids) = {
                             let mut p = pub_rc.borrow_mut();
@@ -342,6 +368,7 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                                 proto: proto::PROTO_VERSION,
                                 net_version: env.net_version.get(),
                                 net_gen: env.net_gen.get(),
+                                models: model_descs(),
                             },
                         );
                         emit_to(&emit, client, ServerMsg::Geo(Box::new(geo)));
@@ -492,6 +519,13 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                         publish_env(&env, &mut p, &emit);
                     }
                     ClientMsg::Watch(ids) => {
+                        // Apply now too — `p.watch` is only pushed into
+                        // the sim at publish time, which is AFTER the
+                        // steps ran; a Watch→RunMs pair would record
+                        // nothing (state slots are captured per-step).
+                        if let Some(h) = env.existing_sim() {
+                            h.borrow_mut().set_v_watch(&ids);
+                        }
                         pub_rc.borrow_mut().watch = ids;
                     }
                     ClientMsg::Edit { base, edit } => {
@@ -1242,35 +1276,31 @@ fn publish_sim(net: &NetHandle, net_ver: u64, sim: &mut Sim, p: &mut Pub, emit: 
     }
     let bit = |id: u32| bits[id as usize / 8] >> (id as usize % 8) & 1 == 1;
 
-    // per-step v recording happens in the sim; (re)apply the watch list
-    // every publish so a rebuilt sim gets it back, then drain the samples
-    // recorded since the last publish — the plot gets every step, not one
-    // point per chunk.
+    // per-step state recording happens in the sim; (re)apply the watch
+    // list every publish so a rebuilt sim gets it back, then drain the
+    // samples recorded since the last publish — the plot gets every
+    // step, not one point per chunk.
     sim.set_v_watch(&p.watch);
     let states = sim.drain_watch().unwrap_or_default();
-    // protocol mapping: state slot 0 -> watched_v, slot 1 -> watched_u
-    // (izh v/u on every registered model today; the wire fields stay
-    // until the protocol stage).
-    let mut watched_v = Vec::new();
-    let mut watched_u = Vec::new();
-    for (k, &id) in p.watch.iter().enumerate() {
-        watched_v.push((
-            id,
-            states
-                .first()
-                .and_then(|s| s.get(k))
-                .cloned()
-                .unwrap_or_default(),
-        ));
-        watched_u.push((
-            id,
-            states
-                .get(1)
-                .and_then(|s| s.get(k))
-                .cloned()
-                .unwrap_or_default(),
-        ));
-    }
+    // states: [state slot][watch][samples] → the wire carries, per
+    // watched neuron, one series per state slot (protocol 2).
+    let watched: Vec<(u32, Vec<Vec<f32>>)> = p
+        .watch
+        .iter()
+        .enumerate()
+        .map(|(k, &id)| {
+            let series = (0..states.len())
+                .map(|s| {
+                    states
+                        .get(s)
+                        .and_then(|slot| slot.get(k))
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect();
+            (id, series)
+        })
+        .collect();
 
     // Grid-plane traces: (re)apply the watch lists after a rebuild, then
     // update `p.trace_u8` — the mirror of what clients display. The wire
@@ -1313,8 +1343,7 @@ fn publish_sim(net: &NetHandle, net_ver: u64, sim: &mut Sim, p: &mut Pub, emit: 
             rate_hz: sim.mean_rate_hz(),
             steps_per_sec: p.sps,
             spike_bits: bits,
-            watched_v,
-            watched_u,
+            watched,
             input_values: sim.input_values(),
         })),
     );
@@ -1343,6 +1372,12 @@ fn run_published(
 ) {
     let t0 = Instant::now();
     let mut done = 0usize;
+    // The watch list is only pushed into the sim at publish time —
+    // apply it before stepping so a Watch→RunMs pair records.
+    {
+        let p = pub_rc.borrow();
+        h.borrow_mut().set_v_watch(&p.watch);
+    }
     while steps > 0 && !abort.load(Ordering::Relaxed) {
         let n = steps.min(200);
         let res =
@@ -1494,6 +1529,59 @@ fn non_grid(net: &Network) -> Vec<u32> {
 }
 
 /// Geometry snapshot straight from a `Network` (headless screenshot path).
+/// `net.types` → the wire type table.
+pub fn types_proto(net: &Network) -> Vec<proto::TypeRow> {
+    net.types
+        .iter()
+        .map(|t| proto::TypeRow {
+            name: t.name.clone(),
+            model: t.model.clone(),
+            params: t.params.clone(),
+            kind: t.kind.into(),
+            color: t.color,
+        })
+        .collect()
+}
+
+/// The model registry → `Hello.models` descriptors — everything the
+/// client needs to build its inspector and plot tabs without knowing
+/// a single model by name.
+pub fn model_descs() -> Vec<proto::ModelDesc> {
+    crate::model::MODELS
+        .iter()
+        .map(|m| proto::ModelDesc {
+            id: m.id().into(),
+            label: m.label().into(),
+            params: m
+                .params()
+                .iter()
+                .map(|p| proto::ParamDesc {
+                    name: p.name.into(),
+                    unit: p.unit.into(),
+                    default: p.default,
+                    min: p.min,
+                    max: p.max,
+                    doc: p.doc.into(),
+                })
+                .collect(),
+            state: m
+                .state()
+                .iter()
+                .map(|s| proto::StateDesc {
+                    name: s.name.into(),
+                    unit: s.unit.into(),
+                    plot_range: s.plot_range,
+                })
+                .collect(),
+            presets: m
+                .presets()
+                .iter()
+                .map(|(n, p)| (n.to_string(), p.to_vec()))
+                .collect(),
+        })
+        .collect()
+}
+
 pub fn geo_from_net(net: &Network, dt: f32) -> Geo {
     let dt = dt.max(1e-6);
     let n = net.neurons.len();
@@ -1501,6 +1589,8 @@ pub fn geo_from_net(net: &Network, dt: f32) -> Geo {
     let mut pos = Vec::with_capacity(n);
     let mut kind = Vec::with_capacity(n);
     let mut names = Vec::with_capacity(n);
+    let mut ty = Vec::with_capacity(n);
+    let mut params = Vec::with_capacity(n);
     for (i, neu) in net.neurons.iter().enumerate() {
         pos.push(neu.pos);
         kind.push(match net.neuron_kind(i as u32) {
@@ -1508,6 +1598,8 @@ pub fn geo_from_net(net: &Network, dt: f32) -> Geo {
             _ => 0,
         });
         names.push(neu.name.clone());
+        ty.push(neu.ty);
+        params.push(neu.params.as_deref().map(|p| p.to_vec()));
     }
 
     let mut syn = Vec::with_capacity(net.synapses.len());
@@ -1536,6 +1628,9 @@ pub fn geo_from_net(net: &Network, dt: f32) -> Geo {
         pos,
         kind,
         names,
+        types: types_proto(net),
+        ty,
+        params,
         syn,
         syn_delay_steps: delay,
         disp_edges,
@@ -1626,6 +1721,8 @@ fn apply_edit(
                 _ => 0,
             },
             name: neu.name.clone(),
+            ty: neu.ty,
+            params: neu.params.as_deref().map(|p| p.to_vec()),
         }
     };
     let grids_now = |net: &Network| -> Vec<usize> {
@@ -1646,6 +1743,8 @@ fn apply_edit(
                     _ => 0,
                 },
                 name: net.neuron(id).name.clone(),
+                ty: net.neuron(id).ty,
+                params: None,
             });
         }
         NetEdit::DeleteNeurons { ids } => {
@@ -1711,14 +1810,116 @@ fn apply_edit(
         }
         NetEdit::SetNeuronKind { id, kind } => {
             check_ids(net, &[*id])?;
-            net.set_kind(
-                *id,
-                match kind {
-                    proto::NeuronKind::Excitatory => net_format::NeuronKind::Excitatory,
-                    proto::NeuronKind::Inhibitory => net_format::NeuronKind::Inhibitory,
-                },
-            );
+            // set_kind may append a canonical type row (e.g. the first
+            // inhibitory neuron on a net that only had "exc").
+            let n_types = net.types.len();
+            net.set_kind(*id, (*kind).into());
             d.neurons_changed.push(row(net, *id));
+            if net.types.len() != n_types {
+                d.types = Some(types_proto(net));
+            }
+        }
+        NetEdit::UpsertType {
+            name,
+            model,
+            params,
+            kind,
+            color,
+        } => {
+            let (_, m) =
+                crate::model::by_id(model).ok_or_else(|| format!("unknown model {model:?}"))?;
+            if params.len() != m.params().len() {
+                return Err(format!(
+                    "type {name:?}: {} params, model {} wants {}",
+                    params.len(),
+                    m.id(),
+                    m.params().len()
+                ));
+            }
+            let ty = net.upsert_type(net_format::NeuronType {
+                name: name.clone(),
+                model: model.clone(),
+                params: params.clone(),
+                kind: (*kind).into(),
+                color: *color,
+            });
+            d.types = Some(types_proto(net));
+            // Every neuron on this type sees a new kind byte and possibly
+            // a pruned override — resend their rows.
+            for (i, n) in net.neurons.iter().enumerate() {
+                if n.ty == ty {
+                    d.neurons_changed.push(row(net, i as u32));
+                }
+            }
+        }
+        NetEdit::SetNeuronType { ids, ty } => {
+            check_ids(net, ids)?;
+            let t = net
+                .type_index(ty)
+                .ok_or_else(|| format!("unknown type {ty:?}"))?;
+            net.set_type(ids, t);
+            for &id in ids {
+                d.neurons_changed.push(row(net, id));
+            }
+        }
+        NetEdit::SetNeuronParams { ids, params } => {
+            check_ids(net, ids)?;
+            if let Some(p) = params {
+                // One width check per id up front — the override row must
+                // match the neuron's type param width exactly.
+                for &id in ids {
+                    let want = net.neuron_type(id).map(|t| t.params.len()).unwrap_or(0);
+                    if p.len() != want {
+                        return Err(format!(
+                            "neuron {id}: {} params, its type wants {want}",
+                            p.len()
+                        ));
+                    }
+                }
+                for &id in ids {
+                    net.neuron_mut(id).params = Some(p.clone().into_boxed_slice());
+                }
+            } else {
+                for &id in ids {
+                    net.neuron_mut(id).params = None;
+                }
+            }
+            for &id in ids {
+                d.neurons_changed.push(row(net, id));
+            }
+        }
+        NetEdit::SetSynapse {
+            from,
+            to,
+            w,
+            tau_ms,
+            delay_ms,
+        } => {
+            check_ids(net, &[*from, *to])?;
+            let mut found = false;
+            let mut delay_changed = false;
+            for (i, s) in net.synapses.iter_mut().enumerate() {
+                if s.src == *from && s.tgt == *to {
+                    if let Some(v) = w {
+                        s.w = *v;
+                    }
+                    if let Some(v) = tau_ms {
+                        s.tau_ms = v.max(0.0);
+                    }
+                    if let Some(v) = delay_ms {
+                        s.delay_ms = v.max(1e-3);
+                        d.syn_delays.push((i as u32, steps(s.delay_ms)));
+                        delay_changed = true;
+                    }
+                    found = true;
+                }
+            }
+            if !found {
+                return Err(format!("no synapse {from}→{to}"));
+            }
+            if delay_changed {
+                d.disp_changed.push((*from, disp_list(net, *from, dt)));
+            }
         }
         NetEdit::SetNeuronPos { id, pos } => {
             check_ids(net, &[*id])?;

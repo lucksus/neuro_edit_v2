@@ -91,6 +91,7 @@ fn v4_round_trip_keeps_types_and_overrides() {
         model: "izh".into(),
         params: vec![0.02, 0.2, -55.0, 4.0],
         kind: NeuronKind::Excitatory,
+        color: None,
     });
     let c = net.add_neuron([120.0; 3], NeuronKind::Excitatory);
     net.neuron_mut(c).ty = net.type_index("burst").unwrap();
@@ -124,6 +125,7 @@ fn subnet_copy_paste_preserves_type_names() {
         model: "izh".into(),
         params: vec![0.02, 0.2, -55.0, 4.0],
         kind: NeuronKind::Excitatory,
+        color: None,
     });
     let a = src.add_neuron([0.0; 3], NeuronKind::Excitatory);
     let b = src.add_neuron([60.0; 3], NeuronKind::Excitatory);

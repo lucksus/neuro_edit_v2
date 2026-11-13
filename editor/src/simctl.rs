@@ -199,15 +199,26 @@ impl SimCtl {
             .spawn(move || {
                 let mut fold = crate::snap::Fold::default();
                 while let Ok(m) = wrecv.recv() {
+                    let mut stop = false;
                     if let Ok(mut w) = sh.write() {
                         fold.apply(&mut w, m);
+                        // Wrong-era server: stop before any frame it
+                        // can't send correctly arrives (S22).
+                        stop = w.proto_mismatch;
+                    }
+                    if stop {
+                        break;
                     }
                 }
                 // U5: the socket died — the banner offers a reconnect.
                 if let Ok(mut w) = sh.write() {
                     w.connected = false;
                     w.dirty_seq += 1;
-                    w.log("! connection to server closed");
+                    if w.proto_mismatch {
+                        w.log("! protocol mismatch — reload the page");
+                    } else {
+                        w.log("! connection to server closed");
+                    }
                 }
             })
             .expect("spawn ws reader");
@@ -302,12 +313,18 @@ impl SimCtl {
         let queue = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Vec<u8>>::new()));
 
         let sh = shared.clone();
+        let ws_msg = ws.clone();
         let onmsg = Closure::wrap(Box::new(move |e: web_sys::MessageEvent| {
             if let Ok(buf) = e.data().dyn_into::<js_sys::ArrayBuffer>() {
                 let bytes = js_sys::Uint8Array::new(&buf).to_vec();
                 if let Ok(m) = proto::decode::<proto::ServerMsg>(&bytes) {
                     if let Ok(mut w) = sh.write() {
                         FOLD.with(|f| f.borrow_mut().apply(&mut w, m));
+                        // Wrong-era server: close before a v1 frame can
+                        // mis-decode — the banner says to reload (S22).
+                        if w.proto_mismatch {
+                            let _ = ws_msg.close();
+                        }
                     }
                 }
             }

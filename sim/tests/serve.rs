@@ -122,7 +122,9 @@ fn hello_hydrates_client() {
     let mut net = Network::new();
     net.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
     let rig = start(net, None);
-    rig.send(ClientMsg::Hello { proto: 1 });
+    rig.send(ClientMsg::Hello {
+        proto: proto::PROTO_VERSION,
+    });
     let evs = rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
     let hello = evs
         .iter()
@@ -643,7 +645,9 @@ fn per_synapse_tau_over_wire() {
     // script: 2 neurons, A->B w=30; set tau 50ms on the edge, fire A once,
     // B keeps firing for tens of ms — and syn_tau reads back 50.
     let rig = start(Network::new(), None);
-    rig.send(ClientMsg::Hello { proto: 1 });
+    rig.send(ClientMsg::Hello {
+        proto: proto::PROTO_VERSION,
+    });
     rig.until(|m| matches!(m, ServerMsg::Status { .. }));
     rig.send(ClientMsg::Eval {
         code: r#"net.add_neuron(0,0,0);
@@ -1054,7 +1058,9 @@ fn dangling_ids_refused_then_next_edit_applies() {
     let mut net = Network::new();
     net.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
     let rig = start(net, None);
-    rig.send(ClientMsg::Hello { proto: 1 });
+    rig.send(ClientMsg::Hello {
+        proto: proto::PROTO_VERSION,
+    });
     rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
 
     rig.send(ClientMsg::Edit {
@@ -1111,7 +1117,9 @@ fn save_and_load_carry_typed_acks() {
     let mut net = Network::new();
     net.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
     let rig = start(net, Some(dir.clone()));
-    rig.send(ClientMsg::Hello { proto: 1 });
+    rig.send(ClientMsg::Hello {
+        proto: proto::PROTO_VERSION,
+    });
     rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
 
     rig.send(ClientMsg::SaveNet {
@@ -1167,7 +1175,9 @@ fn set_neuron_kind_edit_round_trips() {
     net.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
     net.add_neuron([10.0, 0.0, 0.0], net_format::NeuronKind::Excitatory);
     let rig = start(net, None);
-    rig.send(ClientMsg::Hello { proto: 1 });
+    rig.send(ClientMsg::Hello {
+        proto: proto::PROTO_VERSION,
+    });
     let evs = rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
     let base = first_geo(&evs).version;
 
@@ -1798,4 +1808,368 @@ fn typed_group_edits_match_eval() {
         rig_eval.stop();
         rig_edit.stop();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 21 / protocol 2: model descriptors, types on the wire, generic
+// watched state series, type/param edits, stale-bundle refusal.
+// ---------------------------------------------------------------------------
+
+/// `Hello` must carry the model registry: the editor builds its
+/// inspector and plot tabs from these descriptors — a v1 Hello without
+/// them is the mis-decode the bump exists to prevent.
+#[test]
+fn hello_carries_model_descriptors() {
+    let rig = start(Network::new(), None);
+    rig.send(ClientMsg::Hello {
+        proto: proto::PROTO_VERSION,
+    });
+    let evs = rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+    let hello = evs
+        .iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::Hello { models, .. } => Some(models),
+            _ => None,
+        })
+        .expect("a Hello reply");
+    assert!(!hello.is_empty(), "registry must not be empty");
+    let izh = hello.iter().find(|m| m.id == "izh").expect("izh model");
+    // the inspector fields: name/unit/range/default/doc + states + presets
+    assert_eq!(izh.params.len(), 4);
+    assert_eq!(izh.params[0].name, "a");
+    assert!(!izh.state.is_empty(), "izh must expose state slots");
+    assert_eq!(izh.state[0].name, "v");
+    assert!(izh.presets.iter().any(|(n, _)| n.contains("spiking")));
+    rig.stop();
+}
+
+/// `Geo` carries the type table, per-neuron `ty`, and overrides.
+#[test]
+fn geo_carries_types_and_overrides() {
+    let mut net = Network::new();
+    net.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
+    let b = net.add_neuron([5.0; 3], net_format::NeuronKind::Excitatory);
+    net.set_izh(b, 0.03, 0.25, -60.0, 4.0); // per-neuron override
+    let rig = start(net, None);
+    rig.send(ClientMsg::Subscribe);
+    let evs = rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+    let geo = first_geo(&evs);
+    assert_eq!(geo.ty.len(), 2);
+    assert!(geo
+        .types
+        .iter()
+        .any(|t| t.name == "exc" && t.model == "izh" && t.kind == proto::NeuronKind::Excitatory));
+    assert_eq!(geo.params.len(), 2);
+    assert!(geo.params[0].is_none(), "untyped neuron uses the type row");
+    assert_eq!(
+        geo.params[1].as_deref(),
+        Some(&[0.03f32, 0.25, -60.0, 4.0][..]),
+        "the override must ride Geo.params"
+    );
+    rig.stop();
+}
+
+/// `Activity.watched` carries one series per state slot per watched
+/// neuron — slot 0 v, slot 1 u for izh (the old watched_v/watched_u).
+#[test]
+fn activity_watched_carries_state_slots() {
+    let mut net = Network::new();
+    net.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
+    net.add_input("i", vec![(0, 1.0)], [0.0; 3]);
+    let rig = start(net, None);
+    rig.send(ClientMsg::Subscribe);
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+    rig.send(ClientMsg::Watch(vec![0]));
+    rig.send(ClientMsg::SetInputConst {
+        name: "i".into(),
+        value: 5.0,
+    });
+    rig.send(ClientMsg::RunMs(10.0));
+    let evs = rig.until(|m| {
+        matches!(m, ServerMsg::Activity(a) if a.t_steps > 0 && !a.watched.is_empty()
+            && a.watched.iter().all(|(_, s)| !s.is_empty() && !s[0].is_empty()))
+    });
+    let a = evs
+        .iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::Activity(a) => Some(&**a),
+            _ => None,
+        })
+        .unwrap();
+    let (id, series) = &a.watched[0];
+    assert_eq!(*id, 0);
+    assert!(
+        series.len() >= 2,
+        "izh watches must expose >=2 state slots (v,u): {series:?}"
+    );
+    // the recorded v must actually be in the membrane working range —
+    // proves the series carries state slot 0, not padding.
+    assert!(series[0].iter().all(|&v| v > -100.0 && v < 100.0));
+    rig.stop();
+}
+
+/// A wrong-version Hello gets an Error explaining the reload — and
+/// nothing else. The old code sent a full hydration a stale client
+/// would mis-decode; the client must also not be able to un-refuse
+/// itself (a second Hello/Subscribe is dropped).
+#[test]
+fn stale_proto_hello_is_refused_then_dropped() {
+    let rig = start(Network::new(), None);
+    rig.send(ClientMsg::Hello { proto: 1 });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Error(_)));
+    // Startup broadcasts (Status/Geo to `None`) may precede it — the
+    // guarantee is: one Error to the client, and NO hydration frame
+    // addressed to it.
+    let to_client: Vec<_> = evs.iter().filter(|e| e.to == Some(CLIENT)).collect();
+    assert_eq!(
+        to_client.len(),
+        1,
+        "exactly the error must reach the refused client: {evs:?}"
+    );
+    let msg = match &to_client[0].msg {
+        ServerMsg::Error(e) => e.clone(),
+        _ => unreachable!(),
+    };
+    assert!(
+        msg.contains("protocol mismatch") && msg.contains("reload the page"),
+        "{msg}"
+    );
+    // The refused client stays refused: a follow-up Subscribe is dropped
+    // (no Geo arrives within a quiet window).
+    rig.send(ClientMsg::Subscribe);
+    let later = rig.drain(300);
+    assert!(
+        later
+            .iter()
+            .all(|e| !matches!(e.msg, ServerMsg::Geo(_) | ServerMsg::Hello { .. })),
+        "refused client must not be hydrated later: {later:?}"
+    );
+    // And a later net-version bump must stamp the refused id onto the
+    // broadcast Geo's `except` — the socket layer skips those clients,
+    // so the stale bundle can never be offered a frame it can't parse.
+    let other = CLIENT + 1;
+    rig.tx
+        .send((
+            other,
+            ClientMsg::Hello {
+                proto: proto::PROTO_VERSION,
+            },
+        ))
+        .unwrap();
+    rig.tx
+        .send((
+            other,
+            ClientMsg::Eval {
+                code: "net.add_neuron(0.0, 0.0, 0.0)".into(),
+            },
+        ))
+        .unwrap();
+    let evs = rig.until_ev(|e| e.to.is_none() && matches!(e.msg, ServerMsg::Geo(_)));
+    let geo = evs
+        .iter()
+        .rev()
+        .find(|e| e.to.is_none() && matches!(e.msg, ServerMsg::Geo(_)))
+        .expect("the eval's republished Geo");
+    assert_eq!(geo.to, None, "republish is a broadcast");
+    assert!(
+        geo.except.contains(&CLIENT),
+        "refused client must be excluded from the broadcast: {geo:?}"
+    );
+    rig.stop();
+}
+
+/// UpsertType lands a type row in the delta (`types` = full table).
+#[test]
+fn upsert_type_edit_carries_types() {
+    let mut net = Network::new();
+    net.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
+    let rig = start(net, None);
+    let base = subscribe_base(&rig);
+    rig.send(ClientMsg::Edit {
+        base,
+        edit: NetEdit::UpsertType {
+            name: "fs".into(),
+            model: "izh".into(),
+            params: vec![0.1, 0.2, -65.0, 2.0],
+            kind: proto::NeuronKind::Inhibitory,
+            color: Some([0.2, 0.9, 0.4]),
+        },
+    });
+    let evs =
+        rig.until(|m| matches!(m, ServerMsg::GeoDelta(_)) || matches!(m, ServerMsg::Error(_)));
+    let d = evs
+        .iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::GeoDelta(d) => Some(&**d),
+            _ => None,
+        })
+        .expect("a GeoDelta");
+    let types = d.types.as_ref().expect("types table in the delta");
+    let fs = types.iter().find(|t| t.name == "fs").expect("fs row");
+    assert_eq!(fs.kind, proto::NeuronKind::Inhibitory);
+    assert_eq!(fs.color, Some([0.2, 0.9, 0.4]));
+    rig.stop();
+}
+
+/// SetNeuronType re-points neurons (clears overrides); SetNeuronParams
+/// sets and clears the override row; SetSynapse edits w/tau/delay.
+#[test]
+fn type_and_param_edits_round_trip() {
+    let mut net = Network::new();
+    let a = net.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
+    let b = net.add_neuron([60.0; 3], net_format::NeuronKind::Excitatory);
+    net.connect(a, b, 1.0);
+    let rig = start(net, None);
+    let base = subscribe_base(&rig);
+
+    // define a type, then point neuron b at it — override cleared.
+    rig.send(ClientMsg::Edit {
+        base,
+        edit: NetEdit::UpsertType {
+            name: "fs".into(),
+            model: "izh".into(),
+            params: vec![0.1, 0.2, -65.0, 2.0],
+            kind: proto::NeuronKind::Inhibitory,
+            color: None,
+        },
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::GeoDelta(_)));
+    let v = evs
+        .iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::GeoDelta(d) => Some(d.version),
+            _ => None,
+        })
+        .unwrap();
+    rig.send(ClientMsg::Edit {
+        base: v,
+        edit: NetEdit::SetNeuronType {
+            ids: vec![b],
+            ty: "fs".into(),
+        },
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::GeoDelta(_)));
+    let d = evs
+        .iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::GeoDelta(d) => Some(&**d),
+            _ => None,
+        })
+        .unwrap();
+    let row = d
+        .neurons_changed
+        .iter()
+        .find(|r| r.id == b)
+        .expect("b's row in the delta");
+    assert_eq!(row.kind, 1, "b must render inhibitory now");
+    assert!(row.params.is_none(), "type change clears the override");
+
+    // SetNeuronParams writes an override row of the type's width.
+    rig.send(ClientMsg::Edit {
+        base: d.version,
+        edit: NetEdit::SetNeuronParams {
+            ids: vec![b],
+            params: Some(vec![0.1, 0.2, -60.0, 2.0]),
+        },
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::GeoDelta(_)));
+    let d = evs
+        .iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::GeoDelta(d) => Some(&**d),
+            _ => None,
+        })
+        .unwrap();
+    let row = d.neurons_changed.iter().find(|r| r.id == b).unwrap();
+    assert_eq!(row.params.as_deref(), Some(&[0.1f32, 0.2, -60.0, 2.0][..]));
+
+    // A wrong-width override is refused.
+    rig.send(ClientMsg::Edit {
+        base: d.version,
+        edit: NetEdit::SetNeuronParams {
+            ids: vec![b],
+            params: Some(vec![1.0, 2.0]),
+        },
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Error(_)));
+    assert!(evs
+        .iter()
+        .any(|e| matches!(&e.msg, ServerMsg::Error(s) if s.contains("params"))));
+
+    // SetSynapse: w+tau land (delay is wire-visible via syn_delays).
+    rig.send(ClientMsg::Edit {
+        base: d.version,
+        edit: NetEdit::SetSynapse {
+            from: a,
+            to: b,
+            w: Some(3.0),
+            tau_ms: Some(5.0),
+            delay_ms: Some(4.0),
+        },
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::GeoDelta(_) | ServerMsg::Error(_)));
+    let d = evs
+        .iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::GeoDelta(d) => Some(&**d),
+            _ => None,
+        })
+        .expect("a GeoDelta");
+    assert!(
+        !d.syn_delays.is_empty(),
+        "a delay_ms change must ride syn_delays"
+    );
+    rig.stop();
+}
+
+/// The review-1.3e script surface end-to-end through the wire: `models`,
+/// `def_type`, `set_type`, `set_param`, `type_of` — and the type table
+/// reaches the client's Geo.
+#[test]
+fn script_type_api_through_eval() {
+    let mut net = Network::new();
+    for i in 0..3 {
+        net.add_neuron([i as f32, 0.0, 0.0], net_format::NeuronKind::Excitatory);
+    }
+    net.add_group("g");
+    net.groups[0].members = vec![0, 1, 2];
+    let rig = start(net, None);
+    rig.send(ClientMsg::Subscribe);
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+    rig.send(ClientMsg::Eval {
+        code: r#"
+        let ms = models();
+        net.def_type("fs", "izh", #{a: 0.1, d: 2.0}, "inh");
+        net.set_type("g", "fs");
+        net.set_param(1, "d", 7.0);
+        print("type api ok " + ms.len() + " " + net.type_name(0) + " " + ms[0].params.len())
+        "#
+        .into(),
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Geo(_)) || matches!(m, ServerMsg::Error(_)));
+    assert!(
+        evs.iter().any(|e| matches!(&e.msg,
+            ServerMsg::Console(s) if s.contains("type api ok 1 fs 4"))),
+        "script must have run (1+ models, type_of==fs, 4 izh params): {evs:?}"
+    );
+    let geo = evs
+        .iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::Geo(g) => Some(&**g),
+            _ => None,
+        })
+        .expect("script edits republish a Geo");
+    let fs_i = geo
+        .types
+        .iter()
+        .position(|t| t.name == "fs")
+        .expect("fs in the wire table");
+    assert_eq!(geo.types[fs_i].kind, proto::NeuronKind::Inhibitory);
+    assert!(geo.ty.iter().all(|&t| t as usize == fs_i));
+    assert_eq!(
+        geo.params[1].as_deref().map(|p| p[3]),
+        Some(7.0),
+        "set_param must land as an override"
+    );
+    rig.stop();
 }

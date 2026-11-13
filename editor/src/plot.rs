@@ -16,13 +16,14 @@ const RASTER_MAX: usize = 600;
 /// Per-neuron sample cap (at 1 ms steps, ~4 s of history).
 const V_HIST_MAX: usize = 4096;
 
-/// Watched-neuron v/u histories plus the spike raster.
+/// Watched-neuron state histories plus the spike raster.
+///
+/// `slots[s]` is state slot `s` of the watched neurons' model (protocol
+/// 2 carries one series per slot; the model's `StateDesc`s name them —
+/// slot 0 is always the membrane potential).
 pub struct PlotHist {
-    /// neuron id → (t_ms, v) samples, oldest first.
-    pub v: HashMap<u32, VecDeque<(f64, f32)>>,
-    /// neuron id → (t_ms, u) samples — same times as `v`, feeding the
-    /// v–u phase plot.
-    pub u: HashMap<u32, VecDeque<(f64, f32)>>,
+    /// state slot → neuron id → (t_ms, value) samples, oldest first.
+    pub slots: Vec<HashMap<u32, VecDeque<(f64, f32)>>>,
     /// (t_ms, fired-ids) per published snapshot.
     pub raster: VecDeque<(f64, Vec<u32>)>,
     /// Sim time of the last fed snapshot.
@@ -34,8 +35,7 @@ pub struct PlotHist {
 impl Default for PlotHist {
     fn default() -> Self {
         Self {
-            v: HashMap::new(),
-            u: HashMap::new(),
+            slots: Vec::new(),
             raster: VecDeque::with_capacity(64),
             last_t: f64::NEG_INFINITY,
             resets: 0,
@@ -44,23 +44,23 @@ impl Default for PlotHist {
 }
 
 impl PlotHist {
+    /// History of state slot `s`, if any watched data arrived for it.
+    pub fn slot(&self, s: usize) -> Option<&HashMap<u32, VecDeque<(f64, f32)>>> {
+        self.slots.get(s)
+    }
+
     /// Fold one snapshot into the histories. `watched` is
-    /// `(neuron id, v samples, u samples)` — the per-step series both
-    /// end at `t_ms` and are walked back by `dt_ms`, so they share the
-    /// same sim-ms x axis the phase plot pairs them on.
+    /// `(neuron id, per-slot sample series)` — each series ends at
+    /// `t_ms` and is walked back by `dt_ms`, so all slots share the
+    /// same sim-ms x axis (the phase plot pairs two of them on it).
     ///
     /// When `t_ms` is earlier than the last fed time the sim ran
     /// backwards: clear all histories so only the new run draws.
-    pub fn feed(
-        &mut self,
-        t_ms: f64,
-        fired: Vec<u32>,
-        watched: &[(u32, &[f32], &[f32])],
-        dt_ms: f64,
-    ) {
+    pub fn feed(&mut self, t_ms: f64, fired: Vec<u32>, watched: &[(u32, &[Vec<f32>])], dt_ms: f64) {
         if t_ms < self.last_t {
-            self.v.clear();
-            self.u.clear();
+            for s in &mut self.slots {
+                s.clear();
+            }
             self.raster.clear();
             self.resets += 1;
         }
@@ -69,24 +69,21 @@ impl PlotHist {
         while self.raster.len() > RASTER_MAX {
             self.raster.pop_front();
         }
-        for &(id, vs, us) in watched {
-            let hv = self.v.entry(id).or_default();
-            let n = vs.len();
-            for (i, &v) in vs.iter().enumerate() {
-                let t = t_ms - (n - 1 - i) as f64 * dt_ms;
-                hv.push_back((t, v));
-            }
-            while hv.len() > V_HIST_MAX {
-                hv.pop_front();
-            }
-            let hu = self.u.entry(id).or_default();
-            let m = us.len();
-            for (i, &u) in us.iter().enumerate() {
-                let t = t_ms - (m - 1 - i) as f64 * dt_ms;
-                hu.push_back((t, u));
-            }
-            while hu.len() > V_HIST_MAX {
-                hu.pop_front();
+        let n_slots = watched.iter().map(|w| w.1.len()).max().unwrap_or(0);
+        while self.slots.len() < n_slots {
+            self.slots.push(HashMap::new());
+        }
+        for &(id, series) in watched {
+            for (s, vs) in series.iter().enumerate() {
+                let h = self.slots[s].entry(id).or_default();
+                let n = vs.len();
+                for (i, &v) in vs.iter().enumerate() {
+                    let t = t_ms - (n - 1 - i) as f64 * dt_ms;
+                    h.push_back((t, v));
+                }
+                while h.len() > V_HIST_MAX {
+                    h.pop_front();
+                }
             }
         }
     }
@@ -95,8 +92,7 @@ impl PlotHist {
     /// including the clock, so the next feed can't trip the reversal
     /// check on an unrelated earlier sim.
     pub fn clear(&mut self) {
-        self.v.clear();
-        self.u.clear();
+        self.slots.clear();
         self.raster.clear();
         self.last_t = f64::NEG_INFINITY;
     }
@@ -200,8 +196,10 @@ impl PlotWindow {
 mod tests {
     use super::*;
 
-    fn watch_run<'a>(v: &'a [f32], u: &'a [f32]) -> Vec<(u32, &'a [f32], &'a [f32])> {
-        vec![(7, v, u)]
+    /// A watched-neuron wire row in the protocol-2 shape: `(id, per-slot
+    /// series)` — slot 0 = v, slot 1 = u.
+    fn watch_run(v: f32, u: f32) -> Vec<(u32, Vec<Vec<f32>>)> {
+        vec![(7, vec![vec![v], vec![u]])]
     }
 
     /// Stage 13 A: feeding times 0..50 then 0..10 must leave only the
@@ -209,26 +207,30 @@ mod tests {
     #[test]
     fn feed_clears_history_when_time_goes_backwards() {
         let mut h = PlotHist::default();
+        // `borrow` re-slices an owned watch row for one feed call.
+        fn borrowed<'a>(o: &'a [(u32, Vec<Vec<f32>>)]) -> Vec<(u32, &'a [Vec<f32>])> {
+            o.iter().map(|(id, s)| (*id, s.as_slice())).collect()
+        }
         // First "run": 50 ms, v = -60/u = -10, neuron 7 fires every bin.
         for t in 0..50 {
-            h.feed(t as f64, vec![7], &watch_run(&[-60.0], &[-10.0]), 1.0);
+            h.feed(t as f64, vec![7], &borrowed(&watch_run(-60.0, -10.0)), 1.0);
         }
         assert_eq!(h.raster.len(), 50);
         // Second run rewinds: 10 ms, v = -70/u = -20.
         for t in 0..10 {
-            h.feed(t as f64, vec![3], &watch_run(&[-70.0], &[-20.0]), 1.0);
+            h.feed(t as f64, vec![3], &borrowed(&watch_run(-70.0, -20.0)), 1.0);
         }
         assert_eq!(h.resets, 1);
         assert_eq!(h.raster.len(), 10, "only second-run bins remain");
         assert!(h.raster.iter().all(|(t, f)| *t < 10.0 && f == &[3]));
-        let v = h.v.get(&7).unwrap();
+        let v = h.slot(0).unwrap().get(&7).unwrap();
         assert_eq!(v.len(), 10);
         assert!(v.iter().all(|(t, val)| *t < 10.0 && *val == -70.0));
-        let u = h.u.get(&7).unwrap();
+        let u = h.slot(1).unwrap().get(&7).unwrap();
         assert_eq!(u.len(), 10);
         assert!(u.iter().all(|(t, val)| *t < 10.0 && *val == -20.0));
         // And time continuing forward afterwards appends normally.
-        h.feed(10.0, vec![9], &watch_run(&[-70.0], &[-20.0]), 1.0);
+        h.feed(10.0, vec![9], &borrowed(&watch_run(-70.0, -20.0)), 1.0);
         assert_eq!(h.raster.len(), 11);
         assert_eq!(h.resets, 1);
     }

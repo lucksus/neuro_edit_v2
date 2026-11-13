@@ -73,6 +73,10 @@ pub struct NeuronType {
     /// The model's parameter row (izh: `[a, b, c, d]`).
     pub params: Vec<f32>,
     pub kind: NeuronKind,
+    /// Display colour override — `None` derives one from `kind`
+    /// (warm excitatory, cool inhibitory).
+    #[serde(default)]
+    pub color: Option<[f32; 3]>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -408,8 +412,41 @@ impl Network {
             model: "izh".into(),
             params: params.to_vec(),
             kind,
+            color: None,
         });
         self.types.len() as u16 - 1
+    }
+
+    /// Create or replace a type row by name (`net.def_type`, the
+    /// inspector's type edit). Returns its index. A replaced type keeps
+    /// working for every neuron pointing at it; overrides whose width no
+    /// longer fits the new param row are dropped so the effective row
+    /// always matches the model's descriptor width.
+    pub fn upsert_type(&mut self, t: NeuronType) -> u16 {
+        let ty = match self.type_index(&t.name) {
+            Some(i) => i,
+            None => {
+                self.types.push(t);
+                return self.types.len() as u16 - 1;
+            }
+        };
+        let width = t.params.len();
+        self.types[ty as usize] = t;
+        for n in &mut self.neurons {
+            if n.ty == ty && n.params.as_ref().is_some_and(|p| p.len() != width) {
+                n.params = None;
+            }
+        }
+        ty
+    }
+
+    /// Point neurons at type `ty` and clear their overrides.
+    pub fn set_type(&mut self, ids: &[u32], ty: u16) {
+        for &id in ids {
+            let n = &mut self.neurons[id as usize];
+            n.ty = ty;
+            n.params = None;
+        }
     }
 
     /// Set a neuron's kind — points it at the kind's canonical type.
@@ -740,6 +777,7 @@ impl Network {
                     model: "izh".into(),
                     params: IZH_RS_PARAMS.to_vec(),
                     kind: NeuronKind::Excitatory,
+                    color: None,
                 });
                 sub.types.push(t);
                 sub.types.len() as u16 - 1

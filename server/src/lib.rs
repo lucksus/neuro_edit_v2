@@ -81,7 +81,7 @@ impl Server {
                     std::rc::Rc::new(std::cell::RefCell::new(move |ev: ServerEvent| {
                         let bytes = proto::encode(&ev.msg);
                         let mut cls = cls.lock().unwrap();
-                        fanout(&mut cls, ev.to, &bytes);
+                        fanout(&mut cls, &ev, &bytes);
                     }));
                 sim::serve::run(net, opts, cmd_rx, emit);
             })
@@ -340,8 +340,8 @@ fn serve_http(
 /// queue means a stalled reader, and the stalled reader must not grow
 /// server memory without bound. Dropped clients are removed so later
 /// events skip them entirely.
-pub fn fanout(cls: &mut HashMap<u64, ClientTx>, to: Option<u64>, bytes: &[u8]) {
-    match to {
+pub fn fanout(cls: &mut HashMap<u64, ClientTx>, ev: &ServerEvent, bytes: &[u8]) {
+    match ev.to {
         Some(id) => {
             let full = cls
                 .get(&id)
@@ -351,14 +351,17 @@ pub fn fanout(cls: &mut HashMap<u64, ClientTx>, to: Option<u64>, bytes: &[u8]) {
                 cls.remove(&id);
             }
         }
-        None => cls.retain(|_, tx| tx.try_send(bytes.to_vec()).is_ok()),
+        // Refused (stale-protocol) clients are skipped on broadcasts —
+        // a v2 frame must never reach a bundle that would mis-decode it.
+        None => cls.retain(|id, tx| ev.except.contains(id) || tx.try_send(bytes.to_vec()).is_ok()),
     }
 }
 
 /// Reply to one client (its outbound queue → writer thread).
 fn send_to(clients: &Clients, id: u64, m: ServerMsg) {
     let mut cls = clients.lock().unwrap();
-    fanout(&mut cls, Some(id), &proto::encode(&m));
+    let bytes = proto::encode(&m);
+    fanout(&mut cls, &ServerEvent::to(id, m), &bytes);
 }
 
 /// Broadcast a `ServerMsg` to every connected client — the fan-out job
@@ -368,7 +371,7 @@ fn bcast_fn(clients: &Clients) -> Bcast {
     Arc::new(move |m: ServerMsg| {
         let bytes = proto::encode(&m);
         let mut c = cls.lock().unwrap();
-        fanout(&mut c, None, &bytes);
+        fanout(&mut c, &ServerEvent::broadcast(m), &bytes);
     })
 }
 
@@ -710,7 +713,11 @@ mod tests {
             tx.try_send(vec![1]).unwrap();
         }
         cls.insert(1, tx);
-        fanout(&mut cls, Some(1), b"x");
+        fanout(
+            &mut cls,
+            &proto::ServerEvent::to(1, proto::ServerMsg::Error("x".into())),
+            b"x",
+        );
         assert!(cls.is_empty(), "full client must be dropped");
         // broadcast path too: live client stays, stalled one goes
         let (tx2, _rx2) = mpsc::sync_channel(CLIENT_QUEUE);
@@ -720,7 +727,11 @@ mod tests {
         let (tx3, _rx3) = mpsc::sync_channel(CLIENT_QUEUE);
         cls.insert(2, tx2);
         cls.insert(3, tx3);
-        fanout(&mut cls, None, b"x");
+        fanout(
+            &mut cls,
+            &proto::ServerEvent::broadcast(proto::ServerMsg::Error("x".into())),
+            b"x",
+        );
         assert!(!cls.contains_key(&2));
         assert!(cls.contains_key(&3));
     }

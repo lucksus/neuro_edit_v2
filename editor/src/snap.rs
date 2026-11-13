@@ -18,6 +18,12 @@ pub struct GeoSnap {
     /// 0 = excitatory, 1 = inhibitory.
     pub kind: Vec<u8>,
     pub names: Vec<String>,
+    /// The net's type table — `ty[i]` indexes it (inspector, colours).
+    pub types: Vec<proto::TypeRow>,
+    /// Type index per neuron.
+    pub ty: Vec<u16>,
+    /// Per-neuron param overrides; `None` = the type's row.
+    pub params: Vec<Option<Vec<f32>>>,
     /// (src, tgt) pairs, source order.
     pub syn: Vec<(u32, u32)>,
     /// Per-synapse delay in sim steps (for spike-dot travel time).
@@ -95,11 +101,10 @@ pub struct Snap {
     pub activity: Arc<Vec<f32>>,
     /// Per-neuron spike counts since the previous snap (particles, raster).
     pub counts: Arc<Vec<u32>>,
-    /// New `v` samples for watched neurons, per id.
-    pub watched_v: Vec<(u32, Arc<Vec<f32>>)>,
-    /// New `u` samples for watched neurons — same ids/lengths as
-    /// `watched_v`, feeding the v–u phase plot.
-    pub watched_u: Vec<(u32, Arc<Vec<f32>>)>,
+    /// New state samples for watched neurons: `(id, series)` where
+    /// `series[s]` is state slot `s`'s samples (protocol 2 — the plots
+    /// name and range the slots off the neuron's model descriptors).
+    pub watched: Vec<(u32, Arc<Vec<Vec<f32>>>)>,
     /// Spike-trace value per texel for each `GeoSnap::grids` entry
     /// (same order; `exp` decay, tau ~20 ms — see `simctl::PLANE_TAU_MS`).
     pub grid_traces: Vec<Arc<Vec<f32>>>,
@@ -184,6 +189,13 @@ pub struct Shared {
     /// U5: the transport is live. Native readers set it false on recv
     /// failure; wasm onclose does. The app shows a reconnect banner.
     pub connected: bool,
+    /// The server's neuron-model registry from `Hello` — the inspector
+    /// and plot tabs are built from these descriptors.
+    pub models: Vec<proto::ModelDesc>,
+    /// Server `Hello.proto` didn't match ours — the app shows a
+    /// "reload the page" banner and the transport drops the link before
+    /// any v1-frame decode can mis-fire (S22).
+    pub proto_mismatch: bool,
 }
 
 /// Snapshot of an `OpenJob` reply for the jobs panel.
@@ -228,6 +240,8 @@ impl Default for Shared {
             last_error: None,
             err_seq: 0,
             connected: true,
+            models: Vec::new(),
+            proto_mismatch: false,
         }
     }
 }
@@ -271,13 +285,16 @@ impl Fold {
                 proto,
                 net_version,
                 net_gen,
+                models,
             } => {
                 if proto != proto::PROTO_VERSION {
+                    sh.proto_mismatch = true;
                     sh.log(format!(
-                        "! protocol mismatch: server speaks {proto}, we speak {}",
+                        "! protocol mismatch: server speaks {proto}, we speak {} — reload the page",
                         proto::PROTO_VERSION
                     ));
                 }
+                sh.models = models;
                 sh.net_version = net_version;
                 sh.net_gen = net_gen;
                 sh.edits_in_flight = 0;
@@ -543,15 +560,10 @@ impl Fold {
             rate_hz: a.rate_hz,
             activity: Arc::new(activity),
             counts: Arc::new(counts),
-            watched_v: a
-                .watched_v
+            watched: a
+                .watched
                 .into_iter()
-                .map(|(id, v)| (id, Arc::new(v)))
-                .collect(),
-            watched_u: a
-                .watched_u
-                .into_iter()
-                .map(|(id, v)| (id, Arc::new(v)))
+                .map(|(id, s)| (id, Arc::new(s)))
                 .collect(),
             grid_traces: self.traces_f32(),
             input_values: Arc::new(a.input_values),
@@ -592,6 +604,9 @@ pub fn geo_snap_from(g: &proto::Geo) -> GeoSnap {
         pos: g.pos.clone(),
         kind: g.kind.clone(),
         names: g.names.clone(),
+        types: g.types.clone(),
+        ty: g.ty.clone(),
+        params: g.params.clone(),
         syn: g.syn.clone(),
         syn_delay_steps: g.syn_delay_steps.clone(),
         disp_edges: g.disp_edges.clone(),
@@ -646,6 +661,8 @@ fn apply_delta(
         g.pos.push(r.pos);
         g.kind.push(r.kind);
         g.names.push(r.name);
+        g.ty.push(r.ty);
+        g.params.push(r.params);
         disp.push(Vec::new());
     }
     for r in d.neurons_changed {
@@ -654,6 +671,8 @@ fn apply_delta(
             g.pos[i] = r.pos;
             g.kind[i] = r.kind;
             g.names[i] = r.name;
+            g.ty[i] = r.ty;
+            g.params[i] = r.params;
         }
     }
     for s in d.syn_added {
@@ -715,6 +734,9 @@ fn apply_delta(
             Some(slot) => *slot = snap,
             None => g.grids.push(snap),
         }
+    }
+    if let Some(v) = d.types {
+        g.types = v;
     }
     if let Some(v) = d.inputs {
         g.inputs = v

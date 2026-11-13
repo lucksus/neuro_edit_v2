@@ -345,6 +345,11 @@ fn help_text(topic: &str) -> String {
              neuron(name)  group_names()  neurons_of(g)  save(path)  load(path)",
         ),
         (
+            "types",
+            "types: models()  def_type(name,model,#{p:v},kind)  set_type(g_or_id,name)\n  \
+             set_param(id,p,v)  type_name(id)  set_izh(id,a,b,c,d)  kind(id)  set_kind(id,k)",
+        ),
+        (
             "grid",
             "grid: create_2d_grid(g,w,h,d)  create_3d_grid(g,w,h,d,sp)\n  \
              create_connections(g,scaling,lambda,w)  set_exc_inh(g,frac)",
@@ -396,6 +401,7 @@ fn help_text(topic: &str) -> String {
         "stream" | "noise" | "rng" => &["streams"],
         "example" | "demo" | "demos" => &["examples"],
         "network" | "neuron" | "neurons" => &["net"],
+        "type" | "model" | "models" | "params" | "param" => &["types"],
         "grids" | "2d" | "3d" => &["grid"],
         "simulate" | "run" | "v" | "u" => &["sim"],
         _ => &[t.as_str()],
@@ -1024,6 +1030,238 @@ pub fn register_api(
                     d_f64(&c) as f32,
                     d_f64(&d) as f32,
                 );
+                Ok(())
+            },
+        );
+    }
+    // ---- neuron types / models (review 1.3e) -----------------------
+    // `models()` lists the registry; `net.def_type` adds a type row,
+    // `net.set_type` points a group or neuron at one, `net.set_param`
+    // sets one parameter of a neuron's override row (set_izh's generic
+    // form), `net.type_name` reads back the type name (the review's
+    // `type_of` — Rhai reserves that symbol for its own built-in).
+    engine.register_fn("models", || -> rhai::Array {
+        crate::model::MODELS
+            .iter()
+            .map(|m| {
+                let mut mm = rhai::Map::new();
+                mm.insert("id".into(), m.id().into());
+                mm.insert("label".into(), m.label().into());
+                mm.insert(
+                    "params".into(),
+                    m.params()
+                        .iter()
+                        .map(|p| {
+                            let mut pm = rhai::Map::new();
+                            pm.insert("name".into(), p.name.into());
+                            pm.insert("unit".into(), p.unit.into());
+                            pm.insert("default".into(), Dynamic::from(p.default));
+                            pm.insert("min".into(), Dynamic::from(p.min));
+                            pm.insert("max".into(), Dynamic::from(p.max));
+                            pm.insert("doc".into(), p.doc.into());
+                            Dynamic::from(pm)
+                        })
+                        .collect::<rhai::Array>()
+                        .into(),
+                );
+                mm.insert(
+                    "state".into(),
+                    m.state()
+                        .iter()
+                        .map(|s| {
+                            let mut sm = rhai::Map::new();
+                            sm.insert("name".into(), s.name.into());
+                            sm.insert("unit".into(), s.unit.into());
+                            Dynamic::from(sm)
+                        })
+                        .collect::<rhai::Array>()
+                        .into(),
+                );
+                mm.insert(
+                    "presets".into(),
+                    m.presets()
+                        .iter()
+                        .map(|(n, p)| {
+                            let mut pm = rhai::Map::new();
+                            pm.insert("name".into(), (*n).into());
+                            pm.insert(
+                                "params".into(),
+                                p.iter()
+                                    .map(|&v| Dynamic::from(v))
+                                    .collect::<rhai::Array>()
+                                    .into(),
+                            );
+                            Dynamic::from(pm)
+                        })
+                        .collect::<rhai::Array>()
+                        .into(),
+                );
+                Dynamic::from(mm)
+            })
+            .collect()
+    });
+    {
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
+        // def_type(name, model, #{param: v,…} | [row], kind?)
+        let def_type = move |n: &mut NetHandle,
+                             name: &str,
+                             model: &str,
+                             spec: Dynamic,
+                             kind: &str|
+              -> Result<(), Box<rhai::EvalAltResult>> {
+            let kind = match kind {
+                "exc" | "excitatory" => net_format::NeuronKind::Excitatory,
+                "inh" | "inhibitory" => net_format::NeuronKind::Inhibitory,
+                "regular" => net_format::NeuronKind::Regular,
+                other => {
+                    return Err(s_err(format!(
+                        "kind must be \"exc\", \"inh\" or \"regular\", got {other:?}"
+                    )))
+                }
+            };
+            let (_, m) = crate::model::by_id(model)
+                .ok_or_else(|| s_err(format!("unknown model {model:?}")))?;
+            // Full row: a map fills descriptor defaults for the kind,
+            // an array is taken verbatim (checked against the width).
+            let mut p = m.default_for(kind).to_vec();
+            if let Some(map) = spec.clone().try_cast::<rhai::Map>() {
+                for (i, pd) in m.params().iter().enumerate() {
+                    if let Some(v) = map.get(pd.name) {
+                        p[i] = d_f64(v) as f32;
+                    }
+                }
+            } else if let Some(arr) = spec.clone().try_cast::<rhai::Array>() {
+                if arr.len() != m.params().len() {
+                    return Err(s_err(format!(
+                        "def_type: {} params, model {} wants {}",
+                        arr.len(),
+                        model,
+                        m.params().len()
+                    )));
+                }
+                for (i, v) in arr.iter().enumerate() {
+                    p[i] = d_f64(v) as f32;
+                }
+            } else {
+                return Err(s_err(
+                    "def_type: params must be a #{name: v} map or an array",
+                ));
+            }
+            invalidate(&s, n, &dr, &v);
+            n.borrow_mut().upsert_type(net_format::NeuronType {
+                name: name.into(),
+                model: model.into(),
+                params: p,
+                kind,
+                color: None,
+            });
+            Ok(())
+        };
+        {
+            let f = def_type.clone();
+            engine.register_fn(
+                "def_type",
+                move |n: &mut NetHandle,
+                      name: &str,
+                      model: &str,
+                      spec: Dynamic|
+                      -> Result<(), Box<rhai::EvalAltResult>> {
+                    f(n, name, model, spec, "exc")
+                },
+            );
+        }
+        engine.register_fn(
+            "def_type",
+            move |n: &mut NetHandle,
+                  name: &str,
+                  model: &str,
+                  spec: Dynamic,
+                  kind: &str|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                def_type(n, name, model, spec, kind)
+            },
+        );
+    }
+    {
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
+        engine.register_fn(
+            "set_type",
+            move |n: &mut NetHandle,
+                  what: Dynamic,
+                  ty: &str|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                let ids: Vec<u32> = if let Some(gname) = what.clone().try_cast::<String>() {
+                    n.borrow()
+                        .group(&gname)
+                        .ok_or_else(|| s_err(format!("unknown group {gname:?}")))?
+                        .members
+                        .clone()
+                } else {
+                    vec![nid(
+                        what.as_int().map_err(|_| {
+                            s_err("set_type: first arg must be a group name or a neuron id")
+                        })?,
+                        n.borrow().neurons.len(),
+                    )?]
+                };
+                let t = n
+                    .borrow()
+                    .type_index(ty)
+                    .ok_or_else(|| s_err(format!("unknown type {ty:?}")))?;
+                invalidate(&s, n, &dr, &v);
+                n.borrow_mut().set_type(&ids, t);
+                Ok(())
+            },
+        );
+        engine.register_fn(
+            "type_name",
+            |n: &mut NetHandle, id: rhai::INT| -> Result<String, Box<rhai::EvalAltResult>> {
+                let id = nid(id, n.borrow().neurons.len())?;
+                let g = n.borrow();
+                let t = g
+                    .neuron_type(id)
+                    .ok_or_else(|| s_err(format!("neuron {id} has no type")))?;
+                Ok(t.name.clone())
+            },
+        );
+    }
+    {
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
+        engine.register_fn(
+            "set_param",
+            move |n: &mut NetHandle,
+                  id: rhai::INT,
+                  pname: &str,
+                  val: Dynamic|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                let g = n.borrow_mut();
+                let id = nid(id, g.neurons.len())?;
+                let t = g
+                    .neuron_type(id)
+                    .ok_or_else(|| s_err(format!("neuron {id} has no type")))?;
+                let (_, m) = crate::model::by_id(&t.model)
+                    .ok_or_else(|| s_err(format!("unknown model {:?}", t.model)))?;
+                let i = m
+                    .params()
+                    .iter()
+                    .position(|p| p.name == pname)
+                    .ok_or_else(|| {
+                        s_err(format!(
+                            "model {} has no param {pname:?} ({})",
+                            t.model,
+                            m.params()
+                                .iter()
+                                .map(|p| p.name)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        ))
+                    })?;
+                // Effective row → override with the one field changed.
+                let mut row = g.neuron_params(id).to_vec();
+                row[i] = d_f64(&val) as f32;
+                drop(g);
+                invalidate(&s, n, &dr, &v);
+                n.borrow_mut().neuron_mut(id).params = Some(row.into_boxed_slice());
                 Ok(())
             },
         );
