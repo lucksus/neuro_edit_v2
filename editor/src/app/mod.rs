@@ -122,14 +122,6 @@ pub struct EditorApp {
     /// U1: `Shared::err_seq` at the last console-open — the Console
     /// button gets an unread dot while unseen errors exist.
     err_seq_seen: u64,
-    /// U5: last successful connect (url, session token) — the
-    /// disconnect banner's reconnect button.
-    connect_url: String,
-    connect_tok: String,
-    /// U5b: auto-retry schedule — egui time of the next attempt and
-    /// the current backoff step (2,4,8…60 s).
-    reconnect_at: Option<f64>,
-    reconnect_delay: f64,
     pub(crate) show_console: bool,
     pub(crate) show_plots: bool,
     pub(crate) show_inspector: bool,
@@ -144,11 +136,8 @@ pub struct EditorApp {
     pub(crate) show_files: bool,
     /// Files-window + picker + recent-files state.
     files: FilesUi,
-    /// Multi-user login (`--connect http(s)://…`) — `Some` until a
-    /// session exists.
-    login: Option<LoginDlg>,
-    /// Remembered (url, session-token) for `remember me` — persisted.
-    pub saved_token: Option<(String, String)>,
+    /// Multi-user login + reconnect state (`--connect http(s)://…`).
+    login: LoginUi,
     /// Script editor buffer + the name it is saved under in the file.
     script_text: String,
     script_name: String,
@@ -347,6 +336,36 @@ pub struct FilesUi {
 }
 
 
+/// Login/session state for `--connect http(s)://…`: the open dialog,
+/// remembered token, last successful connect and the reconnect schedule.
+pub struct LoginUi {
+    /// `Some` while the login dialog is up (no session yet).
+    pub dlg: Option<LoginDlg>,
+    /// Remembered (url, session-token) for `remember me` — persisted.
+    pub saved_token: Option<(String, String)>,
+    /// U5: last successful connect (url, session token) — the
+    /// disconnect banner's reconnect button.
+    pub connect_url: String,
+    pub connect_tok: String,
+    /// U5b: auto-retry schedule — egui time of the next attempt and
+    /// the current backoff step (2,4,8…60 s).
+    pub reconnect_at: Option<f64>,
+    pub reconnect_delay: f64,
+}
+
+impl Default for LoginUi {
+    fn default() -> Self {
+        Self {
+            dlg: None,
+            saved_token: None,
+            connect_url: String::new(),
+            connect_tok: String::new(),
+            reconnect_at: None,
+            reconnect_delay: 2.0,
+        }
+    }
+}
+
 /// Login dialog state for `--connect http(s)://…` (multi-user server):
 /// the app boots "offline" and swaps in the real `SimCtl` on success.
 pub struct LoginDlg {
@@ -510,10 +529,6 @@ impl EditorApp {
             hist_idx: None,
             last_error: None,
             err_seq_seen: 0,
-            connect_url: String::new(),
-            connect_tok: String::new(),
-            reconnect_at: None,
-            reconnect_delay: 2.0,
             show_console: wins.console,
             show_plots: wins.plots,
             show_inspector: wins.inspector,
@@ -539,8 +554,10 @@ impl EditorApp {
                 f.recent = recent;
                 f
             },
-            login: None,
-            saved_token: persisted_token,
+            login: LoginUi {
+                saved_token: persisted_token,
+                ..Default::default()
+            },
             script_text: String::new(),
             script_name: "main".into(),
             script_file: "script.rhai".into(),
@@ -674,7 +691,7 @@ impl eframe::App for EditorApp {
                 inputs: self.show_inputs,
                 files: self.show_files,
             },
-            token: self.saved_token.clone(),
+            token: self.login.saved_token.clone(),
         };
         eframe::set_value(storage, "state", &p);
         secure_storage_file();

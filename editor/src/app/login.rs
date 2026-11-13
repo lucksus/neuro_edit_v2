@@ -17,18 +17,18 @@ impl EditorApp {
     /// expired or never existed).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn try_saved_login(&mut self, url: &str) {
-        if let Some((u, tok)) = self.saved_token.clone() {
+        if let Some((u, tok)) = self.login.saved_token.clone() {
             if u == url {
                 match SimCtl::connect_secure(url, &tok) {
                     Ok(ctl) => {
                         self.ctl = ctl;
-                        self.connect_url = url.to_string();
-                        self.connect_tok = tok;
-                        self.reconnect_delay = 2.0;
+                        self.login.connect_url = url.to_string();
+                        self.login.connect_tok = tok;
+                        self.login.reconnect_delay = 2.0;
                         self.status = "connected".into();
                         return;
                     }
-                    Err(_) => self.saved_token = None, // expired — re-login
+                    Err(_) => self.login.saved_token = None, // expired — re-login
                 }
             }
         }
@@ -39,7 +39,7 @@ impl EditorApp {
     /// main's `--connect http(s)://` path after `EditorApp::new`.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn begin_login(&mut self, url: &str, email: &str) {
-        self.login = Some(LoginDlg {
+        self.login.dlg = Some(LoginDlg {
             url: url.to_string(),
             email: email.to_string(),
             password: String::new(),
@@ -52,7 +52,7 @@ impl EditorApp {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn login_window(&mut self, ctx: &egui::Context) {
-        let Some(lg) = &mut self.login else {
+        let Some(lg) = &mut self.login.dlg else {
             return;
         };
         // result of the background attempt
@@ -65,13 +65,13 @@ impl EditorApp {
         match done {
             Some(Ok((ctl, token))) => {
                 self.ctl = ctl;
-                self.connect_url = lg.url.clone();
-                self.connect_tok = token.clone();
-                self.reconnect_delay = 2.0;
+                self.login.connect_url = lg.url.clone();
+                self.login.connect_tok = token.clone();
+                self.login.reconnect_delay = 2.0;
                 if lg.remember {
-                    self.saved_token = Some((lg.url.clone(), token));
+                    self.login.saved_token = Some((lg.url.clone(), token));
                 }
-                self.login = None;
+                self.login.dlg = None;
                 self.status = "connected".into();
                 return;
             }
@@ -119,7 +119,7 @@ impl EditorApp {
                 }
             });
         if !keep {
-            self.login = None;
+            self.login.dlg = None;
         }
     }
 }

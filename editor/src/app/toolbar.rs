@@ -30,8 +30,8 @@ impl EditorApp {
                         ui.close();
                     }
                     #[cfg(not(target_arch = "wasm32"))]
-                    if self.saved_token.is_some() && ui.button("Log out").clicked() {
-                        self.saved_token = None;
+                    if self.login.saved_token.is_some() && ui.button("Log out").clicked() {
+                        self.login.saved_token = None;
                         self.send(ClientMsg::Bye);
                         self.status = "logged out — saved session forgotten".into();
                         ui.close();
@@ -554,7 +554,7 @@ impl EditorApp {
     pub(super) fn disconnect_banner(&mut self, ctx: &egui::Context) {
         if !show_disconnect_banner(
             self.ctl.shared.read().unwrap().connected,
-            self.login.is_some(),
+            self.login.dlg.is_some(),
         ) {
             return;
         }
@@ -566,12 +566,12 @@ impl EditorApp {
         // on wasm, a pending socket that closes right after) keeps
         // backing off instead of looping at the initial 2 s.
         let now = ctx.input(|i| i.time);
-        if self.reconnect_at.is_none() {
-            self.reconnect_at = Some(now + self.reconnect_delay);
+        if self.login.reconnect_at.is_none() {
+            self.login.reconnect_at = Some(now + self.login.reconnect_delay);
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
         let can_retry = self.can_reconnect();
-        let due = can_retry && self.reconnect_at.is_some_and(|t| now >= t);
+        let due = can_retry && self.login.reconnect_at.is_some_and(|t| now >= t);
         let mut manual = false;
         let top = usable_rect(ctx).min.y + 8.0;
         egui::Area::new("disconnect-banner".into())
@@ -586,6 +586,7 @@ impl EditorApp {
                         );
                         if can_retry {
                             let left = self
+                                .login
                                 .reconnect_at
                                 .map(|t| (t - now).ceil().max(0.0) as u32)
                                 .unwrap_or(0);
@@ -602,12 +603,12 @@ impl EditorApp {
                 // pending — either way, clear the timer: if it closes
                 // again the banner re-arms at the (already grown)
                 // delay, so attempts march 2,4,8…60 and never tighten.
-                self.reconnect_at = None;
+                self.login.reconnect_at = None;
                 self.status = "reconnecting…".into();
             } else {
-                self.reconnect_at = Some(now + self.reconnect_delay);
+                self.login.reconnect_at = Some(now + self.login.reconnect_delay);
             }
-            self.reconnect_delay = next_backoff(self.reconnect_delay);
+            self.login.reconnect_delay = next_backoff(self.login.reconnect_delay);
         }
     }
 
@@ -617,7 +618,7 @@ impl EditorApp {
         if cfg!(target_arch = "wasm32") {
             true // ws url recomputed from location each attempt
         } else {
-            !self.connect_url.is_empty()
+            !self.login.connect_url.is_empty()
         }
     }
 
@@ -647,7 +648,7 @@ impl EditorApp {
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
-        match SimCtl::connect_secure(&self.connect_url, &self.connect_tok) {
+        match SimCtl::connect_secure(&self.login.connect_url, &self.login.connect_tok) {
             Ok(ctl) => {
                 self.ctl = ctl;
                 true
