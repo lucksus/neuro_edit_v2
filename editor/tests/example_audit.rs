@@ -3,13 +3,14 @@
 //! UI's Run button uses), must show activity without any input edits.
 //! Each example's claim line is checked in the console where the
 //! script prints one. The audit table lives in NOTES-for-data.md
-//! (## Stage 24).
+//! (## Stage 24/24d).
 //!
 //! The eval snapshot resets when the post-eval Geo lands, so the
 //! activity check is what the researcher actually sees: send the same
 //! RunMs the UI's Run button sends, then require the published Activity
-//! to show time advancing and spikes arriving. Sabotage per case is on
-//! the assertion itself.
+//! to show time advancing and spikes arriving — in the LAST second of
+//! a multi-second run, not just the first publish (Stage 24d). Sabotage
+//! per case is on the assertion itself.
 
 use editor::simctl::SimCtl;
 use net_format::Network;
@@ -48,18 +49,34 @@ fn run_example(name: &str, src: &str) -> (SimCtl, Vec<String>) {
 
 /// The activity claim every example makes: after the script's eval, the
 /// same RunMs the Run button sends must publish an Activity with time
-/// advancing and new spikes — nothing needed editing.
-/// Sabotage: strip the script's drive/noise tail → spikes_total stays 0.
+/// advancing and new spikes — and it must STILL be spiking in the last
+/// second of a several-second run, not only inside the first 300 ms
+/// (Stage 24d: the AdEx liquid used to die ~1 s after load while this
+/// audit still passed on its early spikes).
+/// Sabotage: strip the script's drive/noise tail (e.g. AdEx tail
+/// `set_noise(60.0, 0.0)`) → spikes_total stalls and this fails.
 fn assert_activity(ctl: &SimCtl, name: &str) {
     let t0 = ctl.shared.read().unwrap().snap.time_ms;
-    ctl.send(Cmd::RunMs(300.0));
-    let snap = wait_for(Duration::from_secs(15), || {
+    // A few seconds of Run, the way a user watches it go.
+    ctl.send(Cmd::RunMs(4000.0));
+    let spikes_at_4s = wait_for(Duration::from_secs(60), || {
         let s = ctl.shared.read().ok()?;
-        (s.snap.time_ms > t0 + 200.0 && s.snap.spikes_total > 0).then(|| s.snap.clone())
+        (s.snap.time_ms >= t0 + 3900.0).then(|| s.snap.spikes_total)
+    });
+    // The last second is the real audit window — a liquid that died
+    // inside the run republishes the same total.
+    ctl.send(Cmd::RunMs(1000.0));
+    let end = wait_for(Duration::from_secs(60), || {
+        let s = ctl.shared.read().ok()?;
+        (s.snap.time_ms >= t0 + 4900.0).then(|| s.snap.clone())
     });
     assert!(
-        snap.rate_hz > 0.0,
+        end.rate_hz > 0.0,
         "{name}: spikes happened but mean rate is 0 — dead liquid?"
+    );
+    assert!(
+        end.spikes_total > spikes_at_4s,
+        "{name}: no new spikes in the last second of a 5 s run — dead liquid?"
     );
 }
 
