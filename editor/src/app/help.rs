@@ -3,7 +3,7 @@
 
 use eframe::egui;
 
-use super::layout::{app_win, clamp_window_rect, usable_rect};
+use super::layout::{app_win, default_rect, usable_rect, DefWin};
 use super::EditorApp;
 
 impl EditorApp {
@@ -78,16 +78,8 @@ impl EditorApp {
             return;
         }
         let mut open = self.win.manual;
-        // Stage 15 A: narrow viewports get a shrunken manual — cap the
-        // default at 70% of the usable strip instead of covering it.
         let u = usable_rect(ctx);
-        let dr = clamp_window_rect(
-            egui::Rect::from_min_size(
-                u.min + egui::vec2(24.0, 8.0),
-                egui::vec2(640.0, 520.0).min(u.size() * 0.7),
-            ),
-            u,
-        );
+        let dr = default_rect(DefWin::Manual, u);
         app_win(ctx, "Manual")
             .open(&mut open)
             .default_size(dr.size())

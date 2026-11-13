@@ -5,7 +5,7 @@ use eframe::egui;
 
 use proto::ClientMsg;
 
-use super::layout::{app_win, clamp_window_rect, usable_rect};
+use super::layout::{app_win, default_rect, usable_rect, DefWin};
 use super::EditorApp;
 
 impl EditorApp {
@@ -192,13 +192,7 @@ impl EditorApp {
         }
         let mut open = self.win.files;
         let u = usable_rect(ctx);
-        let dr = clamp_window_rect(
-            egui::Rect::from_min_size(
-                egui::pos2(u.center().x - 210.0, u.min.y + 24.0),
-                egui::vec2(420.0, 420.0),
-            ),
-            u,
-        );
+        let dr = default_rect(DefWin::Files, u);
         app_win(ctx, "Files")
             .open(&mut open)
             .default_size(dr.size())

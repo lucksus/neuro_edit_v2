@@ -6,7 +6,7 @@ use eframe::egui;
 use crate::gpu::Entity;
 use proto::{ClientMsg, NetEdit};
 
-use super::layout::{app_win, clamp_window_rect, usable_rect};
+use super::layout::{app_win, default_rect, usable_rect, DefWin};
 use super::{EditorApp, PlotTab};
 
 impl EditorApp {
@@ -16,13 +16,7 @@ impl EditorApp {
         }
         let mut open = self.win.inspector;
         let u = usable_rect(ctx);
-        let dr = clamp_window_rect(
-            egui::Rect::from_min_size(
-                egui::pos2(u.max.x - 248.0, u.min.y + 8.0),
-                egui::vec2(240.0, 200.0),
-            ),
-            u,
-        );
+        let dr = default_rect(DefWin::Inspector, u);
         app_win(ctx, "Inspector")
             .open(&mut open)
             .default_width(240.0)
@@ -118,10 +112,7 @@ impl EditorApp {
         }
         let mut open = self.win.inputs;
         let u = usable_rect(ctx);
-        let dr = clamp_window_rect(
-            egui::Rect::from_min_size(u.min + egui::vec2(260.0, 8.0), egui::vec2(220.0, 140.0)),
-            u,
-        );
+        let dr = default_rect(DefWin::Inputs, u);
         app_win(ctx, "Inputs")
             .open(&mut open)
             .default_size(dr.size())

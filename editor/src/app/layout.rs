@@ -59,32 +59,117 @@ pub(super) fn app_win<'open>(ctx: &egui::Context, title: impl Into<egui::WidgetT
     egui::Window::new(title).constrain_to(usable_rect(ctx))
 }
 
-/// U3: bottom-right Console default.
-pub(super) fn console_default_rect(u: egui::Rect) -> egui::Rect {
-    clamp_window_rect(
+/// Every floating window's default rect, expressed against
+/// `usable_rect` — one table so first-run overlaps are auditable
+/// (U3/Stage 15). The no-overlap tests iterate `DEFAULT_OPEN`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum DefWin {
+    Inspector,
+    Plots,
+    Console,
+    Inputs,
+    Files,
+    Manual,
+    Script,
+}
+
+/// The windows `WindowVis::default` opens on first run — test-visible
+/// mirror checked by `default_open_windows_never_overlap`.
+#[cfg(test)]
+pub(super) const DEFAULT_OPEN: &[DefWin] =
+    &[DefWin::Inspector, DefWin::Plots, DefWin::Console];
+
+/// (window → default rect) table against usable rect `u`.
+///
+/// U3: bottom-right Console, bottom-left Plots — on narrow viewports
+/// the two bottom-anchored windows collide, so Plots stacks above
+/// Console.
+pub(super) fn default_rects(u: egui::Rect) -> [(DefWin, egui::Rect); 7] {
+    let console = clamp_window_rect(
         egui::Rect::from_min_size(
             egui::pos2(u.max.x - 430.0, u.max.y - 260.0),
             egui::vec2(420.0, 240.0),
         ),
         u,
-    )
-}
-
-/// U3: bottom-left Plots default — on narrow viewports the two
-/// bottom-anchored windows collide, so Plots stacks above Console.
-pub(super) fn plots_default_rect(u: egui::Rect) -> egui::Rect {
+    );
     let side = egui::vec2(480.0, 220.0);
-    let c = console_default_rect(u);
-    let stacked = c.min.x < u.min.x + 12.0 + side.x + 8.0;
+    let stacked = console.min.x < u.min.x + 12.0 + side.x + 8.0;
     let y = if stacked {
-        c.min.y - side.y - 12.0
+        console.min.y - side.y - 12.0
     } else {
         u.max.y - side.y - 20.0
     };
-    clamp_window_rect(
-        egui::Rect::from_min_size(egui::pos2(u.min.x + 12.0, y), side),
-        u,
-    )
+    [
+        (
+            DefWin::Inspector,
+            clamp_window_rect(
+                egui::Rect::from_min_size(
+                    egui::pos2(u.max.x - 248.0, u.min.y + 8.0),
+                    egui::vec2(240.0, 200.0),
+                ),
+                u,
+            ),
+        ),
+        (
+            DefWin::Plots,
+            clamp_window_rect(
+                egui::Rect::from_min_size(egui::pos2(u.min.x + 12.0, y), side),
+                u,
+            ),
+        ),
+        (DefWin::Console, console),
+        (
+            DefWin::Inputs,
+            clamp_window_rect(
+                egui::Rect::from_min_size(
+                    u.min + egui::vec2(260.0, 8.0),
+                    egui::vec2(220.0, 140.0),
+                ),
+                u,
+            ),
+        ),
+        (
+            DefWin::Files,
+            clamp_window_rect(
+                egui::Rect::from_min_size(
+                    egui::pos2(u.center().x - 210.0, u.min.y + 24.0),
+                    egui::vec2(420.0, 420.0),
+                ),
+                u,
+            ),
+        ),
+        // narrow viewports get a shrunken manual — cap the default at
+        // 70% of the usable strip instead of covering it.
+        (
+            DefWin::Manual,
+            clamp_window_rect(
+                egui::Rect::from_min_size(
+                    u.min + egui::vec2(24.0, 8.0),
+                    egui::vec2(640.0, 520.0).min(u.size() * 0.7),
+                ),
+                u,
+            ),
+        ),
+        (
+            DefWin::Script,
+            clamp_window_rect(
+                egui::Rect::from_min_size(
+                    u.min + egui::vec2(12.0, 8.0),
+                    egui::vec2(480.0, 360.0),
+                ),
+                u,
+            ),
+        ),
+    ]
+}
+
+/// One entry of [`default_rects`].
+pub(super) fn default_rect(w: DefWin, u: egui::Rect) -> egui::Rect {
+    default_rects(u)
+        .into_iter()
+        .find(|(k, _)| *k == w)
+        .unwrap()
+        .1
 }
 
 
@@ -137,6 +222,36 @@ mod tests {
         let got = clamp_window_rect(huge, usable);
         assert_eq!(got.size(), usable.size());
         assert_eq!(got.min, usable.min);
+    }
+
+    /// U3/Stage 15: no two default-open windows overlap — checked at the
+    /// two CI screenshot sizes (800x700, 1440x900) and across a width
+    /// sweep since narrow viewports change the stacking.
+    #[test]
+    fn default_open_windows_never_overlap() {
+        for (w, h) in [(800.0_f32, 700.0_f32), (1440.0, 900.0)] {
+            let u = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(w, h));
+            let table = default_rects(u);
+            for (i, a) in DEFAULT_OPEN.iter().enumerate() {
+                for b in &DEFAULT_OPEN[i + 1..] {
+                    let ra = table.iter().find(|(k, _)| k == a).unwrap().1;
+                    let rb = table.iter().find(|(k, _)| k == b).unwrap().1;
+                    assert!(
+                        !ra.intersects(rb),
+                        "{a:?} overlaps {b:?} at {w}x{h}: {ra:?} vs {rb:?}"
+                    );
+                }
+            }
+        }
+        // U3: narrow widths stack the bottom-anchored pair; assert
+        // disjoint at every reasonable width.
+        for w in [500.0_f32, 800.0, 930.0, 1440.0] {
+            let u = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(w, 700.0));
+            assert!(
+                !default_rect(DefWin::Plots, u).intersects(default_rect(DefWin::Console, u)),
+                "default windows overlap at {w} px"
+            );
+        }
     }
 
     /// Stage 15 F: every app-state input to `render_offscreen` must move
@@ -216,18 +331,7 @@ mod tests {
 
 
 
-    #[test]
-    fn plots_and_console_defaults_never_overlap() {
-        // U3: at narrow widths the defaults stack; wide stays
-        // side-by-side. Assert disjoint at every reasonable width.
-        for w in [500.0_f32, 800.0, 930.0, 1440.0] {
-            let u = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(w, 700.0));
-            assert!(
-                !plots_default_rect(u).intersects(console_default_rect(u)),
-                "default windows overlap at {w} px"
-            );
-        }
-    }
+
 
 
 

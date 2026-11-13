@@ -5,7 +5,7 @@ use eframe::egui;
 
 use proto::ClientMsg;
 
-use super::layout::{app_win, console_default_rect, usable_rect};
+use super::layout::{app_win, default_rect, usable_rect, DefWin};
 use super::EditorApp;
 
 impl EditorApp {
@@ -28,7 +28,7 @@ impl EditorApp {
         self.console.err_seq_seen = self.ctl.shared.read().unwrap().err_seq;
         let mut open = self.win.console;
         let u = usable_rect(ctx);
-        let dr = console_default_rect(u);
+        let dr = default_rect(DefWin::Console, u);
         app_win(ctx, "Console (Rhai)")
             .open(&mut open)
             .default_size(dr.size())

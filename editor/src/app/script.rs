@@ -6,7 +6,7 @@ use eframe::egui;
 use proto::{ClientMsg, NetEdit};
 
 use super::files::dir_of;
-use super::layout::{app_win, clamp_window_rect, usable_rect};
+use super::layout::{app_win, default_rect, usable_rect, DefWin};
 use super::{EditorApp, PlotTab};
 
 impl EditorApp {
@@ -45,10 +45,7 @@ impl EditorApp {
         }
         let mut open = self.win.script;
         let u = usable_rect(ctx);
-        let dr = clamp_window_rect(
-            egui::Rect::from_min_size(u.min + egui::vec2(12.0, 8.0), egui::vec2(480.0, 360.0)),
-            u,
-        );
+        let dr = default_rect(DefWin::Script, u);
         app_win(ctx, "Script editor")
             .open(&mut open)
             .default_pos(dr.min)

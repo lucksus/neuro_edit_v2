@@ -7,7 +7,7 @@ use egui_plot::{Line, PlotPoints};
 use crate::gpu::Entity;
 use crate::icons;
 
-use super::layout::{app_win, plots_default_rect, usable_rect};
+use super::layout::{app_win, default_rect, usable_rect, DefWin};
 use super::{EditorApp, PlotTab};
 
 impl EditorApp {
@@ -17,7 +17,7 @@ impl EditorApp {
         }
         let mut open = self.win.plots;
         let u = usable_rect(ctx);
-        let dr = plots_default_rect(u);
+        let dr = default_rect(DefWin::Plots, u);
         app_win(ctx, "Plots")
             .open(&mut open)
             .default_size(dr.size())
