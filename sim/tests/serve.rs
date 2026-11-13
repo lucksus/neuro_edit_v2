@@ -1623,3 +1623,115 @@ fn typed_edits_echo_script_line() {
     }
     rig.stop();
 }
+
+/// 19b: the typed CreateConnections replaced an Eval — Stop must
+/// still interrupt its O(m²) pair loop: busy flips, "stopped by user"
+/// reaches the console, partial synapses stay AND reach the client.
+#[test]
+fn create_connections_edit_stops_on_abort() {
+    use std::sync::atomic::Ordering;
+
+    // 100×100 = 10k members → ~100M pair iterations; uncancelled the
+    // build takes seconds even on this box.
+    let mut net = Network::new();
+    net_format::builders::create_2d_grid(&mut net, "g", 100, 100, 10.0, [0.0; 3]);
+    let abort = Arc::new(AtomicBool::new(false));
+    let rig = start_opts(
+        net,
+        ServeOpts {
+            backend: BackendKind::Cpu,
+            seed: 1,
+            cfg: SimConfig::default(),
+            data_dir: None,
+            max_upload_bytes: usize::MAX,
+            quota_bytes: 0,
+            abort: abort.clone(),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            sim_limits: sim::SimLimits::default(),
+        },
+    );
+    let base = subscribe_base(&rig);
+
+    // Small scaling: the O(m²) pair loop is the cost, not the kept
+    // synapses — the partial delta stays small.
+    rig.send(ClientMsg::Edit {
+        base,
+        edit: NetEdit::CreateConnections {
+            group: "g".into(),
+            scaling: 0.05,
+            lambda: 1e9,
+            w: 1.0,
+        },
+    });
+    // Busy must mark the build while it runs (a GeoDelta first means
+    // the whole O(m²) loop ran with no busy flag and no Stop).
+    let evs = rig.until(|m| {
+        matches!(m, ServerMsg::Status { busy: true, .. })
+            || matches!(m, ServerMsg::GeoDelta(_))
+    });
+    assert!(
+        evs.iter()
+            .any(|e| matches!(&e.msg, ServerMsg::Status { busy: true, .. })),
+        "build must run under a busy status: {evs:?}"
+    );
+
+    // Let a few rows finish so partial work exists — the flag flip
+    // must land mid-build, not before row 0.
+    std::thread::sleep(Duration::from_millis(100));
+    // SimCtl::abort_now(): the shared flag flips first (that's what
+    // reaches a worker blocked inside the builder); the queued Abort
+    // message cleans up `running` behind it.
+    abort.store(true, Ordering::Relaxed);
+    rig.send(ClientMsg::Abort);
+    let t0 = std::time::Instant::now();
+    // Terminal event of the stopped apply: the partial-work delta.
+    let evs = rig.until(|m| matches!(m, ServerMsg::GeoDelta(_)));
+    let stop_elapsed = t0.elapsed();
+    assert!(
+        stop_elapsed < Duration::from_secs(10),
+        "stop should land near-instantly, took {stop_elapsed:?}"
+    );
+    assert!(
+        evs.iter().any(|e| matches!(
+            &e.msg,
+            ServerMsg::Console(s) if s.contains("stopped by user")
+        )),
+        "expected a 'stopped by user' console line: {evs:?}"
+    );
+    assert!(
+        evs.iter()
+            .any(|e| matches!(&e.msg, ServerMsg::Status { busy: false, .. })),
+        "busy must clear after the stopped build: {evs:?}"
+    );
+
+    let syn_added: usize = evs
+        .iter()
+        .map(|e| match &e.msg {
+            ServerMsg::GeoDelta(d) => d.syn_added.len(),
+            _ => 0,
+        })
+        .sum();
+    // The worker kept the partial synapses; the client's delta must
+    // cover every one of them — no silent divergence.
+    rig.send(ClientMsg::Eval {
+        code: "net.synapse_count()".into(),
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Console(s) if s.starts_with("= ")));
+    let worker_syns: usize = evs
+        .iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::Console(s) => s.strip_prefix("= ")?.parse().ok(),
+            _ => None,
+        })
+        .expect("synapse_count reply");
+    assert_eq!(
+        syn_added, worker_syns,
+        "delta must cover every synapse the worker kept"
+    );
+    assert!(worker_syns > 0, "partial work kept");
+    assert!(
+        worker_syns < 100 * 100 * 99,
+        "build must have stopped before all pairs were tried"
+    );
+    rig.stop();
+}

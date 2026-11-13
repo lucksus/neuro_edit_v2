@@ -520,9 +520,15 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                             );
                         } else {
                             // The edits that replaced `format!`-built `Eval`s
-                            // keep that path's `> net.…` console echo — the
-                            // line that teaches the script equivalent.
-                            if let Some(line) = script_equiv(&edit) {
+                            // keep that path's semantics: the `> net.…` echo,
+                            // busy status while a slow builder runs, a cleared
+                            // abort flag so Stop still interrupts it, and the
+                            // panic caught like a script's.
+                            let equiv = script_equiv(&edit);
+                            if let Some(line) = &equiv {
+                                abort.store(false, Ordering::Relaxed);
+                                status_busy = true;
+                                status!();
                                 emit_b(&emit, con(format!("> {line}")));
                             }
                             // Scope the net borrow: the Delta arm needs fresh
@@ -531,10 +537,58 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                             let applied = {
                                 let mut n = env.net.borrow_mut();
                                 let dt = env.cfg.borrow().dt_ms;
-                                apply_edit(&mut n, dt, &mut env.rng.borrow_mut(), &edit)
+                                let cancel = env.cancel.borrow();
+                                if equiv.is_some() {
+                                    // catch_unwind so a panic inside a builder
+                                    // can't kill the worker thread silently —
+                                    // the Eval arm wrapped `eval_str` the same
+                                    // way.
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                        || {
+                                            apply_edit(
+                                                &mut n,
+                                                dt,
+                                                &mut env.rng.borrow_mut(),
+                                                &edit,
+                                                &**cancel,
+                                            )
+                                        },
+                                    ))
+                                } else {
+                                    Ok(apply_edit(
+                                        &mut n,
+                                        dt,
+                                        &mut env.rng.borrow_mut(),
+                                        &edit,
+                                        &**cancel,
+                                    ))
+                                }
                             };
+                            if equiv.is_some() {
+                                status_busy = false;
+                                status!();
+                            }
                             match applied {
-                                Ok(applied) => {
+                                Err(_) => emit_b(
+                                    &emit,
+                                    con("! script panicked (worker survived)"),
+                                ),
+                                Ok(Err(e)) => emit_to(
+                                    &emit,
+                                    client,
+                                    ServerMsg::Error(format!("edit refused: {e}")),
+                                ),
+                                Ok(Ok(applied)) => {
+                                    // A stopped builder's partial synapses
+                                    // stay in the net — the delta below
+                                    // carries them to every client, like the
+                                    // Eval's post-bump Geo republish did.
+                                    if matches!(applied, Applied::Stopped(_)) {
+                                        emit_b(
+                                            &emit,
+                                            con("! Runtime error: stopped by user"),
+                                        );
+                                    }
                                     bump(&env);
                                     let gen = env.net_gen.get();
                                     let ver = env.net_version.get();
@@ -560,7 +614,7 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                                                 }),
                                             );
                                         }
-                                        Applied::Delta(mut d) => {
+                                        Applied::Delta(mut d) | Applied::Stopped(mut d) => {
                                             published_geo_version = ver;
                                             d.version = ver;
                                             d.gen = gen;
@@ -576,11 +630,6 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                                         Applied::Noop => {}
                                     }
                                 }
-                                Err(e) => emit_to(
-                                    &emit,
-                                    client,
-                                    ServerMsg::Error(format!("edit refused: {e}")),
-                                ),
                             }
                         }
                     }
@@ -1501,6 +1550,19 @@ pub fn geo_from_net(net: &Network, dt: f32) -> Geo {
 // edits → deltas
 // ---------------------------------------------------------------------------
 
+enum Applied {
+    /// Emit a `GeoDelta`.
+    Delta(GeoDelta),
+    /// Emit a full `Geo` — the edit renumbered neuron ids.
+    Full,
+    /// Nothing observable changed (e.g. duplicate disconnect).
+    Noop,
+    /// A cancellable builder stopped early — the delta carries the
+    /// partial work so every client still syncs to the net as it
+    /// stands (the Rhai builder did the same: kept what it built).
+    Stopped(GeoDelta),
+}
+
 /// The `net.*` script call this edit replaced, formatted exactly as
 /// the old `format!`-built `Eval` produced it — echoed to the console
 /// as `> net.…`. `None` for edits that never went through a script.
@@ -1533,15 +1595,6 @@ fn script_equiv(e: &NetEdit) -> Option<String> {
     }
 }
 
-enum Applied {
-    /// Emit a `GeoDelta`.
-    Delta(GeoDelta),
-    /// Emit a full `Geo` — the edit renumbered neuron ids.
-    Full,
-    /// Nothing observable changed (e.g. duplicate disconnect).
-    Noop,
-}
-
 /// Apply a `NetEdit` to `net` and describe what changed as a delta.
 /// `dt` converts stored ms delays to sim steps.
 fn apply_edit(
@@ -1549,6 +1602,7 @@ fn apply_edit(
     dt: f32,
     rng: &mut net_format::Rng,
     e: &NetEdit,
+    cancel: &dyn Fn() -> bool,
 ) -> Result<Applied, String> {
     let mut d = GeoDelta::default();
     let steps = |ms: f32| (ms / dt.max(1e-6)).round().max(1.0) as u16;
@@ -1857,7 +1911,11 @@ fn apply_edit(
         } => {
             let members = group_members(net, group)?;
             let s0 = net.synapses.len();
-            net_format::builders::create_connections(net, group, *scaling, *lambda, *w, rng);
+            // The checked builder polls the worker's abort flag —
+            // the same Stop the Rhai `create_connections` honoured.
+            let stopped = net_format::builders::create_connections_checked(
+                net, group, *scaling, *lambda, *w, rng, cancel,
+            );
             for s in &net.synapses[s0..] {
                 d.syn_added.push(SynRow {
                     src: s.src,
@@ -1867,6 +1925,9 @@ fn apply_edit(
             }
             for &m in &members {
                 d.disp_changed.push((m, disp_list(net, m, dt)));
+            }
+            if stopped {
+                return Ok(Applied::Stopped(d));
             }
         }
         NetEdit::SetSynapseWeights { group, mean, sd } => {
@@ -2040,6 +2101,7 @@ mod tests {
                 name: "g".into(),
                 ids: ids.clone(),
             },
+            &|| false,
         )
         .unwrap();
         let new = t.elapsed();
@@ -2074,7 +2136,7 @@ mod tests {
         let mut net = big_net(n, syn);
         let mut rng = net_format::Rng::new(0);
         let t = Instant::now();
-        apply_edit(&mut net, 0.1, &mut rng, &NetEdit::MoveNeurons { items }).unwrap();
+        apply_edit(&mut net, 0.1, &mut rng, &NetEdit::MoveNeurons { items }, &|| false).unwrap();
         let new = t.elapsed();
         eprintln!("Q13 MoveNeurons 5k of 20k/400k: old {old:?} new {new:?}");
         assert_eq!(
