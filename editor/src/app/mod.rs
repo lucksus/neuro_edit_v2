@@ -149,6 +149,7 @@ pub struct EditorApp {
     manual_page: usize,
     /// Files window (per-user space when remote, app-data dir locally).
     pub(crate) show_files: bool,
+    /// Files-window + picker + recent-files state.
     files: FilesUi,
     /// Multi-user login (`--connect http(s)://…`) — `Some` until a
     /// session exists.
@@ -164,8 +165,6 @@ pub struct EditorApp {
     script_text: String,
     script_name: String,
     script_file: String,
-    /// Server-side dir listing for the file pickers (from `ListFiles`).
-    file_list: Option<(String, Vec<proto::FileEntry>)>,
     /// Server jobs (list + live progress rows + last opened detail).
     jobs: Vec<proto::JobInfo>,
     job_progress: std::collections::BTreeMap<u64, Vec<Vec<(String, f64)>>>,
@@ -175,8 +174,6 @@ pub struct EditorApp {
     /// U8: the Jobs tab fetched the list since it was opened —
     /// pushes update it live, no 2 s poll.
     jobs_fetched: bool,
-    /// Recently opened/saved .ne2 paths (persisted across runs).
-    pub recent: VecDeque<String>,
 
     speed: f32,
     /// Best steps/s the machine has reached — shown as `(max xN)` next to
@@ -364,6 +361,10 @@ pub struct FilesUi {
     /// egui drag-drop payloads stashed by `files_window` for `files_pump`.
     pub ctx_dropped: Option<Vec<egui::DroppedFile>>,
     pub status: String,
+    /// Last `FileList` reply the open/save picker renders.
+    pub file_list: Option<(String, Vec<proto::FileEntry>)>,
+    /// Recently opened nets (File → Open recent).
+    pub recent: VecDeque<String>,
 }
 
 
@@ -429,7 +430,6 @@ impl EditorApp {
         #[allow(unused_variables)]
         let is_remote = ctl.remote;
         Self {
-            recent,
             ctl,
             camera: Camera::default(),
             geo: None,
@@ -494,6 +494,7 @@ impl EditorApp {
                         .to_string_lossy()
                         .into_owned();
                 }
+                f.recent = recent;
                 f
             },
             login: None,
@@ -504,7 +505,6 @@ impl EditorApp {
             script_text: String::new(),
             script_name: "main".into(),
             script_file: "script.rhai".into(),
-            file_list: None,
             jobs: Vec::new(),
             job_progress: std::collections::BTreeMap::new(),
             job_detail: None,
@@ -634,7 +634,7 @@ impl EditorApp {
 impl eframe::App for EditorApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         let p = Persisted {
-            recent: self.recent.iter().cloned().collect(),
+            recent: self.files.recent.iter().cloned().collect(),
             windows: WindowVis {
                 inspector: self.show_inspector,
                 plots: self.show_plots,

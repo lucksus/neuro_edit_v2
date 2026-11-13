@@ -46,10 +46,10 @@ impl EditorApp {
                         icons::tinted(&ic.recent, ui.visuals().text_color()),
                         "Recent files",
                         |ui| {
-                            if self.recent.is_empty() {
+                            if self.files.recent.is_empty() {
                                 ui.label("(empty)");
                             }
-                            let rec: Vec<String> = self.recent.iter().cloned().collect();
+                            let rec: Vec<String> = self.files.recent.iter().cloned().collect();
                             for p in rec {
                                 if ui.button(&p).clicked() {
                                     self.guarded(ctx, PendingAction::Load(p));

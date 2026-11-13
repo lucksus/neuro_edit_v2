@@ -75,9 +75,9 @@ impl EditorApp {
     }
 
     pub fn push_recent(&mut self, path: String) {
-        self.recent.retain(|p| *p != path);
-        self.recent.push_front(path);
-        self.recent.truncate(8);
+        self.files.recent.retain(|p| *p != path);
+        self.files.recent.push_front(path);
+        self.files.recent.truncate(8);
     }
 
     /// Selection → watched neurons for v plots (8 lowest selected ids —

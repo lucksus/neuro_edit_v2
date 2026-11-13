@@ -12,7 +12,7 @@ impl EditorApp {
     /// Render the latest `ListFiles` reply as clickable entries under a
     /// file picker; returns `(path, is_dir)` of the picked entry.
     pub(super) fn file_list_ui(&self, ui: &mut egui::Ui) -> Option<(String, bool)> {
-        let (dir, entries) = self.file_list.as_ref()?;
+        let (dir, entries) = self.files.file_list.as_ref()?;
         let mut picked = None;
         egui::ScrollArea::vertical()
             .max_height(120.0)

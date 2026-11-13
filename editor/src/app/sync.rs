@@ -124,7 +124,7 @@ impl EditorApp {
             if self.files.local_root.is_none() && dir == self.files.cwd {
                 self.files.entries = entries.clone();
             }
-            self.file_list = Some((dir, entries));
+            self.files.file_list = Some((dir, entries));
         }
         if let Some((used, quota)) = usage {
             self.files.usage = Some((used, quota));
