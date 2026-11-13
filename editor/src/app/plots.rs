@@ -33,9 +33,9 @@ impl EditorApp {
                         icons::selectable_value(ui, t, PlotTab::Samples, &ic.samples, "samples");
                         icons::selectable_value(ui, t, PlotTab::Jobs, &ic.jobs, "jobs");
                     }
-                    if self.plots.tab == PlotTab::Jobs && !self.jobs.is_empty() {
+                    if self.plots.tab == PlotTab::Jobs && !self.jobs.list.is_empty() {
                         ui.separator();
-                        ui.label(format!("{} job(s)", self.jobs.len()));
+                        ui.label(format!("{} job(s)", self.jobs.list.len()));
                     }
                     ui.separator();
                     if matches!(self.plots.tab, PlotTab::Voltage | PlotTab::Phase | PlotTab::Raster) {

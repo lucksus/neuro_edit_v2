@@ -165,12 +165,12 @@ impl EditorApp {
             self.status = e.clone();
             self.last_error = Some(e);
         }
-        self.jobs = jobs;
-        self.job_progress = job_progress;
+        self.jobs.list = jobs;
+        self.jobs.progress = job_progress;
         if let Some(d) = job_detail {
             // a re-opened job's history becomes plottable too
-            self.job_progress.insert(d.id, d.progress.clone());
-            self.job_detail = Some(d);
+            self.jobs.progress.insert(d.id, d.progress.clone());
+            self.jobs.detail = Some(d);
         }
         // Toolbar widgets read the worker's live cfg so script-side
         // `sim.set_dt`/`sim.set_noise`/`sim.set_backend` calls show up.

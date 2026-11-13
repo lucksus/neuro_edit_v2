@@ -143,14 +143,7 @@ pub struct EditorApp {
     script_name: String,
     script_file: String,
     /// Server jobs (list + live progress rows + last opened detail).
-    jobs: Vec<proto::JobInfo>,
-    job_progress: std::collections::BTreeMap<u64, Vec<Vec<(String, f64)>>>,
-    job_detail: Option<crate::snap::JobDetailSnap>,
-    /// Job selected in the jobs tab (id; 0 = none yet).
-    job_sel: u64,
-    /// U8: the Jobs tab fetched the list since it was opened —
-    /// pushes update it live, no 2 s poll.
-    jobs_fetched: bool,
+    jobs: JobsUi,
 
     /// Run-controls state (speed/backend/busy/dt/noise) — toolbar run
     /// cluster, fed by `Shared` snapshots.
@@ -396,6 +389,20 @@ pub struct SimControls {
     pub noise_kick: f32,
 }
 
+/// Jobs-tab state: the server job list, live per-job progress rows,
+/// the last opened detail snapshot and the selected job id.
+#[derive(Default)]
+pub struct JobsUi {
+    pub list: Vec<proto::JobInfo>,
+    pub progress: std::collections::BTreeMap<u64, Vec<Vec<(String, f64)>>>,
+    pub detail: Option<crate::snap::JobDetailSnap>,
+    /// Job selected in the jobs tab (id; 0 = none yet).
+    pub sel: u64,
+    /// U8: the Jobs tab fetched the list since it was opened —
+    /// pushes update it live, no 2 s poll.
+    pub fetched: bool,
+}
+
 /// Plots-window state: v(t)/raster/phase histories, the shared sliding
 /// window, selected tab, raster height and weights-tab readout.
 pub struct PlotsUi {
@@ -561,11 +568,7 @@ impl EditorApp {
             script_text: String::new(),
             script_name: "main".into(),
             script_file: "script.rhai".into(),
-            jobs: Vec::new(),
-            job_progress: std::collections::BTreeMap::new(),
-            job_detail: None,
-            job_sel: 0,
-            jobs_fetched: false,
+            jobs: JobsUi::default(),
             show_grid: true,
             show_synapses: true,
             insert_inh: false,
