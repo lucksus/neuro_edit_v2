@@ -52,6 +52,8 @@ impl RunFlags {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Act {
     /// Run / Pause (`AutoRun`). Always on — it IS how you leave Run.
+    /// Table-only: call sites deliberately never gate the toggle.
+    #[allow(dead_code)]
     RunToggle,
     /// Step 10 / 100 ms (`RunMs`) — off while auto-running (pause to
     /// step) and while busy.
@@ -82,13 +84,14 @@ pub enum Act {
     /// that drive inputs during a run are a core workflow.
     Eval,
     /// Server-side job start — independent of the interactive env.
+    /// Table-only: job buttons don't exist in the UI yet.
+    #[allow(dead_code)]
     Job,
 }
 
 /// `Some(reason)` when `act` is unavailable under `f`, else `None`.
 pub fn disabled(f: RunFlags, a: Act) -> Option<&'static str> {
     const BUSY: &str = "worker busy — a script or load is running; wait, or press Stop";
-    const RUNNING: &str = "the sim is running — pause it first";
     const REBUILD: &str = "restarts the sim from scratch — stop it first";
     const EDIT_RUNNING: &str = "edits rebuild the sim — pause the run first";
     const NO_SIM: &str = "no sim has been built yet — run first";

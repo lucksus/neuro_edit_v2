@@ -5,12 +5,11 @@ use eframe::egui;
 
 use crate::gpu::Entity;
 use crate::icons;
-use crate::scene::Plane;
 use crate::simctl::SimCtl;
 use proto::ClientMsg;
 
 use super::layout::usable_rect;
-use super::{gate, gate_ui, Act, Dialog, EditorApp, EditorState, Mode, PendingAction};
+use super::{gate, Act, Dialog, EditorApp, EditorState, Mode, PendingAction};
 
 impl EditorApp {
     pub(super) fn toolbar(&mut self, ctx: &egui::Context) {
@@ -280,215 +279,23 @@ impl EditorApp {
                     }
                 });
                 ui.separator();
-                // sim controls — "Stop" (not "Pause"): abort_now flips the
-                // flag on_progress/run chunks/builders watch. A busy script
-                // can't resume anyway, so Pause was a lie.
-                let live = self.sim.running || self.sim.busy;
-                let (run_icon, run_label) = if live {
-                    (&ic.stop, "Stop")
-                } else {
-                    (&ic.run, "Run")
-                };
-                // Stage 15 B: each control group (icon+widget+label) is a
-                // nested horizontal — wrapping moves a group whole instead
-                // of splitting e.g. the speed slider from its "realtime".
-                toolbar_group(ui, 300.0, |ui| {
-                    // Run/Stop is never gated (Act::RunToggle) — it's how
-                    // you leave Run and how you abort a busy script.
-                    if ui.add(icons::button(run_icon, run_label)).clicked() {
-                        if live {
-                            self.ctl.abort_now();
-                            self.send(ClientMsg::AutoRun(false));
-                        } else {
-                            self.send(ClientMsg::AutoRun(true));
-                        }
-                    }
-                    let why_step = self.why(Act::Step);
-                    if gate(ui, why_step, icons::button(&ic.step, "10ms"))
-                        .on_hover_text("Step 10 ms")
-                        .clicked()
-                    {
-                        self.send(ClientMsg::RunMs(10.0));
-                    }
-                    if gate(ui, why_step, icons::button(&ic.step_long, "100ms"))
-                        .on_hover_text("Step 100 ms")
-                        .clicked()
-                    {
-                        self.send(ClientMsg::RunMs(100.0));
-                    }
-                    if gate(ui, self.why(Act::Reset), icons::button(&ic.reset, "Reset")).clicked() {
-                        self.send(ClientMsg::Reset);
-                        self.plots.hist.clear();
-                    }
-                });
-                toolbar_group(ui, 430.0, |ui| {
-                    let fg = ui.visuals().text_color();
-                    ui.add(icons::tinted(&ic.speed, fg))
-                        .on_hover_text("Speed (realtime factor)");
-                    let changed = gate_ui(ui, self.why(Act::Speed), |ui| {
-                        ui.add(
-                            egui::Slider::new(&mut self.sim.speed, 0.05..=20.0).logarithmic(true),
-                        )
-                        .changed()
-                    });
-                    if changed.inner {
-                        self.send(ClientMsg::SetSpeed(self.sim.speed));
-                    }
-                    // One speed display: requested realtime factor + the best
-                    // this machine has reached (peak steps/s → realtime).
-                    let max_x = self.sim.speed_peak * self.sim.dt_ms / 1000.0;
-                    ui.label(if max_x > 0.05 {
-                        format!("x{:.1} realtime (max x{:.0})", self.sim.speed, max_x)
+                // Stage 22: the top bar keeps only menus + file name +
+                // status — every tool/run/view control lives in the
+                // fixed left dock now.
+                let name = self
+                    .net_path
+                    .as_deref()
+                    .and_then(|p| std::path::Path::new(p).file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "(new net)".into());
+                ui.label(
+                    egui::RichText::new(if self.dirty() {
+                        format!("{name} *")
                     } else {
-                        format!("x{:.1} realtime", self.sim.speed)
-                    });
-                });
-                ui.separator();
-                toolbar_group(ui, 120.0, |ui| {
-                    let backend_icon = match self.sim.backend {
-                        proto::Backend::Cuda => &ic.backend_gpu,
-                        proto::Backend::Cpu => &ic.backend_cpu,
-                    };
-                    ui.add(icons::tinted(backend_icon, ui.visuals().text_color()))
-                        .on_hover_text("Backend");
-                    gate_ui(ui, self.why(Act::Backend), |ui| {
-                        egui::ComboBox::from_id_salt("backend")
-                            .selected_text(match self.sim.backend {
-                                proto::Backend::Cuda => "cuda",
-                                proto::Backend::Cpu => "cpu",
-                            })
-                            .show_ui(ui, |ui| {
-                                if ui.add(icons::button(&ic.backend_gpu, "cuda")).clicked() {
-                                    self.send(ClientMsg::SetBackend(proto::Backend::Cuda));
-                                }
-                                if ui.add(icons::button(&ic.backend_cpu, "cpu")).clicked() {
-                                    self.send(ClientMsg::SetBackend(proto::Backend::Cpu));
-                                }
-                            });
-                    });
-                });
-                toolbar_group(ui, 140.0, |ui| {
-                    ui.add(icons::tinted(&ic.timestep, ui.visuals().text_color()))
-                        .on_hover_text("Time step dt");
-                    let changed = gate_ui(ui, self.why(Act::Dt), |ui| {
-                        ui.add(
-                            egui::DragValue::new(&mut self.sim.dt_ms)
-                                .range(0.01..=1.0)
-                                .speed(0.01)
-                                .suffix(" ms"),
-                        )
-                        .changed()
+                        name
                     })
-                    .inner;
-                    if changed {
-                        self.send(ClientMsg::SetDtMs(self.sim.dt_ms));
-                    }
-                });
-                toolbar_group(ui, 160.0, |ui| {
-                    ui.add(icons::tinted(&ic.noise, ui.visuals().text_color()))
-                        .on_hover_text("Background noise rate");
-                    let changed = gate_ui(ui, self.why(Act::Noise), |ui| {
-                        ui.add(
-                            egui::DragValue::new(&mut self.sim.noise_hz)
-                                .range(0.0..=5000.0)
-                                .speed(1.0)
-                                .suffix(" Hz"),
-                        )
-                        .changed()
-                    })
-                    .inner;
-                    if changed {
-                        self.send(ClientMsg::SetNoise {
-                            hz: self.sim.noise_hz,
-                            kick: self.sim.noise_kick,
-                        });
-                    }
-                });
-            });
-            ui.horizontal_wrapped(|ui| {
-                // Same wrapping rule as row 1: groups move whole.
-                let why_edit = self.why(Act::Edit);
-                toolbar_group(ui, 380.0, |ui| {
-                    // The selected marker follows eff_mode — during a
-                    // run edits collapse to Navigate, so that's what the
-                    // UI shows. The stored self.mode is only written by
-                    // an enabled click, so pausing restores it.
-                    let mut shown = self.eff_mode();
-                    for (m, t, name) in [
-                        (Mode::Navigate, &ic.navigate, "Navigate"),
-                        (Mode::Insert, &ic.insert, "Insert"),
-                        (Mode::Connect, &ic.connect, "Connect"),
-                        (Mode::Move, &ic.mv, "Move"),
-                    ] {
-                        let why = if m == Mode::Navigate { None } else { why_edit };
-                        let mut r = gate(ui, why, icons::selectable(shown == m, t, name));
-                        if r.clicked() && shown != m {
-                            shown = m;
-                            r.mark_changed();
-                        }
-                    }
-                    if shown != self.mode {
-                        self.mode = shown;
-                    }
-                });
-                ui.separator();
-                toolbar_group(ui, 240.0, |ui| {
-                    ui.label("plane");
-                    let p = &mut self.plane;
-                    icons::selectable_value(ui, p, Plane::XZ, &ic.plane_xz, "x-z");
-                    icons::selectable_value(ui, p, Plane::XY, &ic.plane_xy, "x-y");
-                    icons::selectable_value(ui, p, Plane::YZ, &ic.plane_yz, "y-z");
-                });
-                ui.separator();
-                toolbar_group(ui, 340.0, |ui| {
-                    icons::toggle(ui, &mut self.show_synapses, &ic.synapses, "synapses");
-                    icons::toggle(ui, &mut self.show_input_links, &ic.connect, "input links");
-                    icons::toggle(ui, &mut self.show_grid, &ic.grid, "grid");
-                    icons::toggle(ui, &mut self.show_dots, &ic.raster, "spike dots");
-                });
-                // Grid-group render mode: the plane LOD keeps big grids
-                // interactive; cubes stay available for editing up close.
-                toolbar_group(ui, 150.0, |ui| {
-                    let view_icon = match self.grid_view {
-                        crate::plane::GridView::Auto => &ic.view_auto,
-                        crate::plane::GridView::Cubes => &ic.view_cubes,
-                        crate::plane::GridView::Planes => &ic.view_planes,
-                    };
-                    ui.add(icons::tinted(view_icon, ui.visuals().text_color()))
-                        .on_hover_text("Grid view");
-                    egui::ComboBox::from_id_salt("grid_view")
-                        .selected_text(match self.grid_view {
-                            crate::plane::GridView::Auto => "auto",
-                            crate::plane::GridView::Cubes => "cubes",
-                            crate::plane::GridView::Planes => "planes",
-                        })
-                        .show_ui(ui, |ui| {
-                            use crate::plane::GridView;
-                            let g = &mut self.grid_view;
-                            icons::selectable_value(ui, g, GridView::Auto, &ic.view_auto, "auto");
-                            icons::selectable_value(
-                                ui,
-                                g,
-                                GridView::Cubes,
-                                &ic.view_cubes,
-                                "cubes",
-                            );
-                            icons::selectable_value(
-                                ui,
-                                g,
-                                GridView::Planes,
-                                &ic.view_planes,
-                                "planes",
-                            );
-                        });
-                });
-                if ui
-                    .add(icons::icon_button(&ic.frame))
-                    .on_hover_text("Frame network (F)")
-                    .clicked()
-                {
-                    self.frame_all();
-                }
+                    .strong(),
+                );
                 ui.separator();
                 // U1: while the status line still holds the latest
                 // error, draw it in warning colour.
@@ -721,6 +528,9 @@ impl EditorApp {
 /// see the group's real footprint — it moves to the next row whole.
 /// `max_w` must overestimate, never undershoot: overshoot only packs a
 /// little early; undershoot lets content overflow the row edge.
+/// Stage 22: the top bar no longer hosts control groups (they moved to
+/// the left dock); kept for the wrap-behaviour test.
+#[cfg(test)]
 pub(super) fn toolbar_group(
     ui: &mut egui::Ui,
     max_w: f32,

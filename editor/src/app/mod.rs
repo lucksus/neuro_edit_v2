@@ -23,6 +23,7 @@ mod jobs;
 mod layout;
 #[cfg(not(target_arch = "wasm32"))]
 mod login;
+mod panel;
 mod plots;
 mod script;
 mod state;
@@ -482,7 +483,6 @@ impl Default for SimControls {
 
 /// Which floating windows are open — the runtime mirror of `WindowVis`
 /// (the persisted subset) plus keys overlay, manual page and files.
-#[derive(Default)]
 pub struct Windows {
     pub console: bool,
     pub plots: bool,
@@ -496,6 +496,26 @@ pub struct Windows {
     pub manual_page: usize,
     /// Files window (per-user space when remote, app-data dir locally).
     pub files: bool,
+    /// Stage 22: the fixed left Tools/Run/View dock is expanded
+    /// (off = slim rail).
+    pub left_panel: bool,
+}
+
+impl Default for Windows {
+    fn default() -> Self {
+        Self {
+            console: false,
+            plots: false,
+            inspector: false,
+            script: false,
+            inputs: false,
+            keys: false,
+            manual: false,
+            manual_page: 0,
+            files: false,
+            left_panel: true,
+        }
+    }
 }
 
 /// Persisted UI state (recent files + window visibility) across sessions.
@@ -521,6 +541,13 @@ pub struct WindowVis {
     pub inputs: bool,
     #[serde(default)]
     pub files: bool,
+    /// Stage 22: the fixed left dock is expanded.
+    #[serde(default = "default_true")]
+    pub left_panel: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for WindowVis {
@@ -532,6 +559,7 @@ impl Default for WindowVis {
             script: false,
             inputs: false,
             files: false,
+            left_panel: true,
         }
     }
 }
@@ -586,6 +614,7 @@ impl EditorApp {
                 script: wins.script,
                 inputs: wins.inputs,
                 files: wins.files,
+                left_panel: wins.left_panel,
                 ..Default::default()
             },
             files: {
@@ -676,6 +705,7 @@ impl eframe::App for EditorApp {
                 script: self.win.script,
                 inputs: self.win.inputs,
                 files: self.win.files,
+                left_panel: self.win.left_panel,
             },
             token: self.login.saved_token.clone(),
         };
@@ -751,6 +781,9 @@ impl eframe::App for EditorApp {
         self.status_bar(ctx);
         self.hints_bar(ctx);
         self.disconnect_banner(ctx);
+        // The fixed left dock carves its strip off the usable rect before
+        // any floating window is laid out, so windows can never cover it.
+        self.left_panel(ctx);
         self.inspector(ctx);
         self.console(ctx);
         self.script_window(ctx);

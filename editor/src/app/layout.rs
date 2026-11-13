@@ -180,7 +180,6 @@ pub(super) fn secure_storage_file() {}
 mod tests {
     use super::*;
     use crate::app::EditorApp;
-    use crate::simctl::SimCtl;
 
     #[test]
     fn window_clamp_keeps_rect_inside_usable() {
