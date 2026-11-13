@@ -95,6 +95,20 @@ pub trait NeuronModel: Sync {
     /// The same step as CUDA C. Sees `p[k]`, `x[k]`, `I`, `dt` in scope;
     /// sets `spiked` (bool) instead of returning it.
     fn cuda_step(&self) -> &'static str;
+    /// Background-kick gain: `noise_kick_mv` is mV of instantaneous
+    /// depolarisation (state.rs), delivered as a one-step current pulse
+    /// of `kick/dt` input units. Its Δv is `kick · K` where K is this
+    /// model's input→v̇ gain — so the applied scale is 1/K.
+    /// izh's v̇ takes `+ I` (K = 1 → 1.0); AdEx takes `+ I/C`
+    /// (K = 1/C → C = p[0]).
+    fn noise_gain(&self, _p: &[f32]) -> f32 {
+        1.0
+    }
+    /// `noise_gain` as CUDA C — sees `p[k]` in scope. Spliced per model
+    /// case next to `cuda_step` (`I += nzk * (…)`).
+    fn cuda_noise_gain(&self) -> &'static str {
+        "1.f"
+    }
 }
 
 /// Every model the sim can run, in registry order. A file names a model

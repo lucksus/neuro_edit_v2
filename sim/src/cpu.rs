@@ -235,12 +235,14 @@ impl CpuSim {
                 let k = self.stim_map.input_idx[j] as usize;
                 input += self.stim_map.weight[j] * self.stimulus.value(k, t);
             }
-            if p_kick > 0.0 && noise_fires(i as u32, t, self.cfg.seed, p_kick) {
-                input += kick;
-            }
             // the model step: p row + x row straight out of the flat
             // blocks, dispatched per-neuron through the model table
             let model = self.params.models[self.params.model[i] as usize];
+            if p_kick > 0.0 && noise_fires(i as u32, t, self.cfg.seed, p_kick) {
+                // `kick` is a one-step pulse of kick_mv/dt input units;
+                // the model's gain makes it `noise_kick_mv` mV of Δv.
+                input += kick * model.noise_gain(&self.params.p[i * np..i * np + np]);
+            }
             let sp = model.step(
                 &self.params.p[i * np..i * np + np],
                 &mut self.x[i * nx..i * nx + nx],

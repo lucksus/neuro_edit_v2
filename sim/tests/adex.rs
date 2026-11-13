@@ -171,6 +171,77 @@ fn adex_scene_watch_series_change_over_time() {
     );
 }
 
+/// Stage 24d root cause: `noise_kick_mv` is mV of depolarisation — a
+/// one-step current pulse scaled by the model's `noise_gain` (AdEx: C,
+/// since its input is pA into `dv/dt = (… + I)/C`). Before the gain,
+/// the example's 200 Hz × 700 setting gave ~2.5 mV per kick (700/281)
+/// and the liquid died in seconds. One AdEx neuron on noise alone must
+/// fire at the example's setting, and firing must rise with the noise
+/// rate — on both backends.
+fn lone_adex_net() -> Network {
+    let mut net = Network::new();
+    net.add_neuron([0.0; 3], NeuronKind::Excitatory);
+    let ty = net.upsert_type(NeuronType {
+        name: "ax".into(),
+        model: "adex".into(),
+        params: adex::TONIC.to_vec(),
+        kind: NeuronKind::Excitatory,
+        color: None,
+    });
+    net.set_type(&[0], ty);
+    net
+}
+
+/// Mean Hz of the lone cell over `ms` of Poisson kicks at `rate_hz`.
+fn lone_rate(backend: BackendKind, rate_hz: f32, kick_mv: f32, ms: f32) -> f64 {
+    let net = lone_adex_net();
+    let mut sim = Sim::with_params(
+        &net,
+        SimConfig {
+            noise_rate_hz: rate_hz,
+            noise_kick_mv: kick_mv,
+            seed: 5,
+            ..Default::default()
+        },
+        backend,
+        sim::state::NeuronParams::from_network(&net).unwrap(),
+    )
+    .unwrap();
+    sim.run_ms(ms).unwrap();
+    sim.spikes_total() as f64 / (ms as f64 / 1000.0)
+}
+
+fn assert_noise_drives_adex(backend: BackendKind) {
+    // The example tail's setting (60 Hz x 14 mV) must fire the cell.
+    let at_example = lone_rate(backend, 60.0, 14.0, 20_000.0);
+    assert!(
+        at_example > 0.5,
+        "{backend:?}: lone AdEx is quiet at the example's noise setting ({at_example} Hz)"
+    );
+    // and the firing rate must rise with the noise rate
+    let lo = lone_rate(backend, 30.0, 18.0, 20_000.0);
+    let hi = lone_rate(backend, 120.0, 18.0, 20_000.0);
+    assert!(
+        hi > lo * 1.5,
+        "{backend:?}: rate must rise with noise rate ({lo} -> {hi} Hz)"
+    );
+}
+
+#[test]
+fn adex_noise_drives_lone_neuron_cpu() {
+    assert_noise_drives_adex(BackendKind::Cpu);
+}
+
+#[test]
+#[cfg(feature = "cuda")]
+fn adex_noise_drives_lone_neuron_cuda() {
+    if !sim::cuda_available() {
+        eprintln!("no GPU, skipping");
+        return;
+    }
+    assert_noise_drives_adex(BackendKind::Cuda);
+}
+
 /// Same mixed net on CPU alone: the registered model must reach the
 /// sim through `from_network` and every adex neuron must fire and
 /// reset (counts ≥ 2) — keeps the acceptance green on GPU-less hosts.

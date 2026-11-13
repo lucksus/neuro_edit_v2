@@ -14,8 +14,11 @@ pub struct SimConfig {
     pub readout_tau_ms: f32,
     /// Background Poisson kick rate per neuron, Hz (0 = quiet).
     pub noise_rate_hz: f32,
-    /// Kick amplitude: the current is `kick/dt` for one step, i.e. about
-    /// `kick` mV of instantaneous depolarisation (the bench used 20).
+    /// Kick amplitude: mV of instantaneous depolarisation per Poisson
+    /// kick (the bench used 20). Delivered as a one-step current pulse
+    /// of `kick/dt` input units times the model's `noise_gain` — izh's
+    /// input IS mV/ms (gain 1), AdEx's is pA (gain C) — so the same
+    /// value means the same Δv for every model.
     pub noise_kick_mv: f32,
     /// Seed for the counter-based per-step noise.
     pub seed: u64,

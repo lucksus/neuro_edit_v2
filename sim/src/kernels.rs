@@ -18,14 +18,22 @@ const STEP_MARK: &str = "//@MODEL_STEP@";
 /// fixed-point delay ring (bitwise-reproducible accumulation).
 pub fn kernel_source(models: &[&dyn NeuronModel], int_weights: bool) -> String {
     let cases = if models.len() == 1 {
-        models[0].cuda_step().to_string()
+        format!(
+            "I += nzk * ({});\n{}",
+            models[0].cuda_noise_gain(),
+            models[0].cuda_step()
+        )
     } else {
         let mut s = String::new();
         for (k, m) in models.iter().enumerate() {
             if k > 0 {
                 s.push_str(" else ");
             }
-            s.push_str(&format!("if(mi == {k}){{\n{}\n}}", m.cuda_step()));
+            s.push_str(&format!(
+                "if(mi == {k}){{\nI += nzk * ({});\n{}\n}}",
+                m.cuda_noise_gain(),
+                m.cuda_step()
+            ));
         }
         s
     };
@@ -114,9 +122,12 @@ extern "C" __global__ void neuron_kernel(
       I += stim_w[j] * stim_row[stim_input[j]];
     }
   }
-  // background Poisson kicks
-  if(pkick > 0.f && (float)noise_hash((u32)i, t, seed) * 2.3283064e-10f < pkick)
-    I += kick;
+  // background Poisson kicks: nzk is the raw one-step pulse (kick/dt
+  // input units); each model case scales it so a kick of `kick` is
+  // `noise_kick_mv` mV of depolarisation (AdEx: *C, izh: *1)
+  float nzk = (pkick > 0.f
+      && (float)noise_hash((u32)i, t, seed) * 2.3283064e-10f < pkick)
+    ? kick : 0.f;
 
   // the model step sees p[k], x[k], I, dt and sets `spiked`; x/p are
   // this thread's rows of the flat blocks

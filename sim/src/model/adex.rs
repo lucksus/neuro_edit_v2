@@ -173,4 +173,14 @@ impl NeuronModel for AdEx {
          x[1] += dt * (p[5]*(x[0] - p[2]) - x[1]) / p[6];\n\
          spiked = x[0] >= p[9];"
     }
+
+    /// AdEx input divides by C: a one-step pulse of `kick/dt` pA moves v
+    /// by `kick/C` mV, so the mV contract needs the pulse scaled by C.
+    fn noise_gain(&self, p: &[f32]) -> f32 {
+        p[0]
+    }
+
+    fn cuda_noise_gain(&self) -> &'static str {
+        "p[0]"
+    }
 }
