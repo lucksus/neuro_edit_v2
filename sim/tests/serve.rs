@@ -1322,3 +1322,211 @@ fn backend_switch_keeps_script_drive() {
     rig.until(|m| matches!(m, ServerMsg::Activity(a) if a.spikes_total > 0));
     rig.stop();
 }
+
+// ---------------------------------------------------------------------------
+// Stage 19: the editor's group ops used to arrive as `net.foo(...)` Rhai
+// strings on `ClientMsg::Eval`; they are typed `NetEdit`s now. Each test
+// sends the edit over the wire and verifies the network actually changed —
+// reading weights/tau back via a CopySubnet JSON round-trip where the
+// delta itself cannot carry the value.
+
+/// Send an edit, wait for its GeoDelta, return it (fails on Error).
+fn edit_delta(rig: &Rig, base: u64, edit: NetEdit) -> Box<proto::GeoDelta> {
+    rig.send(ClientMsg::Edit { base, edit });
+    let evs = rig.until(|m| {
+        matches!(m, ServerMsg::GeoDelta(_)) || matches!(m, ServerMsg::Error(_))
+    });
+    evs.iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::GeoDelta(d) => Some(d.clone()),
+            ServerMsg::Error(s) => panic!("edit refused: {s}"),
+            _ => None,
+        })
+        .expect("a GeoDelta for the accepted edit")
+}
+
+/// Copy `ids` back out as a subnet and parse the JSON.
+fn subnet_json(rig: &Rig, ids: &[u32]) -> serde_json::Value {
+    rig.send(ClientMsg::CopySubnet {
+        ids: ids.to_vec(),
+    });
+    let evs = rig.until(|m| matches!(m, ServerMsg::Clipboard(_)));
+    let txt = evs
+        .iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::Clipboard(t) => Some(t.clone()),
+            _ => None,
+        })
+        .expect("a Clipboard reply");
+    serde_json::from_str(&txt).expect("subnet json parses")
+}
+
+fn subscribe_base(rig: &Rig) -> u64 {
+    rig.send(ClientMsg::Subscribe);
+    let evs = rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+    first_geo(&evs).version
+}
+
+#[test]
+fn edit_create_connections_wires_group() {
+    let mut net = Network::new();
+    for i in 0..6 {
+        net.add_neuron([i as f32, 0.0, 0.0], net_format::NeuronKind::Excitatory);
+    }
+    net.add_group("g");
+    net.groups[0].members = (0..6).collect();
+    let rig = start(net, None);
+    let base = subscribe_base(&rig);
+
+    // lambda >> every distance makes the probability saturates at the
+    // scaling — 1.0 means every ordered pair connects, deterministically.
+    let d = edit_delta(
+        &rig,
+        base,
+        NetEdit::CreateConnections {
+            group: "g".into(),
+            scaling: 1.0,
+            lambda: 1e9,
+            w: 1.0,
+        },
+    );
+    assert_eq!(d.syn_added.len(), 6 * 5, "all ordered pairs connected");
+    assert_eq!(d.disp_changed.len(), 6);
+    assert!(d.version > base);
+    rig.stop();
+}
+
+#[test]
+fn edit_set_synapse_weights_changes_net() {
+    let mut net = Network::new();
+    for i in 0..3 {
+        net.add_neuron([i as f32, 0.0, 0.0], net_format::NeuronKind::Excitatory);
+    }
+    net.connect(0, 1, 1.0);
+    net.connect(0, 2, 1.0);
+    net.add_group("g");
+    net.groups[0].members = vec![1, 2]; // targets of both synapses
+    let rig = start(net, None);
+    let base = subscribe_base(&rig);
+
+    // sd 0 ⇒ every draw is exactly the mean.
+    let d = edit_delta(
+        &rig,
+        base,
+        NetEdit::SetSynapseWeights {
+            group: "g".into(),
+            mean: -5.0,
+            sd: 0.0,
+        },
+    );
+    assert!(d.version > base);
+    let sub = subnet_json(&rig, &[0, 1, 2]);
+    let ws: Vec<f64> = sub["synapses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["w"].as_f64().unwrap())
+        .collect();
+    assert_eq!(ws, vec![-5.0, -5.0], "weights did not reach the net: {ws:?}");
+    rig.stop();
+}
+
+#[test]
+fn edit_set_syn_tau_dist_sets_tau() {
+    let mut net = Network::new();
+    for i in 0..3 {
+        net.add_neuron([i as f32, 0.0, 0.0], net_format::NeuronKind::Excitatory);
+    }
+    net.connect(0, 1, 1.0);
+    net.connect(0, 2, 1.0);
+    net.connect(1, 2, 1.0); // untouched: src not in "a"
+    net.add_group("a");
+    net.groups[0].members = vec![0];
+    net.add_group("b");
+    net.groups[1].members = vec![1, 2];
+    let rig = start(net, None);
+    let base = subscribe_base(&rig);
+
+    let d = edit_delta(
+        &rig,
+        base,
+        NetEdit::SetSynTauDist {
+            src: "a".into(),
+            dst: "b".into(),
+            mean: 33.0,
+            sd: 0.0,
+        },
+    );
+    assert!(d.version > base);
+    let sub = subnet_json(&rig, &[0, 1, 2]);
+    let taus: Vec<f64> = sub["synapses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["tau_ms"].as_f64().unwrap())
+        .collect();
+    assert_eq!(taus, vec![33.0, 33.0, 0.0], "tau did not land: {taus:?}");
+    rig.stop();
+}
+
+#[test]
+fn edit_set_exc_inh_relabels_group() {
+    let mut net = Network::new();
+    for i in 0..8 {
+        net.add_neuron([i as f32, 0.0, 0.0], net_format::NeuronKind::Excitatory);
+    }
+    net.add_group("g");
+    net.groups[0].members = (0..8).collect();
+    let rig = start(net, None);
+    let base = subscribe_base(&rig);
+
+    // frac 1.0 ⇒ every member inhibitory, deterministically.
+    let d = edit_delta(
+        &rig,
+        base,
+        NetEdit::SetExcInh {
+            group: "g".into(),
+            frac: 1.0,
+        },
+    );
+    assert_eq!(d.neurons_changed.len(), 8);
+    assert!(
+        d.neurons_changed.iter().all(|r| r.kind == 1),
+        "all members must report inhibitory kind"
+    );
+    rig.stop();
+}
+
+#[test]
+fn edit_script_add_stores_and_replaces_script() {
+    let rig = start(Network::new(), None);
+    let base = subscribe_base(&rig);
+
+    let d = edit_delta(
+        &rig,
+        base,
+        NetEdit::ScriptAdd {
+            name: "drive".into(),
+            src: "sim.run(10)".into(),
+        },
+    );
+    assert_eq!(
+        d.scripts.as_deref(),
+        Some(&[("drive".to_string(), "sim.run(10)".to_string())][..])
+    );
+
+    // same name replaces in place — no duplicate entry.
+    let d = edit_delta(
+        &rig,
+        d.version,
+        NetEdit::ScriptAdd {
+            name: "drive".into(),
+            src: "sim.run(20)".into(),
+        },
+    );
+    assert_eq!(
+        d.scripts.as_deref(),
+        Some(&[("drive".to_string(), "sim.run(20)".to_string())][..])
+    );
+    rig.stop();
+}

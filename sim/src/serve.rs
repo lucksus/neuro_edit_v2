@@ -525,7 +525,7 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                             let applied = {
                                 let mut n = env.net.borrow_mut();
                                 let dt = env.cfg.borrow().dt_ms;
-                                apply_edit(&mut n, dt, &edit)
+                                apply_edit(&mut n, dt, &mut env.rng.borrow_mut(), &edit)
                             };
                             match applied {
                                 Ok(applied) => {
@@ -1506,7 +1506,12 @@ enum Applied {
 
 /// Apply a `NetEdit` to `net` and describe what changed as a delta.
 /// `dt` converts stored ms delays to sim steps.
-fn apply_edit(net: &mut Network, dt: f32, e: &NetEdit) -> Result<Applied, String> {
+fn apply_edit(
+    net: &mut Network,
+    dt: f32,
+    rng: &mut net_format::Rng,
+    e: &NetEdit,
+) -> Result<Applied, String> {
     let mut d = GeoDelta::default();
     let steps = |ms: f32| (ms / dt.max(1e-6)).round().max(1.0) as u16;
     let row = |net: &Network, id: u32| {
@@ -1806,6 +1811,58 @@ fn apply_edit(net: &mut Network, dt: f32, e: &NetEdit) -> Result<Applied, String
             net.invalidate_grids();
             grid_delta_membership(net, &grid_before, &mut d);
         }
+        NetEdit::CreateConnections {
+            group,
+            scaling,
+            lambda,
+            w,
+        } => {
+            let members = group_members(net, group)?;
+            let s0 = net.synapses.len();
+            net_format::builders::create_connections(net, group, *scaling, *lambda, *w, rng);
+            for s in &net.synapses[s0..] {
+                d.syn_added.push(SynRow {
+                    src: s.src,
+                    tgt: s.tgt,
+                    delay_steps: steps(s.delay_ms),
+                });
+            }
+            for &m in &members {
+                d.disp_changed.push((m, disp_list(net, m, dt)));
+            }
+        }
+        NetEdit::SetSynapseWeights { group, mean, sd } => {
+            group_members(net, group)?;
+            net_format::builders::set_synapse_weights(net, group, *mean, *sd, rng);
+            // Weights are sim-side state — no wire field carries them;
+            // the otherwise-empty delta still bumps the client's version.
+        }
+        NetEdit::SetSynTauDist {
+            src,
+            dst,
+            mean,
+            sd,
+        } => {
+            group_members(net, src)?;
+            group_members(net, dst)?;
+            net_format::builders::set_synapse_tau_dist(net, src, dst, *mean, *sd, rng);
+            // tau_ms is sim-side too — version-bump delta only.
+        }
+        NetEdit::SetExcInh { group, frac } => {
+            let members = group_members(net, group)?;
+            net_format::builders::set_exc_inh(net, group, *frac, rng);
+            for m in members {
+                d.neurons_changed.push(row(net, m));
+            }
+        }
+        NetEdit::ScriptAdd { name, src } => {
+            if let Some(s) = net.scripts.iter_mut().find(|(nm, _)| nm == name) {
+                s.1 = src.clone();
+            } else {
+                net.scripts.push((name.clone(), src.clone()));
+            }
+            d.scripts = Some(net.scripts.clone());
+        }
     }
     Ok(Applied::Delta(d))
 }
@@ -1820,6 +1877,13 @@ fn inputs_proto(net: &Network) -> Vec<Input> {
             targets: i.targets.iter().map(|t| t.0).collect(),
         })
         .collect()
+}
+
+/// Group members, or the same refusal the Rhai `group_or_err` produced.
+fn group_members(net: &Network, name: &str) -> Result<Vec<u32>, String> {
+    net.group(name)
+        .map(|g| g.members.clone())
+        .ok_or_else(|| format!("unknown group \"{name}\""))
 }
 
 fn check_ids(net: &Network, ids: &[u32]) -> Result<(), String> {
@@ -1928,10 +1992,12 @@ mod tests {
         let mut net = big_net(100_000, 0);
         net.add_group("g");
         net.groups[0].members = (0..50_000).collect();
+        let mut rng = net_format::Rng::new(0);
         let t = Instant::now();
         apply_edit(
             &mut net,
             0.1,
+            &mut rng,
             &NetEdit::AddToGroup {
                 name: "g".into(),
                 ids: ids.clone(),
@@ -1968,8 +2034,9 @@ mod tests {
         let old_delays: Vec<f32> = net.synapses.iter().map(|s| s.delay_ms).collect();
 
         let mut net = big_net(n, syn);
+        let mut rng = net_format::Rng::new(0);
         let t = Instant::now();
-        apply_edit(&mut net, 0.1, &NetEdit::MoveNeurons { items }).unwrap();
+        apply_edit(&mut net, 0.1, &mut rng, &NetEdit::MoveNeurons { items }).unwrap();
         let new = t.elapsed();
         eprintln!("Q13 MoveNeurons 5k of 20k/400k: old {old:?} new {new:?}");
         assert_eq!(

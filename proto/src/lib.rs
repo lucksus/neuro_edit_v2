@@ -295,6 +295,42 @@ pub enum NetEdit {
         target: u32,
         w: f32,
     },
+    /// `net.create_connections(group, scaling, lambda, w)` — seeded
+    /// probabilistic wiring inside one group (the dialog no longer
+    /// evals a Rhai string for this).
+    CreateConnections {
+        group: String,
+        scaling: f64,
+        lambda: f64,
+        w: f32,
+    },
+    /// `net.set_synapse_weights(group, mean, sd)` — gaussian weights on
+    /// every synapse whose target is a group member.
+    SetSynapseWeights {
+        group: String,
+        mean: f64,
+        sd: f64,
+    },
+    /// `net.set_syn_tau_dist(src, dst, mean, sd)` — gaussian per-synapse
+    /// current-trace tau on src→dst group edges (0 = merged global tau).
+    SetSynTauDist {
+        src: String,
+        dst: String,
+        mean: f64,
+        sd: f64,
+    },
+    /// `net.set_exc_inh(group, frac)` — seeded excitatory/inhibitory
+    /// kind mix over the group's members.
+    SetExcInh {
+        group: String,
+        frac: f64,
+    },
+    /// `net.script_add(name, code)` — attach or replace a script stored
+    /// in the net file ("Save to net").
+    ScriptAdd {
+        name: String,
+        src: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
