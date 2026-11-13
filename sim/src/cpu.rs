@@ -14,6 +14,7 @@
 //! The original applied the decay after using the current in the same update;
 //! a freshly arrived spike therefore contributes its full weight immediately.
 
+use crate::model::{self, NeuronModel};
 use crate::state::{noise_fires, ring_depth, NeuronParams, SimConfig};
 use net_format::{Network, SynCsr};
 
@@ -229,17 +230,21 @@ impl CpuSim {
             if p_kick > 0.0 && noise_fires(i as u32, t, self.cfg.seed, p_kick) {
                 input += kick;
             }
-            let mut v = self.v[i];
-            let mut u = self.u[i];
-            if v >= 30.0 {
-                v = self.params.c[i];
-                u += self.params.d[i];
-            }
-            v += dt * (0.04 * v * v + 5.0 * v + 140.0 - u + input);
-            u += dt * self.params.a[i] * (self.params.b[i] * v - u);
-            self.v[i] = v;
-            self.u[i] = u;
-            if v >= 30.0 {
+            // the model step — all neurons are izh today; the generic
+            // p/x rows land with the model table. The local arrays alias
+            // the model's param/state slots so the same step text lives
+            // in one file next to the CUDA one.
+            let mut x = [self.v[i], self.u[i]];
+            let p = [
+                self.params.a[i],
+                self.params.b[i],
+                self.params.c[i],
+                self.params.d[i],
+            ];
+            let sp = model::izh::Izhikevich.step(&p, &mut x, input, dt);
+            self.v[i] = x[0];
+            self.u[i] = x[1];
+            if sp {
                 spiked.push(i as u32);
                 // original sets the readout trace to full on spike, no decay
                 self.trace[i] = 1.0;
@@ -485,5 +490,108 @@ impl CpuSim {
 
     pub fn set_external(&mut self, neuron: usize, amps: f32) {
         self.ext[neuron] = amps;
+    }
+}
+
+impl crate::Backend for CpuSim {
+    fn kind(&self) -> crate::BackendKind {
+        crate::BackendKind::Cpu
+    }
+    fn n(&self) -> usize {
+        self.n
+    }
+    fn step_count(&self) -> u64 {
+        self.t
+    }
+    fn time_ms(&self) -> f64 {
+        self.time_ms()
+    }
+    fn run_steps(&mut self, n: usize) -> anyhow::Result<()> {
+        self.run_steps(n)
+    }
+    fn run_ms(&mut self, ms: f32) -> anyhow::Result<()> {
+        self.run_ms(ms)
+    }
+    fn reset_state(&mut self) {
+        self.reset_state()
+    }
+    fn trace(&self) -> Vec<f32> {
+        self.trace.clone()
+    }
+    fn state(&self, slot: usize) -> Vec<f32> {
+        match slot {
+            0 => self.v.clone(),
+            1 => self.u.clone(),
+            _ => Vec::new(),
+        }
+    }
+    fn last_spikes(&self) -> Vec<u32> {
+        let Some(row) = self.spike_row(0) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (wi, &w) in row.iter().enumerate() {
+            for b in 0..64 {
+                if w & (1 << b) != 0 {
+                    let i = wi * 64 + b;
+                    if i < self.n {
+                        out.push(i as u32);
+                    }
+                }
+            }
+        }
+        out
+    }
+    fn spike_counts(&self, rows: usize) -> Result<Vec<u32>, String> {
+        self.spike_counts(rows)
+    }
+    fn spike_row(&self, back: usize) -> Option<Vec<u64>> {
+        self.spike_row(back).map(|r| r.to_vec())
+    }
+    fn spikes_total(&self) -> u64 {
+        self.spikes_total
+    }
+    fn mean_rate_hz(&self) -> f64 {
+        self.mean_rate_hz()
+    }
+    fn set_input_constant(&mut self, input: usize, value: f32) {
+        self.stimulus.constants[input] = value;
+    }
+    fn input_values(&self) -> Vec<f32> {
+        self.stimulus.constants.clone()
+    }
+    fn stimulus(&self) -> crate::stim::Stimulus {
+        self.stimulus.clone()
+    }
+    fn external(&self) -> Vec<f32> {
+        self.ext.clone()
+    }
+    fn play_input(&mut self, input: usize, series: Vec<f32>) {
+        self.stimulus.play(input, self.t, series);
+    }
+    fn set_v_watch(&mut self, ids: &[u32]) {
+        self.set_v_watch(ids)
+    }
+    fn drain_watch(&mut self) -> anyhow::Result<Vec<Vec<Vec<f32>>>> {
+        Ok(vec![self.drain_v(), self.drain_u()])
+    }
+    fn set_grid_watches(&mut self, groups: &[Vec<u32>]) {
+        self.set_grid_watches(groups)
+    }
+    fn grid_traces(&mut self, tau_ms: f32) -> anyhow::Result<Vec<Vec<f32>>> {
+        Ok(CpuSim::grid_traces(self, tau_ms))
+    }
+    fn set_external(&mut self, neuron: usize, amps: f32) {
+        if let Some(e) = self.ext.get_mut(neuron) {
+            *e = amps;
+        }
+    }
+    fn set_external_all(&mut self, ext: &[f32]) {
+        let n = self.ext.len().min(ext.len());
+        self.ext[..n].copy_from_slice(&ext[..n]);
+    }
+    fn set_noise(&mut self, rate_hz: f32, kick_mv: f32) {
+        self.cfg.noise_rate_hz = rate_hz;
+        self.cfg.noise_kick_mv = kick_mv;
     }
 }

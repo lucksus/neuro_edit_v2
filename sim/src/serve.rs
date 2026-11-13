@@ -1247,12 +1247,29 @@ fn publish_sim(net: &NetHandle, net_ver: u64, sim: &mut Sim, p: &mut Pub, emit: 
     // recorded since the last publish — the plot gets every step, not one
     // point per chunk.
     sim.set_v_watch(&p.watch);
-    let (hists, uhists) = sim.drain_vu().unwrap_or_default();
+    let states = sim.drain_watch().unwrap_or_default();
+    // protocol mapping: state slot 0 -> watched_v, slot 1 -> watched_u
+    // (izh v/u on every registered model today; the wire fields stay
+    // until the protocol stage).
     let mut watched_v = Vec::new();
     let mut watched_u = Vec::new();
     for (k, &id) in p.watch.iter().enumerate() {
-        watched_v.push((id, hists.get(k).cloned().unwrap_or_default()));
-        watched_u.push((id, uhists.get(k).cloned().unwrap_or_default()));
+        watched_v.push((
+            id,
+            states
+                .first()
+                .and_then(|s| s.get(k))
+                .cloned()
+                .unwrap_or_default(),
+        ));
+        watched_u.push((
+            id,
+            states
+                .get(1)
+                .and_then(|s| s.get(k))
+                .cloned()
+                .unwrap_or_default(),
+        ));
     }
 
     // Grid-plane traces: (re)apply the watch lists after a rebuild, then

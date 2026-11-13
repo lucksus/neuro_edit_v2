@@ -7,6 +7,7 @@
 pub mod bench;
 pub mod cpu;
 pub mod dataset;
+pub mod model;
 pub mod readout;
 pub mod script;
 pub mod serve;
@@ -107,11 +108,81 @@ impl SimLimits {
     }
 }
 
-/// Facade that dispatches to the chosen backend.
-pub enum Sim {
-    Cpu(Box<cpu::CpuSim>),
-    #[cfg(feature = "cuda")]
-    Cuda(Box<cuda::CudaSim>),
+/// The simulator implementations behind `Sim` — cpu (reference) and
+/// cuda (cudarc/NVRTC). Every call `Sim` makes on a backend goes through
+/// this trait; a third backend is one new impl, not 20 edits to `Sim`.
+///
+/// State is addressed by slot: slot 0 is the membrane potential on every
+/// registered model (`NeuronModel::state()[0]`). `Sim::v()` stays as the
+/// slot-0 alias callers already use.
+pub trait Backend {
+    /// Which `BackendKind` built this sim — tests and rebuild logic use
+    /// it where they used to match the `Sim` enum.
+    fn kind(&self) -> BackendKind;
+    fn n(&self) -> usize;
+    fn step_count(&self) -> u64;
+    fn time_ms(&self) -> f64;
+    fn run_steps(&mut self, n: usize) -> anyhow::Result<()>;
+    fn run_ms(&mut self, ms: f32) -> anyhow::Result<()>;
+    /// Reset dynamical state (keeps synapses, stimulus and ext).
+    fn reset_state(&mut self);
+    /// Drain queued device work; a no-op on synchronous backends.
+    fn synchronize(&self) {}
+    /// Approximate device memory, for reporting (0 on CPU).
+    fn dev_mem_bytes(&self) -> usize {
+        0
+    }
+    /// Filtered readout trace (one value per neuron).
+    fn trace(&self) -> Vec<f32>;
+    /// Model state slot column, one value per neuron.
+    fn state(&self, slot: usize) -> Vec<f32>;
+    /// Spikes in the last recorded step (indices). Empty unless spike
+    /// recording is on.
+    fn last_spikes(&self) -> Vec<u32>;
+    /// Per-neuron spike counts over the last `rows` steps. Exact for
+    /// `rows <= record ring depth` and for `rows >= t` (lifetime totals);
+    /// errors for windows in between (the ring already wrapped).
+    fn spike_counts(&self, rows: usize) -> Result<Vec<u32>, String>;
+    /// Spike bitmap for `back` steps ago (u64 words), if recording.
+    fn spike_row(&self, back: usize) -> Option<Vec<u64>>;
+    fn spikes_total(&self) -> u64;
+    /// Mean firing rate over the whole run so far, Hz.
+    fn mean_rate_hz(&self) -> f64;
+    fn set_input_constant(&mut self, input: usize, value: f32);
+    /// Current constant drive per input (same order as `net.inputs`).
+    fn input_values(&self) -> Vec<f32>;
+    /// The full stimulus program — cloned for carryover when the sim is
+    /// rebuilt on another backend/config.
+    fn stimulus(&self) -> crate::stim::Stimulus;
+    /// External currents per neuron (host copy).
+    fn external(&self) -> Vec<f32>;
+    /// Play a per-step series on `input` starting at the current step.
+    fn play_input(&mut self, input: usize, series: Vec<f32>);
+    /// Set watched-neuron ids whose per-step state is recorded (editor
+    /// plots). No-op when unchanged; safe to call every publish.
+    fn set_v_watch(&mut self, ids: &[u32]);
+    /// Drain per-step samples for watched neurons recorded since the last
+    /// drain — `[state slot][watch][samples oldest-first]`. One call so a
+    /// backend reading a shared ring resets the counter once.
+    fn drain_watch(&mut self) -> anyhow::Result<Vec<Vec<Vec<f32>>>>;
+    /// Set the grid-group member lists (texel order) whose spike traces
+    /// the editor's plane view wants.
+    fn set_grid_watches(&mut self, groups: &[Vec<u32>]);
+    /// Materialized spike traces for each watched grid group — one f32
+    /// per texel (member order), `exp(-(t - last_spike) * dt / tau_ms)`.
+    fn grid_traces(&mut self, tau_ms: f32) -> anyhow::Result<Vec<Vec<f32>>>;
+    /// Constant external current on one neuron.
+    fn set_external(&mut self, neuron: usize, amps: f32);
+    /// Set the whole external-current vector at once — the rebuild
+    /// carryover path (`DriveState::apply`).
+    fn set_external_all(&mut self, ext: &[f32]);
+    /// Change the background noise rate on a live sim.
+    fn set_noise(&mut self, rate_hz: f32, kick_mv: f32);
+}
+
+/// Facade over a `Box<dyn Backend>` chosen by `BackendKind`.
+pub struct Sim {
+    inner: Box<dyn Backend>,
 }
 
 /// True when a CUDA device is usable (feature `cuda` + driver + device 0).
@@ -130,286 +201,31 @@ pub fn cuda_available() -> bool {
 
 impl Sim {
     pub fn new(net: &Network, cfg: SimConfig, kind: BackendKind) -> anyhow::Result<Sim> {
-        match kind {
-            BackendKind::Cpu => Ok(Sim::Cpu(Box::new(
-                cpu::CpuSim::new(net, cfg).map_err(anyhow::Error::msg)?,
-            ))),
+        let inner: Box<dyn Backend> = match kind {
+            BackendKind::Cpu => Box::new(cpu::CpuSim::new(net, cfg).map_err(anyhow::Error::msg)?),
             #[cfg(feature = "cuda")]
-            BackendKind::Cuda => Ok(Sim::Cuda(Box::new(cuda::CudaSim::new(net, cfg)?))),
+            BackendKind::Cuda => Box::new(cuda::CudaSim::new(net, cfg)?),
             #[cfg(not(feature = "cuda"))]
             BackendKind::Cuda => anyhow::bail!("sim built without the `cuda` feature"),
-        }
+        };
+        Ok(Sim { inner })
     }
 
-    pub fn n(&self) -> usize {
-        match self {
-            Sim::Cpu(s) => s.n,
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.n,
-        }
-    }
-
-    pub fn time_ms(&self) -> f64 {
-        match self {
-            Sim::Cpu(s) => s.time_ms(),
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.time_ms(),
-        }
-    }
-
-    pub fn step_count(&self) -> u64 {
-        match self {
-            Sim::Cpu(s) => s.t,
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.t,
-        }
-    }
-
-    pub fn run_steps(&mut self, n: usize) -> anyhow::Result<()> {
-        match self {
-            Sim::Cpu(s) => s.run_steps(n),
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.run_steps(n),
-        }
-    }
-
-    pub fn run_ms(&mut self, ms: f32) -> anyhow::Result<()> {
-        match self {
-            Sim::Cpu(s) => s.run_ms(ms),
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.run_ms(ms),
-        }
-    }
-
-    pub fn reset_state(&mut self) {
-        match self {
-            Sim::Cpu(s) => s.reset_state(),
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.reset_state(),
-        }
-    }
-
-    /// Filtered readout trace (one value per neuron).
-    pub fn trace(&self) -> Vec<f32> {
-        match self {
-            Sim::Cpu(s) => s.trace.clone(),
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.trace(),
-        }
-    }
-
-    /// Membrane potentials (one per neuron) — for plots and probes.
+    /// Membrane potentials (one per neuron) — model state slot 0, for
+    /// plots and probes.
     pub fn v(&self) -> Vec<f32> {
-        match self {
-            Sim::Cpu(s) => s.v.clone(),
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.v(),
-        }
+        self.state(0)
     }
+}
 
-    /// Spikes in the last recorded step (indices). CUDA returns an empty vec
-    /// unless spike recording is on.
-    pub fn last_spikes(&self) -> Vec<u32> {
-        match self {
-            Sim::Cpu(s) => {
-                if let Some(row) = s.spike_row(0) {
-                    let mut out = Vec::new();
-                    for (wi, &w) in row.iter().enumerate() {
-                        for b in 0..64 {
-                            if w & (1 << b) != 0 {
-                                let i = wi * 64 + b;
-                                if i < s.n {
-                                    out.push(i as u32);
-                                }
-                            }
-                        }
-                    }
-                    out
-                } else {
-                    Vec::new()
-                }
-            }
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.last_spikes(),
-        }
+impl std::ops::Deref for Sim {
+    type Target = dyn Backend;
+    fn deref(&self) -> &Self::Target {
+        &*self.inner
     }
-
-    /// Per-neuron spike counts over the last `rows` steps. Exact for
-    /// `rows <= record ring depth` and for `rows >= t` (lifetime totals);
-    /// errors for windows in between (the ring already wrapped).
-    pub fn spike_counts(&self, rows: usize) -> Result<Vec<u32>, String> {
-        match self {
-            Sim::Cpu(s) => s.spike_counts(rows),
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.spike_counts(rows),
-        }
-    }
-
-    /// Spike bitmap for `back` steps ago (u64 words), if recording.
-    pub fn spike_row(&self, back: usize) -> Option<Vec<u64>> {
-        match self {
-            Sim::Cpu(s) => s.spike_row(back).map(|r| r.to_vec()),
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.spike_row(back),
-        }
-    }
-
-    pub fn spikes_total(&self) -> u64 {
-        match self {
-            Sim::Cpu(s) => s.spikes_total,
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.spikes_total(),
-        }
-    }
-
-    /// Mean firing rate over the whole run so far, Hz.
-    pub fn mean_rate_hz(&self) -> f64 {
-        match self {
-            Sim::Cpu(s) => s.mean_rate_hz(),
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.mean_rate_hz(),
-        }
-    }
-
-    pub fn set_input_constant(&mut self, input: usize, value: f32) {
-        match self {
-            Sim::Cpu(s) => s.stimulus.constants[input] = value,
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.set_input_constant(input, value),
-        }
-    }
-
-    /// Current constant drive per input (same order as `net.inputs`) —
-    /// what the editor's Inputs panel should display.
-    pub fn input_values(&self) -> Vec<f32> {
-        match self {
-            Sim::Cpu(s) => s.stimulus.constants.clone(),
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.stimulus.constants.clone(),
-        }
-    }
-
-    /// The full stimulus program (constants + series + playheads) —
-    /// cloned for carryover when the sim is rebuilt on another
-    /// backend/config.
-    pub fn stimulus(&self) -> crate::stim::Stimulus {
-        match self {
-            Sim::Cpu(s) => s.stimulus.clone(),
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.stimulus.clone(),
-        }
-    }
-
-    /// External currents per neuron (host copy; on CUDA this is one
-    /// device→host read — meant for rebuild snapshots, not hot paths).
-    pub fn external(&self) -> Vec<f32> {
-        match self {
-            Sim::Cpu(s) => s.ext.clone(),
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.external(),
-        }
-    }
-
-    /// Play a per-step series on `input` starting at the current step.
-    pub fn play_input(&mut self, input: usize, series: Vec<f32>) {
-        match self {
-            Sim::Cpu(s) => s.stimulus.play(input, s.t, series),
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.play_input(input, series),
-        }
-    }
-
-    /// Set watched-neuron ids whose per-step v is recorded (editor plot).
-    /// No-op when unchanged; safe to call every publish.
-    pub fn set_v_watch(&mut self, ids: &[u32]) {
-        match self {
-            Sim::Cpu(s) => s.set_v_watch(ids),
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.set_v_watch(ids),
-        }
-    }
-
-    /// Drain per-step v samples recorded since the last drain, one Vec per
-    /// watched neuron (oldest first).
-    pub fn drain_v(&mut self) -> anyhow::Result<Vec<Vec<f32>>> {
-        match self {
-            Sim::Cpu(s) => Ok(s.drain_v()),
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.drain_v(),
-        }
-    }
-
-    /// Drain per-step v AND u samples for watched neurons — one call so
-    /// the CUDA backend can read both rings before it resets the shared
-    /// sample counter (u first).
-    pub fn drain_vu(&mut self) -> anyhow::Result<(Vec<Vec<f32>>, Vec<Vec<f32>>)> {
-        match self {
-            Sim::Cpu(s) => Ok((s.drain_v(), s.drain_u())),
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => {
-                let u = s.drain_u()?;
-                let v = s.drain_v()?;
-                Ok((v, u))
-            }
-        }
-    }
-
-    /// Set the grid-group member lists (texel order) whose spike traces the
-    /// editor's plane view wants. No-op when unchanged; safe to call every
-    /// publish.
-    pub fn set_grid_watches(&mut self, groups: &[Vec<u32>]) {
-        match self {
-            Sim::Cpu(s) => s.set_grid_watches(groups),
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.set_grid_watches(groups),
-        }
-    }
-
-    /// Materialized spike traces for each watched grid group — one f32 per
-    /// texel (member order), `exp(-(t - last_spike) * dt / tau_ms)`.
-    pub fn grid_traces(&mut self, tau_ms: f32) -> anyhow::Result<Vec<Vec<f32>>> {
-        match self {
-            Sim::Cpu(s) => Ok(s.grid_traces(tau_ms)),
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.grid_traces(tau_ms),
-        }
-    }
-
-    /// Constant external current on one neuron.
-    pub fn set_external(&mut self, neuron: usize, amps: f32) {
-        match self {
-            Sim::Cpu(s) => {
-                if let Some(e) = s.ext.get_mut(neuron) {
-                    *e = amps;
-                }
-            }
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.set_external(neuron, amps),
-        }
-    }
-
-    /// Set the whole external-current vector at once — the rebuild
-    /// carryover path (`DriveState::apply`).
-    pub fn set_external_all(&mut self, ext: &[f32]) {
-        match self {
-            Sim::Cpu(s) => {
-                let n = s.ext.len().min(ext.len());
-                s.ext[..n].copy_from_slice(&ext[..n]);
-            }
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.set_external_all(ext),
-        }
-    }
-
-    /// Change the background noise rate on a live sim.
-    pub fn set_noise(&mut self, rate_hz: f32, kick_mv: f32) {
-        match self {
-            Sim::Cpu(s) => {
-                s.cfg.noise_rate_hz = rate_hz;
-                s.cfg.noise_kick_mv = kick_mv;
-            }
-            #[cfg(feature = "cuda")]
-            Sim::Cuda(s) => s.set_noise(rate_hz, kick_mv),
-        }
+}
+impl std::ops::DerefMut for Sim {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.inner
     }
 }

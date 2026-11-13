@@ -50,9 +50,8 @@ fn set_backend_is_respected_by_scripts() {
         .eval_str("net.add_neuron(0.0,0.0,0.0); sim.run(1.0);")
         .unwrap();
     let h = env.sim_handle().unwrap();
-    let kind = match &*h.borrow() {
-        sim::Sim::Cuda(_) => "Cuda",
-        #[allow(unreachable_patterns)]
+    let kind = match h.borrow().kind() {
+        BackendKind::Cuda => "Cuda",
         _ => "not Cuda",
     };
     assert_eq!(kind, "Cuda", "script-built sim should honour SetBackend");
@@ -62,7 +61,7 @@ fn set_backend_is_respected_by_scripts() {
     env.eval_str("sim.run(1.0);").unwrap();
     let h = env.sim_handle().unwrap();
     assert!(
-        matches!(&*h.borrow(), sim::Sim::Cpu(_)),
+        matches!(h.borrow().kind(), BackendKind::Cpu),
         "switching back should rebuild a CPU sim"
     );
 }

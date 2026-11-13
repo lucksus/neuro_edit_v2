@@ -69,23 +69,13 @@ pub fn run_bench(
 ) -> BenchResult {
     cfg.record_spikes = false;
     let mut sim = Sim::new(net, cfg, kind).expect("sim init");
-    let mut gpu_mem_mb = 0;
-    #[cfg(feature = "cuda")]
-    if let Sim::Cuda(ref s) = sim {
-        gpu_mem_mb = s.dev_mem_bytes() / (1 << 20);
-    }
+    let gpu_mem_mb = sim.dev_mem_bytes() / (1 << 20);
     // warm up (NVRTC compile + first launches + settle)
     sim.run_ms(warm_ms).expect("warmup run");
-    #[cfg(feature = "cuda")]
-    if let Sim::Cuda(ref s) = sim {
-        s.synchronize();
-    }
+    sim.synchronize();
     let t0 = Instant::now();
     sim.run_ms(sim_ms).expect("bench run");
-    #[cfg(feature = "cuda")]
-    if let Sim::Cuda(ref s) = sim {
-        s.synchronize();
-    }
+    sim.synchronize();
     let wall = t0.elapsed().as_secs_f64();
     let spikes = sim.spikes_total();
     let sim_s = (sim_ms / 1000.0) as f64;

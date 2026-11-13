@@ -13,7 +13,8 @@ use cudarc::driver::{
 };
 use cudarc::nvrtc;
 
-use crate::kernels::KERNELS_SRC;
+use crate::kernels;
+use crate::model;
 use crate::state::{ring_depth, NeuronParams, SimConfig};
 use net_format::{Network, SynCsr};
 
@@ -130,12 +131,9 @@ impl CudaSim {
         let stream = ctx.default_stream();
 
         // NVRTC compile for this device's arch. int_weights selects the
-        // fixed-point delay ring (bitwise-reproducible accumulation).
-        let src = if cfg.int_weights {
-            format!("#define INT_RING 1\n{KERNELS_SRC}")
-        } else {
-            KERNELS_SRC.to_string()
-        };
+        // fixed-point ring; every neuron is model 0 (izh) until the
+        // generic p/x blocks land.
+        let src = kernels::kernel_source(&[&model::izh::Izhikevich], cfg.int_weights);
         let ptx = nvrtc::compile_ptx(&src).context("NVRTC compile")?;
         let module: Arc<CudaModule> = ctx.load_module(ptx).context("load_module")?;
         let f_neuron = module.load_function("neuron_kernel")?;
@@ -669,6 +667,14 @@ impl CudaSim {
         self.stream.clone_dtoh(&self.v).unwrap()
     }
 
+    /// Recovery-variable readback — state slot 1 for izh (probes/tests).
+    pub fn u(&self) -> Vec<f32> {
+        if self.n == 0 {
+            return Vec::new();
+        }
+        self.stream.clone_dtoh(&self.u).unwrap()
+    }
+
     pub fn spikes_total(&self) -> u64 {
         self.stream.clone_dtoh(&self.total).unwrap()[0]
     }
@@ -819,5 +825,100 @@ impl CudaSim {
             + self.delay.len() * 2
             + self.spk_bits.len() * 8
             + self.spk.len() * 4
+    }
+}
+
+impl crate::Backend for CudaSim {
+    fn kind(&self) -> crate::BackendKind {
+        crate::BackendKind::Cuda
+    }
+    fn n(&self) -> usize {
+        self.n
+    }
+    fn step_count(&self) -> u64 {
+        self.t
+    }
+    fn time_ms(&self) -> f64 {
+        self.time_ms()
+    }
+    fn run_steps(&mut self, n: usize) -> anyhow::Result<()> {
+        self.run_steps(n)
+    }
+    fn run_ms(&mut self, ms: f32) -> anyhow::Result<()> {
+        self.run_ms(ms)
+    }
+    fn reset_state(&mut self) {
+        self.reset_state()
+    }
+    fn synchronize(&self) {
+        self.synchronize()
+    }
+    fn dev_mem_bytes(&self) -> usize {
+        self.dev_mem_bytes()
+    }
+    fn trace(&self) -> Vec<f32> {
+        self.trace()
+    }
+    fn state(&self, slot: usize) -> Vec<f32> {
+        match slot {
+            0 => self.v(),
+            1 => self.u(),
+            _ => Vec::new(),
+        }
+    }
+    fn last_spikes(&self) -> Vec<u32> {
+        self.last_spikes()
+    }
+    fn spike_counts(&self, rows: usize) -> Result<Vec<u32>, String> {
+        self.spike_counts(rows)
+    }
+    fn spike_row(&self, back: usize) -> Option<Vec<u64>> {
+        self.spike_row(back)
+    }
+    fn spikes_total(&self) -> u64 {
+        self.spikes_total()
+    }
+    fn mean_rate_hz(&self) -> f64 {
+        self.mean_rate_hz()
+    }
+    fn set_input_constant(&mut self, input: usize, value: f32) {
+        self.set_input_constant(input, value)
+    }
+    fn input_values(&self) -> Vec<f32> {
+        self.stimulus.constants.clone()
+    }
+    fn stimulus(&self) -> crate::stim::Stimulus {
+        self.stimulus.clone()
+    }
+    fn external(&self) -> Vec<f32> {
+        self.external()
+    }
+    fn play_input(&mut self, input: usize, series: Vec<f32>) {
+        self.play_input(input, series)
+    }
+    fn set_v_watch(&mut self, ids: &[u32]) {
+        self.set_v_watch(ids)
+    }
+    /// u drains first — its ring shares `vrec_valid`'s counter, which
+    /// `drain_v` resets.
+    fn drain_watch(&mut self) -> anyhow::Result<Vec<Vec<Vec<f32>>>> {
+        let u = self.drain_u()?;
+        let v = self.drain_v()?;
+        Ok(vec![v, u])
+    }
+    fn set_grid_watches(&mut self, groups: &[Vec<u32>]) {
+        self.set_grid_watches(groups)
+    }
+    fn grid_traces(&mut self, tau_ms: f32) -> anyhow::Result<Vec<Vec<f32>>> {
+        self.grid_traces(tau_ms)
+    }
+    fn set_external(&mut self, neuron: usize, amps: f32) {
+        self.set_external(neuron, amps)
+    }
+    fn set_external_all(&mut self, ext: &[f32]) {
+        self.set_external_all(ext)
+    }
+    fn set_noise(&mut self, rate_hz: f32, kick_mv: f32) {
+        self.set_noise(rate_hz, kick_mv)
     }
 }

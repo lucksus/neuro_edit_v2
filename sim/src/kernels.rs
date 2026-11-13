@@ -2,8 +2,40 @@
 //! step-for-step; differences are only float-atomic summation order in the
 //! delay ring (documented in NOTES).
 //!
-//! The neuron model is a switch point: `model == 0` is Izhikevich; further
-//! models add a `case` and a params interpretation.
+//! The neuron model is a switch point: `//@MODEL_STEP@` inside
+//! `neuron_kernel` is replaced with one dispatch case per model in the
+//! net's model table (`kernel_source`); each model file owns its step
+//! text (`NeuronModel::cuda_step`).
+
+use crate::model::NeuronModel;
+
+/// The placeholder inside `KERNELS_SRC` where per-model step text lands.
+const STEP_MARK: &str = "//@MODEL_STEP@";
+
+/// Assemble the kernel source for a net's model table. The cases are
+/// emitted in table order — a one-model net gets the step body with no
+/// dispatch at all, so today's speed stays. `int_weights` selects the
+/// fixed-point delay ring (bitwise-reproducible accumulation).
+pub fn kernel_source(models: &[&dyn NeuronModel], int_weights: bool) -> String {
+    let cases = if models.len() == 1 {
+        models[0].cuda_step().to_string()
+    } else {
+        let mut s = String::new();
+        for (k, m) in models.iter().enumerate() {
+            if k > 0 {
+                s.push_str(" else ");
+            }
+            s.push_str(&format!("if(mi == {k}){{\n{}\n}}", m.cuda_step()));
+        }
+        s
+    };
+    let src = KERNELS_SRC.replace(STEP_MARK, &cases);
+    if int_weights {
+        format!("#define INT_RING 1\n{src}")
+    } else {
+        src
+    }
+}
 
 pub const KERNELS_SRC: &str = r#"
 typedef unsigned long long u64;
@@ -84,24 +116,24 @@ extern "C" __global__ void neuron_kernel(
   if(pkick > 0.f && (float)noise_hash((u32)i, t, seed) * 2.3283064e-10f < pkick)
     I += kick;
 
-  float vv = v[i], uu = u[i];
-  if(model == 0){
-    // Izhikevich (identical order to the CPU reference and the 2011 original)
-    if(vv >= 30.f){ vv = c[i]; uu += d[i]; }
-    vv += dt * (0.04f*vv*vv + 5.f*vv + 140.f - uu + I);
-    uu += dt * a[i] * (b[i]*vv - uu);
-  }
-  v[i] = vv; u[i] = uu;
+  // the model step sees p[k], x[k], I, dt and sets `spiked`; stage-1
+  // aliases them onto the fixed v/u/a-d arrays.
+  int mi = model;
+  float x[2] = {v[i], u[i]};
+  const float p[4] = {a[i], b[i], c[i], d[i]};
+  bool spiked = false;
+  //@MODEL_STEP@
+  v[i] = x[0]; u[i] = x[1];
   // per-step v/u record for watched neurons (v(t) + v–u phase plots)
   for(int w = 0; w < nwatch; ++w){
     if((u32)i == vwatch[w]){
       u64 slot = (u64)(t % (u64)vrec_d) * (u64)nwatch + (u64)w;
-      vrec[slot] = vv;
-      urec[slot] = uu;
+      vrec[slot] = x[0];
+      urec[slot] = x[1];
     }
   }
 
-  if(vv >= 30.f){
+  if(spiked){
     int k = atomicAdd(cnt_cur, 1);
     spk[k] = i;
     trace[i] = 1.f;
