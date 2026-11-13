@@ -15,90 +15,140 @@ impl EditorApp {
     pub(super) fn sync_shared(&mut self, gpu: &mut Gpu) {
         // Any ServerMsg that landed since the last frame bumps dirty_seq —
         // that's our "repaint on transport" signal for Stage 14 E.
-        {
-            let sh = self.ctl.shared.read().unwrap();
-            if sh.dirty_seq != self.last_dirty_seq {
-                self.net_touched = true;
-                self.last_dirty_seq = sh.dirty_seq;
-            }
+        //
+        // One lock: copy out everything the frame needs, drop it, then
+        // act — upload_ready/files_refresh send client messages and
+        // save_download opens a file dialog, none of which may hold the
+        // worker's lock.
+        struct Taken {
+            dirty_seq: u64,
+            file_data: Option<(String, String)>,
+            file_written: Option<String>,
+            last_err: Option<String>,
+            files: Option<(String, Vec<proto::FileEntry>)>,
+            usage: Option<(u64, u64)>,
+            upload_ready: Option<String>,
+            file_op: Option<String>,
+            download: Option<(String, Vec<u8>)>,
+            saved: Vec<(String, u64)>,
+            loaded: Vec<(String, u64)>,
+            jobs: Vec<proto::JobInfo>,
+            job_progress: std::collections::BTreeMap<u64, Vec<Vec<(String, f64)>>>,
+            job_detail: Option<crate::snap::JobDetailSnap>,
+            geo_new: Option<std::sync::Arc<GeoSnap>>,
+            snap: crate::snap::Snap,
+            running: bool,
+            sim_built: bool,
+            busy: bool,
+            net_gen: u64,
+            cfg: proto::Config,
+            backend: proto::Backend,
         }
-        // One-shot consumables the worker answered for us.
-        let (mut saved, mut loaded, mut last_err) = (Vec::new(), Vec::new(), None);
-        {
+        let Taken {
+            dirty_seq,
+            file_data,
+            file_written,
+            last_err,
+            files,
+            usage,
+            upload_ready,
+            file_op,
+            download,
+            saved,
+            loaded,
+            jobs,
+            job_progress,
+            job_detail,
+            geo_new,
+            snap,
+            running,
+            sim_built,
+            busy,
+            net_gen,
+            cfg,
+            backend,
+        } = {
             let mut sh = self.ctl.shared.write().unwrap();
-            if let Some((path, text)) = sh.file_data.take() {
-                self.script_file = path;
-                self.script_text = text;
-                self.status = "loaded".into();
-            }
-            if let Some(p) = sh.file_written.take() {
-                // Q8: free the upload slot — the queued upload finished
-                // (chunks end with FileWritten). Without this the second
-                // upload waited forever behind the completed first.
-                if self.files.upload.as_ref().map(|u| u.0.as_str()) == Some(p.as_str()) {
-                    self.files.upload = None;
-                }
-                self.status = format!("wrote {p}");
-            }
-            if let Some(e) = sh.last_error.take() {
-                last_err = Some(e);
-            }
-            if let Some((dir, entries)) = sh.files.take() {
-                if self.files.local_root.is_none() && dir == self.files.cwd {
-                    self.files.entries = entries.clone();
-                }
-                self.file_list = Some((dir, entries));
-            }
-            if let Some((used, quota)) = sh.usage.take() {
-                self.files.usage = Some((used, quota));
-            }
-            if let Some(p) = sh.upload_ready.take() {
-                // drop the lock: upload_ready sends client messages
-                drop(sh);
-                self.upload_ready(&p);
-                sh = self.ctl.shared.write().unwrap();
-            }
-            if let Some(op) = sh.file_op.take() {
-                // a mkdir/delete/rename landed — relist
-                drop(sh);
-                self.files_refresh();
-                self.status = op;
-                sh = self.ctl.shared.write().unwrap();
-            }
-            let dl = sh.download.take();
-            if let Some((path, bytes, done)) = dl {
-                if done {
-                    drop(sh);
-                    self.save_download(&path, &bytes);
-                    sh = self.ctl.shared.write().unwrap();
-                } else {
+            Taken {
+                dirty_seq: sh.dirty_seq,
+                file_data: sh.file_data.take(),
+                file_written: sh.file_written.take(),
+                last_err: sh.last_error.take(),
+                files: sh.files.take(),
+                usage: sh.usage.take(),
+                upload_ready: sh.upload_ready.take(),
+                file_op: sh.file_op.take(),
+                download: match sh.download.take() {
                     // still streaming — put it back
-                    sh.download = Some((path, bytes, done));
-                }
+                    done @ Some((_, _, false)) => {
+                        sh.download = done;
+                        None
+                    }
+                    Some((path, bytes, true)) => Some((path, bytes)),
+                    None => None,
+                },
+                saved: sh.saved_ack.take().into_iter().collect(),
+                loaded: sh.loaded_ack.take().into_iter().collect(),
+                jobs: sh.jobs.clone(),
+                job_progress: sh.job_progress.clone(),
+                job_detail: sh.job_detail.take(),
+                geo_new: sh.geo.clone(),
+                snap: sh.snap.clone(),
+                running: sh.running,
+                sim_built: sh.sim_built,
+                busy: sh.busy,
+                net_gen: sh.net_gen,
+                cfg: sh.cfg.clone(),
+                backend: sh.backend,
             }
-            // Q6: the document goes clean only on the server's Saved —
-            // the ack carries the version it actually wrote.
-            if let Some((path, version)) = sh.saved_ack.take() {
-                saved.push((path, version));
-            }
-            // Q7: net_path/recent move on confirmed load only.
-            if let Some((path, version)) = sh.loaded_ack.take() {
-                loaded.push((path, version));
-            }
-            self.jobs = sh.jobs.clone();
-            self.job_progress = sh.job_progress.clone();
-            if let Some(d) = sh.job_detail.take() {
-                // a re-opened job's history becomes plottable too
-                self.job_progress.insert(d.id, d.progress.clone());
-                self.job_detail = Some(d);
-            }
+        };
+        if dirty_seq != self.last_dirty_seq {
+            self.net_touched = true;
+            self.last_dirty_seq = dirty_seq;
         }
+        if let Some((path, text)) = file_data {
+            self.script_file = path;
+            self.script_text = text;
+            self.status = "loaded".into();
+        }
+        if let Some(p) = file_written {
+            // Q8: free the upload slot — the queued upload finished
+            // (chunks end with FileWritten). Without this the second
+            // upload waited forever behind the completed first.
+            if self.files.upload.as_ref().map(|u| u.0.as_str()) == Some(p.as_str()) {
+                self.files.upload = None;
+            }
+            self.status = format!("wrote {p}");
+        }
+        if let Some((dir, entries)) = files {
+            if self.files.local_root.is_none() && dir == self.files.cwd {
+                self.files.entries = entries.clone();
+            }
+            self.file_list = Some((dir, entries));
+        }
+        if let Some((used, quota)) = usage {
+            self.files.usage = Some((used, quota));
+        }
+        if let Some(p) = upload_ready {
+            self.upload_ready(&p);
+        }
+        if let Some(op) = file_op {
+            // a mkdir/delete/rename landed — relist
+            self.files_refresh();
+            self.status = op;
+        }
+        if let Some((path, bytes)) = download {
+            self.save_download(&path, &bytes);
+        }
+        // Q6: the document goes clean only on the server's Saved —
+        // the ack carries the version it actually wrote.
         for (path, version) in saved {
             self.saved_version = version;
             self.net_path = Some(path.clone());
             self.push_recent(path.clone());
             self.status = format!("saved {path}");
         }
+        // Q7: net_path/recent move on confirmed load only.
         for (path, _) in loaded {
             self.net_path = Some(path.clone());
             self.push_recent(path.clone());
@@ -115,19 +165,13 @@ impl EditorApp {
             self.status = e.clone();
             self.last_error = Some(e);
         }
-        let (geo_new, snap, running, sim_built, busy, net_gen, cfg, backend) = {
-            let sh = self.ctl.shared.read().unwrap();
-            (
-                sh.geo.clone(),
-                sh.snap.clone(),
-                sh.running,
-                sh.sim_built,
-                sh.busy,
-                sh.net_gen,
-                sh.cfg.clone(),
-                sh.backend,
-            )
-        };
+        self.jobs = jobs;
+        self.job_progress = job_progress;
+        if let Some(d) = job_detail {
+            // a re-opened job's history becomes plottable too
+            self.job_progress.insert(d.id, d.progress.clone());
+            self.job_detail = Some(d);
+        }
         // Toolbar widgets read the worker's live cfg so script-side
         // `sim.set_dt`/`sim.set_noise`/`sim.set_backend` calls show up.
         self.dt_ms = cfg.dt_ms;
