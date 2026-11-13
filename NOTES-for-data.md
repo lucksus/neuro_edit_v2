@@ -2035,3 +2035,127 @@ so the assertion passed whether or not the worker exited. With every
   v/phase/raster plots — it painted on top of the leftmost x label
   ("-100" over "-200"). Test: `corner_label_detection`. The manual's
   toolbar line now lists the input-links toggle.
+
+## 2026-11-13 example + backend bugs
+
+Nico's live-site report: "First spikes" didn't propagate, "Grid wave"
+looked unconnected, and toggling the backend CUDA -> CPU killed all
+excitation (switching back didn't recover it either).
+
+### Bug 1 — examples were mistuned, not a sim regression
+
+The hypothesis that Stage 17 (`38000d0`/`40b40aa`/`9c012ce`/`e17e031`)
+changed a script-API semantic did not hold: `net.connect`,
+`net.create_connections` (p = exp(-(d/lambda)^2)) and `set_exc_inh` are
+unchanged since the examples were written. The scripts were broken at
+the parameters level — two of them so badly they built **zero
+synapses**:
+
+- `first_spikes.rhai`: chain weight 8.0 is below the single-kick spike
+  threshold (~12) for an RS neuron at rest under post-Stage-17
+  dynamics (delays + exponential decay + refractory at ~200 Hz).
+  Per-neuron counts at 4fc95d5: `[54, 0, 0, 0, 0]` — neuron 0 fired,
+  the chain never did. Retuned to w=30 (the classic demo's stock
+  weight) -> `[54, 53, 53, 53, 52]`, first spikes in chain order.
+- `grid_wave.rhai`: `create_connections("sheet", 1.0, 3.0, 6.0)` on a
+  12.0-spacing grid -> exp(-16) per pair -> **0 synapses**. Also the
+  "left column" drive `sheet[r * 40]` indexed the bottom row's even
+  columns (members are column-major i0*20+i1), not the left edge.
+  Retuned: lambda 15.0, weight 14.0 (~1400 synapses), drive
+  `sheet[r * 2]` = every-other neuron of the i0=0 edge. Result: ~193/200
+  left-half and ~187/200 right-half neurons spike, mean ~8-10 Hz,
+  per-column spike gradient 61 -> 17 left-to-right — a wave, not
+  saturation.
+- `lsm_readout.rhai`: `create_connections("res", 1.0, 2.5, 0.8)` on
+  20.0 spacing -> exp(-64) -> **0 synapses** — the "reservoir" was a
+  bag of disconnected neurons; the readout still beat chance (0.7)
+  purely through the shared-pool feedforward, so the old test's
+  acc>0.55 assertion couldn't see it. Retuned: lambda 30.0, weight 1.0
+  (~2500 synapses), accuracy 0.7. Stronger recurrence (w>=1.5,
+  lambda>=35) measurably *hurt* accuracy — the shared pools carry the
+  signal, recurrence just has to exist.
+- The other three examples were checked headlessly on CPU:
+  `detector.rhai` (liquid ridge AUC 0.769 vs raw 0.71, ~4 min run),
+  `memory_window.rhai` (2316 synapses, full delay sweep), and
+  `lsm_hidden.rhai` (liquid AUC up to 0.962) all run and behave — they
+  were already written with lambda >= spacing (90/60), which is why
+  only the two demo scripts died.
+
+### Bug 2 — SetBackend dropped the whole stimulus program
+
+`sim.set_input` / `sim.play_input` / `sim.set_external` (and the
+protocol `SetInputConst`/`PlayInput`/`SetExternal`) write into the
+*built sim* — `CpuSim.stimulus`/`ext`, `CudaSim.stimulus`/device ext.
+`SetBackend` (and dt changes, and every net-mutating script call)
+dropped the `SimSlot`; the next `sim_handle()`/`ensure_sim` built a
+fresh sim from `Network + SimConfig` only — cfg (noise, taus, dt,
+seed) survived, watch lists live in `Pub` and republish, `running`
+was never cleared — but the drive was gone, so nothing excited. A
+second switch dropped the still-empty sim again, which is why
+CUDA->CPU->CUDA never recovered.
+
+Fix: `stim::DriveState` — a detached drive program (input constants
+and series keyed by input NAME, ext currents neuron-indexed, series
+tails rebased to the new sim's step 0; a consumed series is kept as
+`[0.0]` so a shadowed constant doesn't resurrect). Every sim-drop
+path — `script::invalidate` (all net edits), `Env::invalidate_sim`
+(SetBackend/SetDtMs/net replace), script `sim.rebuild`/`set_dt`/
+`set_int_weights` — stashes it; every sim build (`Env::build_sim`,
+`ensure_sim`) re-applies it. Same-kind flips (CPU->CPU) go through the
+same rebuild path.
+
+### Tests
+
+All new tests run on CPU and CUDA — an RTX 3090 is present, `cuda` is
+a default feature and `cuda_available()` is true. New/strengthened
+tests, red on `4fc95d5` (verified in a git worktree):
+
+- `sim/tests/examples.rs`:
+  - `first_spikes_propagates_along_chain` — all of 0..4 spike, first
+    spikes strictly in chain order. RED: `Cpu: neuron 1 never spiked —
+    chain broken at 1: [54, 0, 0, 0, 0]`.
+  - `grid_wave_reaches_right_half` — >500 synapses, >=100/200
+    right-half neurons spike, right edge fires after the driven
+    column. RED: `Cpu: sheet has 0 synapses`.
+  - `lsm_readout_beats_chance` — >200 synapses AND readout accuracy
+    >0.55. RED: `Cpu: "reservoir" has 0 synapses`.
+  - (`examples_eval_without_error`, `first_spikes_actually_spikes`
+    kept; each test iterates `backends()` = [Cpu, Cuda here].)
+- `sim/tests/serve.rs` (through `sim::serve::run` — the same path the
+  editor's local transport uses):
+  - `backend_switch_keeps_drive` — driven 8-neuron net, AutoRun on;
+    CPU->CPU->CPU, CPU->CUDA->CPU and CUDA->CPU->CUDA (the last two
+    under `cuda_available()`); after each hop a `t_steps==0` publish
+    proves the rebuild, then `spikes_total>0` must arrive with no
+    re-`set_input`. RED: `deadline exceeded` (the t=0 publish arrived;
+    spikes never did).
+  - `backend_switch_keeps_script_drive` — same assertion with the
+    drive programmed by script `sim.set_input` + `sim.set_external`
+    through `ClientMsg::Eval`, CPU->CUDA. RED: `deadline exceeded`.
+  - `until`/`until_ev` now take `FnMut` (needed to wait on two event
+    conditions at once — Status only re-emits on change and can land
+    after the Reset publish).
+- `sim/src/stim.rs` unit tests — `DriveState` capture/apply: name-
+  keying, series-tail trimming, finished-series `[0.0]` shadow
+  semantics, missing-input drop.
+
+Green: `cargo test -p sim --test examples` 5/5, `--test serve` 29/29
+(incl. both switch tests), `cargo test --workspace` all 33 suites,
+`editor/web/build.sh` clean.
+
+### Files changed
+
+- `examples/first_spikes.rhai` (w 8->30, prints per-neuron counts),
+  `examples/grid_wave.rhai` (lambda 3->15, w 6->14, left-edge drive
+  `r*2`), `examples/lsm_readout.rhai` (lambda 2.5->30, w 0.8->1.0).
+- `sim/src/stim.rs` (+`DriveState` capture/apply + tests),
+  `sim/src/lib.rs` (`Sim::stimulus`/`external`/`set_external_all`),
+  `sim/src/cuda.rs` (`CudaSim::external` dtoh accessor),
+  `sim/src/script.rs` (`DriveSlot`, `stash_drive`/`apply_drive`,
+  `invalidate`/`ensure_sim`/`Env` plumbing — every drop path stashes,
+  every build reapplies).
+- `sim/tests/examples.rs`, `sim/tests/serve.rs`.
+
+Not verified: the wasm UI itself (headless tests cover the worker
+path it drives); `grid_wave`'s wave *visual* (the test asserts the
+underlying activity/spike gradient, not pixels).
