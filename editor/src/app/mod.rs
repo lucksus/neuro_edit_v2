@@ -781,11 +781,12 @@ impl eframe::App for EditorApp {
         self.status_bar(ctx);
         self.hints_bar(ctx);
         self.disconnect_banner(ctx);
-        // The fixed left dock carves its strip off the usable rect before
-        // any floating window is laid out, so windows can never cover it.
+        // The fixed docks (left tools, bottom console) carve their space
+        // off the usable rect before any floating window is laid out, so
+        // windows can never slide under a dock.
         self.left_panel(ctx);
-        self.inspector(ctx);
         self.console(ctx);
+        self.inspector(ctx);
         self.script_window(ctx);
         self.plots(ctx);
         self.inputs_window(ctx);

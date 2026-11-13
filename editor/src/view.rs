@@ -584,6 +584,11 @@ fn keys(app: &mut EditorApp, ui: &mut egui::Ui) {
         if i.key_pressed(egui::Key::Questionmark) {
             app.win.manual = true;
         }
+        // The console dock gets a bare key too — ` is the terminal
+        // convention, Ctrl+3 keeps working (Stage 22).
+        if i.key_pressed(egui::Key::Backtick) {
+            app.win.console = !app.win.console;
+        }
         if i.modifiers.ctrl {
             for (key, flag) in [
                 (egui::Key::Num1, &mut app.win.inspector),

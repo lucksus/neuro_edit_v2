@@ -66,6 +66,7 @@ impl EditorApp {
                         "Ctrl+1..6",
                         "inspector · plots · console · script · inputs · files",
                     );
+                    row(ui, "`", "console dock");
                     row(ui, "?", "manual");
                 });
             });

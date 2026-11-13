@@ -23,8 +23,9 @@ pub(super) fn paste_events(events: &[egui::Event], kb_focused: bool) -> Vec<Stri
 }
 
 /// The rect floating windows may occupy: below the toolbar, above the
-/// status + hint strips (Stage 15 A/C). Only valid after those panels
-/// have been shown this frame — update() calls windows last.
+/// status + hint strips, and inside the fixed docks (left tools, bottom
+/// console — Stage 22). Only valid after those panels have been shown
+/// this frame — update() shows docks first, windows after.
 pub(super) fn usable_rect(ctx: &egui::Context) -> egui::Rect {
     ctx.available_rect()
 }
@@ -62,7 +63,6 @@ pub(super) fn app_win<'open>(
 pub(super) enum DefWin {
     Inspector,
     Plots,
-    Console,
     Inputs,
     Files,
     Manual,
@@ -70,30 +70,17 @@ pub(super) enum DefWin {
 }
 
 /// The windows `WindowVis::default` opens on first run — test-visible
-/// mirror checked by `default_open_windows_never_overlap`.
+/// mirror checked by `default_open_windows_never_overlap`. (The console
+/// is a dock now, not a window — Stage 22.)
 #[cfg(test)]
-pub(super) const DEFAULT_OPEN: &[DefWin] = &[DefWin::Inspector, DefWin::Plots, DefWin::Console];
+pub(super) const DEFAULT_OPEN: &[DefWin] = &[DefWin::Inspector, DefWin::Plots];
 
 /// (window → default rect) table against usable rect `u`.
 ///
-/// U3: bottom-right Console, bottom-left Plots — on narrow viewports
-/// the two bottom-anchored windows collide, so Plots stacks above
-/// Console.
-pub(super) fn default_rects(u: egui::Rect) -> [(DefWin, egui::Rect); 7] {
-    let console = clamp_window_rect(
-        egui::Rect::from_min_size(
-            egui::pos2(u.max.x - 430.0, u.max.y - 260.0),
-            egui::vec2(420.0, 240.0),
-        ),
-        u,
-    );
+/// U3: Plots anchors bottom-left; Inspector top-right. (The console
+/// used to anchor bottom-right; it is a bottom dock now.)
+pub(super) fn default_rects(u: egui::Rect) -> [(DefWin, egui::Rect); 6] {
     let side = egui::vec2(480.0, 220.0);
-    let stacked = console.min.x < u.min.x + 12.0 + side.x + 8.0;
-    let y = if stacked {
-        console.min.y - side.y - 12.0
-    } else {
-        u.max.y - side.y - 20.0
-    };
     [
         (
             DefWin::Inspector,
@@ -108,11 +95,13 @@ pub(super) fn default_rects(u: egui::Rect) -> [(DefWin, egui::Rect); 7] {
         (
             DefWin::Plots,
             clamp_window_rect(
-                egui::Rect::from_min_size(egui::pos2(u.min.x + 12.0, y), side),
+                egui::Rect::from_min_size(
+                    egui::pos2(u.min.x + 12.0, u.max.y - side.y - 20.0),
+                    side,
+                ),
                 u,
             ),
         ),
-        (DefWin::Console, console),
         (
             DefWin::Inputs,
             clamp_window_rect(
@@ -225,15 +214,6 @@ mod tests {
                     );
                 }
             }
-        }
-        // U3: narrow widths stack the bottom-anchored pair; assert
-        // disjoint at every reasonable width.
-        for w in [500.0_f32, 800.0, 930.0, 1440.0] {
-            let u = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(w, 700.0));
-            assert!(
-                !default_rect(DefWin::Plots, u).intersects(default_rect(DefWin::Console, u)),
-                "default windows overlap at {w} px"
-            );
         }
     }
 
