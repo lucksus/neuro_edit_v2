@@ -2332,3 +2332,139 @@ doesn't exist there).
 - Outer dispatch's existing `catch_unwind` is now redundant for the
   five edits but left in place — it still guards the non-script
   edits.
+
+## Stage 20 — neuron-model abstraction, sim side + format v4 (review 1.6 stages 1–3)
+
+Commits `e86e828`, `1beb5b2`, `62f1106` on top of `c5eeabf`. Goal from
+the review table: a second neuron model becomes one new file under
+`sim/src/model/`; the protocol/editor side (stages 4–6) is Stage 21.
+No Izhikevich behaviour change: same spikes, same values, same
+screenshots.
+
+### What moved where
+
+- `sim/src/model/mod.rs` (new) — `NeuronModel` trait:
+  `id/label/params/state/presets/default_for/init/step/cuda_step`;
+  `MODELS` registry + `by_id`. A param row is `p[k]`, a state row
+  `x[k]`, slot 0 is always the membrane potential.
+- `sim/src/model/izh.rs` (new) — the Izhikevich CPU step AND the CUDA
+  C step text side by side (moved out of `cpu.rs`/`kernels.rs`).
+- `sim/src/kernels.rs` — kernel is now a template with a
+  `//@MODEL_STEP@` mark; `kernel_source(models, int_weights)` splices
+  one `switch(model[i])` case per model in the net's table. Kernel
+  signature takes generic `xstate/params/model/P/X` + one `xrec` ring
+  (VREC_D × W × n_state) instead of `v/u/a..d` + `vrec/urec`.
+- `sim/src/lib.rs` — `trait Backend`; `Sim { inner: Box<dyn Backend> }`
+  replaced the enum that forwarded ~40 methods through `match`.
+  `Sim::v()` is a compat alias for `state(0)`; `drain_watch()` returns
+  `[state slot][watch][samples]` — the protocol mapping lives in
+  `serve.rs` (slot 0 → `watched_v`, slot 1 → `watched_u`), which is
+  exactly why the proto fields did not change.
+- `sim/src/cpu.rs`, `sim/src/cuda.rs` — `impl Backend` on flat generic
+  blocks (`x` = n×X state, `p` = n×P params, `model[i]` per-neuron
+  table index). CPU steps dispatch per neuron through
+  `params.models[model[i]].step`. `XSyn::build(&csr, dt)` in
+  `state.rs` stays the single per-synapse-current table builder.
+- `sim/src/state.rs` — `NeuronParams{models, model[], n_params,
+  n_state, p, x0, inhibitory, pos}` + `grow/set/check`;
+  `from_network(&Network) -> Result` is types-driven (see v4 below)
+  and errors on unknown model ids / wrong row widths / dangling `ty`.
+- `net-format/src/network.rs` — `NeuronType{name, model, params,
+  kind}` + `Network.types`; `Neuron{name, pos, ty:u16, params:
+  Option<Box<[f32]>>}` replaces inline `model`/`kind`. `add_neuron`/
+  `set_kind` go through canonical `exc`/`inh`/`regular` types;
+  `set_kind` keeps custom params as a per-neuron override (same
+  semantics as the old stock-param test). `set_izh` writes an
+  override; `neuron_kind`/`neuron_params`/`neuron_type`/`type_index`
+  are the accessors. `subnet` copies the used type rows;
+  `insert_subnet` merges types **by name** (same name → same type).
+- `net-format/src/io.rs` — `FORMAT_VERSION = 4`; `load_v3` plus
+  `lift_neurons` shared by the v1/v2/v3 loaders: each distinct
+  `(params, kind)` row becomes a type — stock rows get `exc`/`inh`/
+  `regular`, custom rows a stable `izh#fnv1a` content hash.
+- `sim/src/script.rs` — `net.set_izh` writes a param override;
+  `net.kind` reads `neuron_kind`.
+- `sim/tests/lif.rs` — test-only LIF model (params `[tau, e, r, vth,
+  vreset]`, state `[v]`), proving a second model slots into both
+  backends without touching either backend.
+
+### GPU bench (10k neurons, 1M synapses, K=100, wscale 0.7, w-inh 5, noise 500, 3000 ms, 3 runs)
+
+- `c5eeabf`: 0.329 / 0.306 / 0.305 s (mean ≈ 0.313 s, ≈ 9.6× realtime)
+- after stage 2: 0.327 / 0.309 / 0.308 s (mean ≈ 0.315 s) — ≈ 0.6 %
+  delta, inside run-to-run noise; the 10 % stop condition was not
+  triggered.
+- Determinism check: `int_weights` spike counts bitwise identical
+  old vs new (2448025 both); float ring counts identical run to run
+  on this box (2448300 both).
+
+### Screenshots (no behaviour change guard)
+
+`--script examples/grid_wave.rhai --screenshot`, re-rendered at HEAD:
+
+- 800×700: `b4c92365d38ac9aa38cfd9c8f6c4bcafc8ec71b6fbe66c6ca1ae94b74f14004b`
+- 1440×900: `752017f285b553b3db391861e40a01d79156e877c1600faceb663b3cb783719e`
+
+Both byte-identical to the `c5eeabf` captures.
+
+### Test counts (`#[test]` per workspace)
+
+`c5eeabf` 255 → HEAD 262 (+7).
+
+New tests and what they assert:
+
+- `lif_hand_computed_trace` — a 1-neuron LIF run on CPU matches a
+  hand-computed Euler trace including the next-step reset ordering
+  (model does its own reset at step entry, like izh).
+- `lif_mixed_cpu_matches_cuda` — a mixed izh+LIF net (per-neuron
+  `model[i]`, wider P row through `grow`) produces identical spike
+  counts on CPU and CUDA and close states/watch drains — the
+  mixed-model dispatch case is really exercised on the GPU.
+- `v1/v2/v3_fixture_loads_into_typed_net` — the checked-in fixture
+  under `net-format/tests/fixtures/` loads through the matching
+  migration loader: lifted type names (`exc`, `inh`, `izh#…`),
+  per-neuron `ty`, effective params, kinds, Dale-signing in the CSR,
+  group/input/script survival; v1/v2 get `tau_ms = 0`, v3 keeps 7.5.
+  Sabotage check: replacing each version's dispatch arm with an error
+  fails exactly that version's fixture test (verified v1→v1, v2→v2,
+  v3→v3 in isolation).
+- `v4_round_trip_keeps_types_and_overrides` — save→load preserves the
+  type table, `ty` indices, a custom-named type, and a per-neuron
+  param override.
+- `subnet_copy_paste_preserves_type_names` — a copied subnet carries
+  its named types; pasting merges by name (a "burst" stays "burst"),
+  and a second paste reuses the row instead of duplicating it.
+
+### Gates
+
+`cargo test --workspace` green after each commit (CPU + CUDA paths),
+`editor/web/build.sh` clean, `cargo fmt --check` clean, and
+`cargo check --workspace --all-targets` verified per commit on
+`git rev-list --reverse c5eeabf..HEAD` (worktree per rev).
+
+### Left for Stage 21 (review stages 4–6)
+
+- proto: carry model/type info (`neuron.ty`, type rows) so the
+  protocol stops hardcoding izh/v+u; `watched_v`/`watched_u` keep
+  meaning "state slot 0/1" until then.
+- editor: type editor UI, per-type colours (`NeuronType.color`? — not
+  carried today), inspector showing model/param names instead of
+  raw a..d.
+- registry-driven `set_kind` defaults beyond izh (kind defaults are a
+  per-model concept — `default_for` exists but the file layer only
+  knows izh rows).
+
+### Open questions / judgement calls
+
+- Type-name identity is the *name alone* on paste (first name wins —
+  a colliding same-named different-content type in the destination
+  silently re-points pasted neurons). Chosen deliberately for
+  copy/paste UX; a content-aware merge could be a Stage-21 question.
+- `Neuron.ty` is `u16` (≤ 65536 types per file) — fine for hand-edited
+  nets; `validate()` enforces.
+- Old JSON exports (pre-v4, inline `model`/`kind`) no longer parse —
+  loud `missing field` error rather than silent mis-load. The `.ne2`
+  binary path is the migration path; `.nsamples` untouched.
+- The lifted `izh#xxxx` name is a 16-bit FNV-1a content hash — stable
+  across files built by the same loader, which is all paste-merge
+  needs.
