@@ -133,8 +133,6 @@ for f in Xte {
     s_ridge.push(ridge_output(wr, f));
 }
 let f3 = |v| (v * 1000.0).to_int() / 1000.0;
-print("test mlp   auc=" + f3.call(auc(s_mlp, labs)) +
-      " acc=" + f3.call(accuracy(s_mlp, labs)));
 print("test ridge auc=" + f3.call(auc(s_ridge, labs)) +
       " acc=" + f3.call(accuracy(s_ridge, labs)));
 
@@ -147,6 +145,8 @@ for m2 in Xte_raw {
     s_raw.push(ridge_output(wr_raw, m2));
 }
 print("test raw   auc=" + f3.call(auc(s_raw, labs)) + "   (expect ~0.5)");
+print("test mlp   auc=" + f3.call(auc(s_mlp, labs)) +
+      " acc=" + f3.call(accuracy(s_mlp, labs)) + "   <- the headline");
 
 // Stay visibly alive: background noise keeps the reservoir firing after
 // the script ends, so Run in the editor still shows activity.

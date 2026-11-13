@@ -27,8 +27,8 @@ let WIN_MS = 40;                      // ms per bit window
 let SPB = 10;                         // sim steps per ms (dt = 0.1)
 let PAIRS = [[0, 1], [2, 3], [4, 5], [6, 7]];
 let STRENGTH = 0.85;
-let TRAIN_N = if Q { 80 } else { 200 };
-let TEST_N = if Q { 48 } else { 120 };
+let TRAIN_N = if Q { 80 } else { 160 };
+let TEST_N = if Q { 48 } else { 96 };
 
 let LIQ_SPACING = 60.0;
 let CONN_SCALING = 0.35;
@@ -180,8 +180,6 @@ for f in S[2] {
 }
 let labs = S[3];
 let f3 = |v| (v * 1000.0).to_int() / 1000.0;
-print("test mlp   auc=" + f3.call(auc(s_mlp, labs)) +
-      " acc=" + f3.call(accuracy(s_mlp, labs)));
 print("test ridge auc=" + f3.call(auc(s_ridge, labs)) +
       " acc=" + f3.call(accuracy(s_ridge, labs)));
 
@@ -194,6 +192,8 @@ for blk in [["raw", SR, N_SRC], ["cooc", SC, 28]] {
     for f in blk[1][2] { s.push(ridge_output(w, f)); }
     print("test " + blk[0] + "   auc=" + f3.call(auc(s, blk[1][3])));
 }
+print("test mlp   auc=" + f3.call(auc(s_mlp, labs)) +
+      " acc=" + f3.call(accuracy(s_mlp, labs)) + "   <- the headline");
 
 // Stay visibly alive: background noise keeps the liquid firing after
 // the script ends, so Run in the editor shows ongoing activity.

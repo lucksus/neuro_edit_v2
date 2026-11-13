@@ -173,8 +173,6 @@ for f in S[2] {
 }
 let labs = S[3];
 let f3 = |v| (v * 1000.0).to_int() / 1000.0;
-print("test mlp   auc=" + f3.call(auc(s_mlp, labs)) +
-      " acc=" + f3.call(accuracy(s_mlp, labs)));
 print("test ridge auc=" + f3.call(auc(s_ridge, labs)) +
       " acc=" + f3.call(accuracy(s_ridge, labs)));
 
@@ -186,11 +184,13 @@ for blk in [["raw", SR, N_SRC], ["cooc", SC, 28]] {
     for f in blk[1][2] { s.push(ridge_output(w, f)); }
     print("test " + blk[0] + "   auc=" + f3.call(auc(s, blk[1][3])));
 }
+print("test mlp   auc=" + f3.call(auc(s_mlp, labs)) +
+      " acc=" + f3.call(accuracy(s_mlp, labs)) + "   <- the headline");
 
 sim.reset();
 // AdEx noise kick is a current pulse — a bigger kick value is needed
 // than the izh examples use to keep the liquid visibly firing.
-sim.set_noise(60.0, 700.0);
+sim.set_noise(200.0, 700.0);
 sim.run(400.0);
 print("done: spikes=" + sim.spikes() +
       " — AdEx liquid still firing on noise; press Run to continue");

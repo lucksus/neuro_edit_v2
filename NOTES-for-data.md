@@ -3138,3 +3138,106 @@ while untouched runs show "paused t = 0.0 s".
 - Whole-group drag moves members but not the group's inputs — the
   kick input stays behind on a moved sheet. Move inputs that target
   only group members along too?
+
+## Stage 24 — examples that show what they claim, big LSM end-to-end, MLP readout
+
+### The audit (worker path, `editor/tests/example_audit.rs`)
+
+Every bundled example was driven through the real editor worker (`SimCtl` +
+`ClientMsg::Eval`), then `RunMs(300)` — the same Run the UI issues — with
+`NEURO_QUICK=1`. All 9 publish activity (`time_ms` advances, `spikes_total` and
+`rate_hz` positive) with **no input edits**:
+
+| example | shows | activity w/o edits |
+|---|---|---|
+| first_spikes | five-neuron driven chain; v(t)/raster light up | ✅ |
+| grid_wave | 20×20 sheet, left-edge kick rolls a wave across | ✅ |
+| lsm_readout | 216-cell reservoir + MLP readout, hidden-correlation task | ✅ |
+| lsm_big | 4096-neuron liquid as block group, MLP + ridge/raw/cooc baselines | ✅ |
+| lsm_big_off | same big liquid, signal switched off — all readouts at chance | ✅ |
+| lsm_adex | 1728-cell AdEx liquid (E/I 0.35), same task + baselines | ✅ |
+| lsm_hidden | multi-seed study with permutation null (honest eval) | ✅ |
+| detector | planted correlation events, job-mode progress | ✅ |
+| memory_window | how long a liquid keeps an event readable (tau sweep) | ✅ |
+
+Fixes applied: the three job-style examples (detector, memory_window,
+lsm_hidden) ran their experiment then left a quiet sim — each got a noise/run
+tail so Run still shows firing. lsm_hidden's fixture save is now skipped in
+quick mode (tests ran with `sim/` as cwd, where `examples/` doesn't exist).
+
+### MLP readout (`sim/src/mlp.rs`, `net-format` v6)
+
+- Non-spiking MLP trained on reservoir features (per-neuron rates here):
+  tanh hidden layers, sigmoid output, standardizes inputs, seeded init
+  (deterministic), L2 weight decay, validation split + early stopping.
+- Rhai: `fit_mlp(x, T, F, y[, opts])` (opts: `hidden`, `epochs`, `lr`, `wd`,
+  `seed`, `val_frac`, `patience`), `mlp_output(m, row)`, `mlp_sizes(m)`,
+  `net.set_readout_mlp(name, m)` / `net.readout_mlp(name)`, `quick()`,
+  `sim.backend()`. Listed in script help.
+- Persisted as `MlpDef` on readouts in `.ne2` **format v6**; v1–v5 files
+  load with `mlp = null` (`ReadoutV5` lift). Malformed weight shapes are
+  rejected on load; `est_net_bytes` accounts for the weights.
+- Unit tests: learns XOR, matches ridge on a linear task within tolerance,
+  deterministic per seed, applies standardization.
+- Fit cost is trivial: 200×4096 features, hidden 24, 120 epochs ≈ **0.9 s**.
+
+### Big-LSM numbers (held-out, honest)
+
+`lsm_big` — 4096 izh neurons, hidden-correlation task, ridge + raw +
+cooccurrence baselines printed beside the MLP:
+
+| metric | full (CUDA) | quick (CPU) |
+|---|---|---|
+| test mlp auc/acc | 0.833–0.835 / 0.74–0.75 | 0.901 / 0.833 |
+| test ridge auc | 0.806 | 0.772 |
+| test raw auc | ~0.48–0.54 | 0.475 |
+| test cooc auc | 1.0 | 1.0 |
+| wall time | ~1m21s (was 2m02s at 200/120 windows) | ~10s |
+
+`lsm_big_off` (signal off — the control): mlp 0.464, ridge 0.434, raw 0.365,
+cooc 0.499 — everything at chance, dynamics still alive (~6.7 Hz probe rate).
+Liquid fires on noise; there's nothing to learn. Test asserts |auc−0.5|<0.2.
+
+`lsm_adex` — 1728 AdEx, E/I 0.35: mlp 0.937/0.86, ridge 0.887/0.75, raw 0.531,
+cooc 1.0, ~19s CUDA. Honest note: at quick scale **ridge (0.94) beats the MLP
+(0.82)** — the MLP doesn't always win.
+
+`lsm_readout` (small): mlp 0.781 > ridge 0.658 > raw 0.561 (quick).
+
+The 28-feature cooccurrence baseline still wins everywhere it exists (1.0) —
+same caveat as the Stage-6 hidden-correlation result: for this task shape a
+side-channel beats the liquid, and the examples now say so out loud rather
+than hiding it.
+
+### Editor
+
+- Examples menu lists all 9 with a one-line purpose (`name — purpose`) in
+  both the toolbar and script-editor menus.
+- Each example carries a `groups` hint; the three big liquids pin
+  `res:block` on load so the reservoir presents as a Stage-23 block glyph.
+- Screenshots: `review/stage24_lsm_block_{800700,1440900}.png` (lsm_big
+  running, reservoir as block group, readout results in console) and
+  `review/stage24_adex_{800700,1440900}.png` (AdEx variant running).
+
+### Gates
+
+- `cargo test --workspace` — see count below (needs final run after this NOTES edit)
+- `editor/web/build.sh` — OK
+- `cargo fmt --check` — clean
+- No sim-behaviour change: MLP is a pure post-processing function; the only
+  net change is the new readout field (old spikes preserved).
+- `PROTO_VERSION` unchanged — no wire-protocol change.
+
+### Open questions for Nico
+
+- cooc still aces this task family — want an example where the liquid is the
+  *only* thing that works (e.g. truly hidden temporal XOR with no pairwise
+  shortcut), or do we keep showing the honest comparison?
+- The AdEx liquid goes quiet after its noise tail (adaptation wins at 200 Hz
+  kick) while the izh liquid self-sustains — is a self-sustaining AdEx
+  regime worth tuning, or is "settles after the experiment" acceptable for
+  the demo?
+- `lsm_big` full run is ~1m20s on CUDA — mostly per-window host round-trips
+  (each 40 ms window does `run_steps` + `spike_counts`). Batch the feature
+  collection (one `run` + sample at end via trace buffer) if we want it
+  faster; acceptable as-is?
