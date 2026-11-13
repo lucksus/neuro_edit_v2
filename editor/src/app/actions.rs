@@ -284,3 +284,22 @@ impl EditorApp {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[test]
+    fn watch_takes_lowest_ids_not_hash_order() {
+        // U8: selection is a HashSet — iterating it gave an arbitrary
+        // 8 of the selected neurons. Now the 8 lowest ids win.
+        let mut app = EditorApp::new(crate::simctl::SimCtl::offline(), None);
+        let mut geo = crate::snap::GeoSnap::default();
+        geo.pos = vec![[0.0; 3]; 20];
+        app.geo = Some(std::sync::Arc::new(geo));
+        app.selection = [15, 3, 9, 1, 12, 7, 19, 2, 11, 5].into_iter().collect();
+        app.update_watch();
+        assert_eq!(app.watch_sent, vec![1, 2, 3, 5, 7, 9, 11, 12]);
+    }
+}
