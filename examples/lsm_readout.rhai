@@ -1,17 +1,24 @@
-// Reservoir + readout (liquid state machine): a small 3D reservoir is
-// driven by 6 random bit streams; on "event" windows two pairs share a
-// hidden common bit — invisible to any single stream's rate. A delta
-// readout trained on the reservoir's own spike trace separates event
-// from noise; the raw stream baseline stays at chance. Keep it small —
-// this is a demo, not the paper experiment (see lsm_hidden.rhai).
+// Reservoir + MLP readout (liquid state machine): a small 3D reservoir
+// is driven by 6 random bit streams; on "event" windows two pairs share
+// a hidden common bit — invisible to any single stream's rate. An MLP
+// trained on the reservoir's spike counts separates event from noise on
+// held-out windows; the raw stream baseline stays at chance. Keep it
+// small — this is the intro demo; lsm_big.rhai is the real experiment
+// and lsm_hidden.rhai the full honest evaluation.
+//
+//   What to look for: "alive:" shows the reservoir firing on a probe
+//   window before any training; the test AUCs compare mlp vs ridge on
+//   reservoir features vs a raw-input baseline that must sit at 0.5.
+//   After the script ends the liquid keeps firing on background noise,
+//   so pressing Run in the editor still shows activity.
 
 let SEED = 7;
 let SIDE = 6;                  // 6^3 = 216 reservoir neurons
 let N_SRC = 6;
 let PAIRS = [[0, 1], [2, 3]];
-let WIN = 30;                  // ms per window (1 ms steps)
-let TRAIN = 60;
-let TEST = 40;
+let WIN = 30;                  // ms per window (1 ms bits, 0.1 ms steps)
+let TRAIN = 80;
+let TEST = 50;
 // Coincidence-detector regime: Izhikevich RS fires only above ~4 mV of
 // sustained current, so a single stream at 2.8 stays sub-threshold but
 // the pair's shared bit arriving together (5.6) spikes the pool — the
@@ -30,12 +37,11 @@ net.set_exc_inh("res", 0.2);
 net.create_connections("res", 1.0, 30.0, 1.0);
 let res = net.neurons_of("res");
 let n_res = res.len();
+net.add_readout("ro", res);
 
 // Each pair shares a big pool (the planted common bit hits the SAME
-// reservoir neurons). Every feature neuron is on a shared pool — no
-// private pools, which only added signal-free dimensions.
+// reservoir neurons).
 let SHARED = 80;
-let PRIV = 0;
 for p in PAIRS {
     let pool = [];
     for k in 0..SHARED {
@@ -46,18 +52,13 @@ for p in PAIRS {
         for n in pool {
             tgts.push([n, W_IN]);
         }
-        for k in 0..PRIV {
-            tgts.push([res[rand(0.0, 1.0e9).to_int() % n_res], W_IN]);
-        }
         net.add_input("src" + s, tgts);
     }
 }
 
-// Reservoir features after playing a bit window: raw per-neuron spike
-// counts (not rates — the delta rule needs features of order ~1).
-// Only paired sources have inputs — the rest of the stream is pure
-// noise by design and stays silent (play_input errors on a missing
-// name since Stage 18).
+// Reservoir features after playing a bit window: per-neuron spike
+// counts. Only paired sources have inputs — the rest of the stream is
+// pure noise by design and stays silent.
 let driven = [];
 for p in PAIRS {
     for s in p {
@@ -77,32 +78,80 @@ let replay = |m| {
     sim.spike_counts(WIN * 10)
 };
 
-let stream = rng_stream(SEED, N_SRC, 0.4);
-let ro = delta_new(n_res);
-ro.set_proper(1);
-let LR = 0.15;
+// alive proof before training: the reservoir fires on a probe window.
+{
+    let m = rng_stream(SEED + 5, N_SRC, 0.4).window(WIN, 1, PAIRS, 0.85);
+    let f = replay.call(m);
+    print("alive: spikes=" + sim.spikes() +
+          " rate=" + sim.rate() + " Hz over the probe window");
+}
 
-// --- train ---
+// --- collect train / held-out test feature sets ---
+let g_tr = rng_stream(SEED + 11, N_SRC, 0.4);
+let g_te = rng_stream(SEED + 77, N_SRC, 0.4);
+let X = [];
+let Xr = [];
+let Y = [];
+let Xte = [];
+let Xte_raw = [];
+let labs = [];
 for i in 0..TRAIN {
     let ev = (i % 2) == 0;
-    let m = stream.window(WIN, if ev { 1 } else { 0 }, PAIRS, 0.85);
-    ro.learn(replay.call(m), if ev { 1.0 } else { 0.0 }, LR);
+    let m = g_tr.window(WIN, if ev { 1 } else { 0 }, PAIRS, 0.85);
+    for v in replay.call(m) { X.push(v); }
+    for s in 0..N_SRC {
+        let a = 0.0;
+        for t in 0..WIN { a += m[t][s]; }
+        Xr.push(a / WIN);
+    }
+    Y.push(if ev { 1.0 } else { 0.0 });
 }
-
-// --- test (fresh windows from the same stream) ---
-let n = 0.0;
-let ok = 0.0;
-let base_ok = 0.0;
 for i in 0..TEST {
     let ev = (i % 2) == 0;
-    let m = stream.window(WIN, if ev { 1 } else { 0 }, PAIRS, 0.85);
-    let s = ro.output(replay.call(m));
-    if (s > 0.5) == ev { ok += 1.0; }
-    // linear baseline on the raw bits: per-source mean, majority vote —
-    // it cannot see pair structure, so it should sit at chance.
-    let b = (m[0][0] + m[0][1]) > 0.5;
-    if b == ev { base_ok += 1.0; }
-    n += 1.0;
+    let m = g_te.window(WIN, if ev { 1 } else { 0 }, PAIRS, 0.85);
+    Xte.push(replay.call(m));
+    let raw = [];
+    for s in 0..N_SRC {
+        let a = 0.0;
+        for t in 0..WIN { a += m[t][s]; }
+        raw.push(a / WIN);
+    }
+    Xte_raw.push(raw);
+    labs.push(if ev { 1 } else { 0 });
 }
-print("readout accuracy on reservoir trace: " + (ok / n));
-print("raw-stream baseline (expect ~0.5): " + (base_ok / n));
+
+// --- train the non-spiking MLP on reservoir counts; ridge baseline ---
+let m_mlp = fit_mlp(X, TRAIN, n_res, Y,
+                    #{hidden: 16, epochs: 120, lr: 0.05, seed: SEED});
+let wr = fit_ridge(X, TRAIN, n_res, Y, 1.0);
+net.set_readout_mlp("ro", m_mlp); // trained weights persist in the .ne2
+
+let s_mlp = [];
+let s_ridge = [];
+for f in Xte {
+    s_mlp.push(mlp_output(m_mlp, f));
+    s_ridge.push(ridge_output(wr, f));
+}
+let f3 = |v| (v * 1000.0).to_int() / 1000.0;
+print("test mlp   auc=" + f3.call(auc(s_mlp, labs)) +
+      " acc=" + f3.call(accuracy(s_mlp, labs)));
+print("test ridge auc=" + f3.call(auc(s_ridge, labs)) +
+      " acc=" + f3.call(accuracy(s_ridge, labs)));
+
+// raw-stream baseline: mean bit per source over the SAME windows,
+// linear readout — it cannot see pair structure, so it must sit at
+// chance.
+let wr_raw = fit_ridge(Xr, TRAIN, N_SRC, Y, 1.0);
+let s_raw = [];
+for m2 in Xte_raw {
+    s_raw.push(ridge_output(wr_raw, m2));
+}
+print("test raw   auc=" + f3.call(auc(s_raw, labs)) + "   (expect ~0.5)");
+
+// Stay visibly alive: background noise keeps the reservoir firing after
+// the script ends, so Run in the editor still shows activity.
+sim.reset();
+sim.set_noise(60.0, 8.0);
+sim.run(400.0);
+print("done: spikes=" + sim.spikes() +
+      " — reservoir is still firing on noise; press Run to continue");

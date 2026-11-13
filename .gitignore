@@ -9,5 +9,5 @@ docs/screenshots/*.png
 editor/dist-web/
 
 # runtime artifacts of the sim CLI / server data-dir
-/datasets/
+datasets/
 /runs/

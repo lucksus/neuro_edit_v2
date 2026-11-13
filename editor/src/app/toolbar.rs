@@ -320,7 +320,7 @@ impl EditorApp {
                     }
                     ui.menu_button("Examples", |ui| {
                         for ex in crate::examples::EXAMPLES {
-                            if ui.button(ex.name).clicked() {
+                            if ui.button(format!("{} — {}", ex.name, ex.purpose)).clicked() {
                                 self.load_example(ex);
                                 ui.close();
                             }

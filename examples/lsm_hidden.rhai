@@ -55,6 +55,16 @@ let TRAIN_N = 200;
 let VAL_N = 120;
 let TEST_N = 120;
 
+// quick(): the examples test / smoke path — same experiment, tiny scale.
+if quick() {
+    SEEDS = [1, 7];
+    LIQ_SIDE = 6;
+    TRAIN_N = 60;
+    VAL_N = 40;
+    TEST_N = 40;
+    NPERM = 40;
+}
+
 // ---------- helpers (anonymous fns capture the scope above) ----------
 
 let build_liquid = |seed_val| {
@@ -306,8 +316,9 @@ for si in 0..SEEDS.len() {
         null_draws.push(d);
     }
 
-    if si == 0 {
-        // keep trained weights in the saved file (editor readouts plot)
+    if si == 0 && !quick() {
+        // keep trained weights in the saved file (editor readouts plot);
+        // quick/test runs don't rewrite the fixture.
         let wr = fit_ridge(S1[0], TRAIN_N, n_liq, S1[1], RIDGE_L);
         net.set_readout_weights("ro", wr);
         net.save("examples/lsm.ne2");
@@ -366,4 +377,9 @@ for s in [0.0, 0.5, 0.8, 1.0] {
           "  liquid ridge_auc=" + f3.call(rl[3]) +
           "  cooc ridge_auc=" + f3.call(rc[3]));
 }
-print("done");
+// Stay visibly alive: background noise keeps the last-built liquid
+// firing after the experiment ends, so Run in the editor still shows
+// activity (Stage 24 rule: every example shows activity on start).
+sim.set_noise(40.0, 12.0);
+sim.run(300.0);
+print("done — liquid still firing on noise (spikes=" + sim.spikes() + ")");

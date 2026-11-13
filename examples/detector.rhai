@@ -58,6 +58,19 @@ let VAL = [22500.0, 34000.0];
 let TEST = [34000.0, 45000.0];
 // ---------- /parameters ---------- [TEST-BLOCK]
 
+// quick(): the examples test / smoke path — same experiment, tiny scale.
+if quick() {
+    SEEDS = [1];
+    LEN_MS = 9000;
+    NPERM = 40;
+    LIQ_SIDE = 6;
+    TRAIN = [0.0, 4500.0];
+    VAL = [4500.0, 6800.0];
+    TEST = [6800.0, 9000.0];
+    MARGIN = 60;
+    NEG_PRE = 120.0;
+}
+
 // ---------- dataset ----------
 let d = dataset_gen(#{name: DS_NAME, channels: NCH, len_ms: LEN_MS,
     dt_ms: DT_MS, dist: "poisson", rate_hz: RATE_HZ, seed: 901,
@@ -311,4 +324,9 @@ let ns = sd_of.call(null_draws.map(|v| [v]), 0, nm);
 print("permutation null: mean=" + f3.call(nm) + " sd=" + f3.call(ns) +
       "  pooled p=" + f3.call((1.0 + null_above) / (null_draws.len() + 1.0)) +
       " (" + null_draws.len() + " draws)");
-print("done");
+// Stay visibly alive: background noise keeps the last-built liquid
+// firing after the experiment ends, so Run in the editor still shows
+// activity (Stage 24 rule: every example shows activity on start).
+sim.set_noise(40.0, 12.0);
+sim.run(300.0);
+print("done — liquid still firing on noise (spikes=" + sim.spikes() + ")");

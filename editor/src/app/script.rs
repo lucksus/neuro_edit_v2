@@ -11,6 +11,9 @@ use super::{gate, Act, EditorApp, PlotTab};
 
 impl EditorApp {
     /// Load a bundled example into the script editor (Stage 13 H).
+    /// Stage 24: the example's `groups` hints pin group display modes —
+    /// the big liquids collapse their reservoir into a Stage-23 block
+    /// glyph instead of drawing thousands of dots.
     pub(super) fn load_example(&mut self, ex: &'static crate::examples::Example) {
         self.script.name = ex.file.trim_end_matches(".rhai").to_string();
         self.script.text = ex.src.to_string();
@@ -18,6 +21,14 @@ impl EditorApp {
         self.script.example_base_ver = None;
         self.script.example_deadline_ms = f64::MAX;
         self.script.example_quiet = 0;
+        for (name, mode) in ex.groups {
+            let m = match *mode {
+                "inside" => super::GroupMode::Inside,
+                "block" => super::GroupMode::Block,
+                _ => super::GroupMode::Whole,
+            };
+            self.group_modes.insert(name.to_string(), m);
+        }
         self.win.script = true;
         self.status = format!("example {:?} loaded — press Run", ex.name);
     }
@@ -79,7 +90,10 @@ impl EditorApp {
                     }
                     ui.menu_button("Examples", |ui| {
                         for ex in crate::examples::EXAMPLES {
-                            if ui.button(ex.name).clicked() {
+                            if ui
+                                .button(format!("{} — {}", ex.name, ex.purpose))
+                                .clicked()
+                            {
                                 self.load_example(ex);
                                 ui.close();
                             }

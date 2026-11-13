@@ -55,6 +55,20 @@ let TRAIN = [0.0, 150000.0];
 let TEST = [150000.0, 300000.0];
 // ---------- /parameters ---------- [TEST-BLOCK]
 
+// quick(): the examples test / smoke path — same experiment, tiny scale.
+if quick() {
+    LEN_MS = 16000;
+    SEEDS = [5];
+    DELAYS = [0.0, 20.0, 100.0];
+    SETTINGS = [
+        ["merged",      6, 90.0, 3.0, 12.0,   0.0,  0.0],
+        ["rec50",       6, 90.0, 3.0, 12.0,  50.0,  0.0],
+    ];
+    NPERM = 30;
+    TRAIN = [0.0, 8000.0];
+    TEST = [8000.0, 16000.0];
+}
+
 // ---------- dataset ----------
 let d = dataset_gen(#{name: DS_NAME, channels: NCH, len_ms: LEN_MS,
     dt_ms: DT_MS, dist: "poisson", rate_hz: RATE_HZ, seed: 902,
@@ -306,4 +320,9 @@ for st in 0..SETTINGS.len() {
     }
     print(rline);
 }
-print("done");
+// Stay visibly alive: background noise keeps the last-built liquid
+// firing after the experiment ends, so Run in the editor still shows
+// activity (Stage 24 rule: every example shows activity on start).
+sim.set_noise(40.0, 12.0);
+sim.run(300.0);
+print("done — liquid still firing on noise (spikes=" + sim.spikes() + ")");
