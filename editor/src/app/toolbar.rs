@@ -216,14 +216,14 @@ impl EditorApp {
                 ui.menu_button("View", |ui| {
                     // toggles stay open so several windows can flip at once
                     let err_seq = self.ctl.shared.read().unwrap().err_seq;
-                    let unread_err = err_seq > self.console.err_seq_seen && !self.show_console;
+                    let unread_err = err_seq > self.console.err_seq_seen && !self.win.console;
                     for (flag, icon, label) in [
-                        (&mut self.show_inspector, &ic.inspector, "Inspector"),
-                        (&mut self.show_plots, &ic.plots, "Plots"),
-                        (&mut self.show_console, &ic.console, "Console"),
-                        (&mut self.show_script, &ic.script, "Script editor"),
-                        (&mut self.show_inputs, &ic.connect, "Inputs"),
-                        (&mut self.show_files, &ic.save, "Files"),
+                        (&mut self.win.inspector, &ic.inspector, "Inspector"),
+                        (&mut self.win.plots, &ic.plots, "Plots"),
+                        (&mut self.win.console, &ic.console, "Console"),
+                        (&mut self.win.script, &ic.script, "Script editor"),
+                        (&mut self.win.inputs, &ic.connect, "Inputs"),
+                        (&mut self.win.files, &ic.save, "Files"),
                         (&mut self.show_fps, &ic.speed, "frame stats"),
                     ] {
                         let dot = unread_err && label == "Console";
@@ -250,11 +250,11 @@ impl EditorApp {
                 });
                 ui.menu_button("Help", |ui| {
                     if ui.button("Manual  (?)").clicked() {
-                        self.show_manual = true;
+                        self.win.manual = true;
                         ui.close();
                     }
                     if ui.button("Shortcuts").clicked() {
-                        self.show_keys = true;
+                        self.win.keys = true;
                         ui.close();
                     }
                     ui.menu_button("Examples", |ui| {

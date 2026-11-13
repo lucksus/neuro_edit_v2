@@ -18,7 +18,7 @@ impl EditorApp {
         self.script.example_base_ver = None;
         self.script.example_deadline_ms = f64::MAX;
         self.script.example_quiet = 0;
-        self.show_script = true;
+        self.win.script = true;
         self.status = format!("example {:?} loaded — press Run", ex.name);
     }
 
@@ -40,10 +40,10 @@ impl EditorApp {
     /// Multiline script editor (the original's QScintilla script window):
     /// scripts saved in the .ne2, load/save to .rhai files, Run via worker.
     pub(super) fn script_window(&mut self, ctx: &egui::Context) {
-        if !self.show_script {
+        if !self.win.script {
             return;
         }
-        let mut open = self.show_script;
+        let mut open = self.win.script;
         let u = usable_rect(ctx);
         let dr = clamp_window_rect(
             egui::Rect::from_min_size(u.min + egui::vec2(12.0, 8.0), egui::vec2(480.0, 360.0)),
@@ -70,7 +70,7 @@ impl EditorApp {
                             script: self.script.text.clone(),
                         });
                         self.plots.tab = PlotTab::Jobs;
-                        self.show_plots = true;
+                        self.win.plots = true;
                     }
                     if ui.button("Save to net").clicked() {
                         self.edit_net(NetEdit::ScriptAdd {
@@ -152,6 +152,6 @@ impl EditorApp {
                     }
                 });
             });
-        self.show_script = open;
+        self.win.script = open;
     }
 }

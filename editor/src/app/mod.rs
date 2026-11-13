@@ -115,18 +115,9 @@ pub struct EditorApp {
 
     /// Console input/history + server-error unread state.
     console: ConsoleUi,
-    pub(crate) show_console: bool,
-    pub(crate) show_plots: bool,
-    pub(crate) show_inspector: bool,
-    pub(crate) show_script: bool,
-    pub(crate) show_inputs: bool,
-    /// `?` shortcut overlay.
-    pub(crate) show_keys: bool,
-    /// Manual window (docs/manual pages baked in).
-    pub(crate) show_manual: bool,
-    manual_page: usize,
-    /// Files window (per-user space when remote, app-data dir locally).
-    pub(crate) show_files: bool,
+    /// Which floating windows are open (+ manual page) — view.rs's
+    /// number-key shortcuts toggle these directly.
+    pub win: Windows,
     /// Files-window + picker + recent-files state.
     files: FilesUi,
     /// Multi-user login + reconnect state (`--connect http(s)://…`).
@@ -481,6 +472,24 @@ impl Default for SimControls {
     }
 }
 
+/// Which floating windows are open — the runtime mirror of `WindowVis`
+/// (the persisted subset) plus keys overlay, manual page and files.
+#[derive(Default)]
+pub struct Windows {
+    pub console: bool,
+    pub plots: bool,
+    pub inspector: bool,
+    pub script: bool,
+    pub inputs: bool,
+    /// `?` shortcut overlay.
+    pub keys: bool,
+    /// Manual window (docs/manual pages baked in).
+    pub manual: bool,
+    pub manual_page: usize,
+    /// Files window (per-user space when remote, app-data dir locally).
+    pub files: bool,
+}
+
 /// Persisted UI state (recent files + window visibility) across sessions.
 /// Window positions/sizes persist separately through egui's own memory
 /// (eframe stores it under the same storage slot).
@@ -561,15 +570,15 @@ impl EditorApp {
             pick_click: None,
             inst_half: Vec::new(),
             console: ConsoleUi::default(),
-            show_console: wins.console,
-            show_plots: wins.plots,
-            show_inspector: wins.inspector,
-            show_script: wins.script,
-            show_inputs: wins.inputs,
-            show_keys: false,
-            show_manual: false,
-            manual_page: 0,
-            show_files: wins.files,
+            win: Windows {
+                console: wins.console,
+                plots: wins.plots,
+                inspector: wins.inspector,
+                script: wins.script,
+                inputs: wins.inputs,
+                files: wins.files,
+                ..Default::default()
+            },
             files: {
                 #[allow(unused_mut)]
                 let mut f = FilesUi::default();
@@ -706,12 +715,12 @@ impl eframe::App for EditorApp {
         let p = Persisted {
             recent: self.files.recent.iter().cloned().collect(),
             windows: WindowVis {
-                inspector: self.show_inspector,
-                plots: self.show_plots,
-                console: self.show_console,
-                script: self.show_script,
-                inputs: self.show_inputs,
-                files: self.show_files,
+                inspector: self.win.inspector,
+                plots: self.win.plots,
+                console: self.win.console,
+                script: self.win.script,
+                inputs: self.win.inputs,
+                files: self.win.files,
             },
             token: self.login.saved_token.clone(),
         };

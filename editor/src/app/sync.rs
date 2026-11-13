@@ -228,7 +228,7 @@ impl EditorApp {
                     {
                         self.selection = ids.iter().copied().collect();
                     }
-                    self.show_plots = true;
+                    self.win.plots = true;
                     self.plots.tab = PlotTab::Voltage;
                 }
                 // Retire only after the watch has stayed applied across a

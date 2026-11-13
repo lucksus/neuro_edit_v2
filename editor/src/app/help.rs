@@ -10,10 +10,10 @@ impl EditorApp {
     /// `?` — every mode key and mouse gesture in one small overlay.
     /// (WASD/QE pan the camera, so tools use other letters.)
     pub(super) fn keys_window(&mut self, ctx: &egui::Context) {
-        if !self.show_keys {
+        if !self.win.keys {
             return;
         }
-        let mut open = self.show_keys;
+        let mut open = self.win.keys;
         app_win(ctx, "Shortcuts")
             .open(&mut open)
             .collapsible(false)
@@ -69,15 +69,15 @@ impl EditorApp {
                     row(ui, "?", "manual");
                 });
             });
-        self.show_keys = open;
+        self.win.keys = open;
     }
 
     /// Manual window — `docs/manual/*.md` baked into the binary.
     pub(super) fn manual_window(&mut self, ctx: &egui::Context) {
-        if !self.show_manual {
+        if !self.win.manual {
             return;
         }
-        let mut open = self.show_manual;
+        let mut open = self.win.manual;
         // Stage 15 A: narrow viewports get a shrunken manual — cap the
         // default at 70% of the usable strip instead of covering it.
         let u = usable_rect(ctx);
@@ -103,7 +103,7 @@ impl EditorApp {
                     ui.vertical(|ui| {
                         ui.set_width(110.0);
                         for (i, p) in crate::manual::PAGES.iter().enumerate() {
-                            ui.selectable_value(&mut self.manual_page, i, p.title);
+                            ui.selectable_value(&mut self.win.manual_page, i, p.title);
                         }
                     });
                     ui.separator();
@@ -114,11 +114,11 @@ impl EditorApp {
                         egui::vec2(body_w, body_h),
                         egui::Layout::top_down(egui::Align::LEFT),
                         |ui| {
-                            crate::manual::body_scroll(ui, body_w, self.manual_page);
+                            crate::manual::body_scroll(ui, body_w, self.win.manual_page);
                         },
                     );
                 });
             });
-        self.show_manual = open;
+        self.win.manual = open;
     }
 }

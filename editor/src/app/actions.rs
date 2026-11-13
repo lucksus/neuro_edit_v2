@@ -43,7 +43,7 @@ impl EditorApp {
         if let Some(g) = &self.geo {
             let inst = g.pos.len() as u32 + k;
             self.selection = [inst].into_iter().collect();
-            self.show_inspector = true;
+            self.win.inspector = true;
         }
     }
 
@@ -51,7 +51,7 @@ impl EditorApp {
     pub fn plot_readout_weights(&mut self, k: u32) {
         self.plots.ro_sel = k as usize;
         self.plots.tab = PlotTab::Readouts;
-        self.show_plots = true;
+        self.win.plots = true;
     }
 
     /// Fit the camera on the whole network.

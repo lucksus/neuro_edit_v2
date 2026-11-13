@@ -576,16 +576,16 @@ fn keys(app: &mut EditorApp, ui: &mut egui::Ui) {
             app.frame_all();
         }
         if i.key_pressed(egui::Key::Questionmark) {
-            app.show_manual = true;
+            app.win.manual = true;
         }
         if i.modifiers.ctrl {
             for (key, flag) in [
-                (egui::Key::Num1, &mut app.show_inspector),
-                (egui::Key::Num2, &mut app.show_plots),
-                (egui::Key::Num3, &mut app.show_console),
-                (egui::Key::Num4, &mut app.show_script),
-                (egui::Key::Num5, &mut app.show_inputs),
-                (egui::Key::Num6, &mut app.show_files),
+                (egui::Key::Num1, &mut app.win.inspector),
+                (egui::Key::Num2, &mut app.win.plots),
+                (egui::Key::Num3, &mut app.win.console),
+                (egui::Key::Num4, &mut app.win.script),
+                (egui::Key::Num5, &mut app.win.inputs),
+                (egui::Key::Num6, &mut app.win.files),
             ] {
                 if i.key_pressed(key) {
                     *flag = !*flag;

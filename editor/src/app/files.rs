@@ -183,14 +183,14 @@ impl EditorApp {
             self.files.ctx_dropped = Some(dropped);
         }
         self.files_pump();
-        if !self.show_files {
+        if !self.win.files {
             return;
         }
         if !self.files.opened {
             self.files.opened = true;
             self.files_refresh();
         }
-        let mut open = self.show_files;
+        let mut open = self.win.files;
         let u = usable_rect(ctx);
         let dr = clamp_window_rect(
             egui::Rect::from_min_size(
@@ -350,7 +350,7 @@ impl EditorApp {
                     ui.weak(&self.files.status);
                 }
             });
-        self.show_files = open;
+        self.win.files = open;
     }
 
     /// Double-click open: dirs descend; `.ne2` loads; `.rhai` opens in
@@ -395,7 +395,7 @@ impl EditorApp {
                 }
                 None => self.ctl.send(ClientMsg::ReadFile { path }),
             }
-            self.show_script = true;
+            self.win.script = true;
         }
     }
 

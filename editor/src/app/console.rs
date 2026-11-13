@@ -21,12 +21,12 @@ impl EditorApp {
     }
 
     pub(super) fn console(&mut self, ctx: &egui::Context) {
-        if !self.show_console {
+        if !self.win.console {
             return;
         }
         // U1: an open console has seen every error so far.
         self.console.err_seq_seen = self.ctl.shared.read().unwrap().err_seq;
-        let mut open = self.show_console;
+        let mut open = self.win.console;
         let u = usable_rect(ctx);
         let dr = console_default_rect(u);
         app_win(ctx, "Console (Rhai)")
@@ -105,6 +105,6 @@ impl EditorApp {
                 });
                 ui.small("Ctrl+Enter runs · up/down = history · `net`, `sim`, `rng` in scope");
             });
-        self.show_console = open;
+        self.win.console = open;
     }
 }

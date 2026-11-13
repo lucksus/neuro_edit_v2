@@ -12,10 +12,10 @@ use super::{EditorApp, PlotTab};
 
 impl EditorApp {
     pub(super) fn plots(&mut self, ctx: &egui::Context) {
-        if !self.show_plots {
+        if !self.win.plots {
             return;
         }
-        let mut open = self.show_plots;
+        let mut open = self.win.plots;
         let u = usable_rect(ctx);
         let dr = plots_default_rect(u);
         app_win(ctx, "Plots")
@@ -275,7 +275,7 @@ impl EditorApp {
                     PlotTab::Jobs => self.jobs_ui(ui),
                 }
             });
-        self.show_plots = open;
+        self.win.plots = open;
     }
 
     /// Turn follow off when the user pans/zooms away from the imposed

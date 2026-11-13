@@ -11,10 +11,10 @@ use super::{EditorApp, PlotTab};
 
 impl EditorApp {
     pub(super) fn inspector(&mut self, ctx: &egui::Context) {
-        if !self.show_inspector {
+        if !self.win.inspector {
             return;
         }
-        let mut open = self.show_inspector;
+        let mut open = self.win.inspector;
         let u = usable_rect(ctx);
         let dr = clamp_window_rect(
             egui::Rect::from_min_size(
@@ -108,15 +108,15 @@ impl EditorApp {
                     }
                 });
             });
-        self.show_inspector = open;
+        self.win.inspector = open;
     }
 
     /// Constant-drive inputs, in their own floating window.
     pub(super) fn inputs_window(&mut self, ctx: &egui::Context) {
-        if !self.show_inputs {
+        if !self.win.inputs {
             return;
         }
-        let mut open = self.show_inputs;
+        let mut open = self.win.inputs;
         let u = usable_rect(ctx);
         let dr = clamp_window_rect(
             egui::Rect::from_min_size(u.min + egui::vec2(260.0, 8.0), egui::vec2(220.0, 140.0)),
@@ -147,7 +147,7 @@ impl EditorApp {
                     }
                 }
             });
-        self.show_inputs = open;
+        self.win.inputs = open;
     }
 
     pub(super) fn inspect_one(&mut self, ui: &mut egui::Ui, inst_id: u32) {
@@ -196,7 +196,7 @@ impl EditorApp {
                 // Discoverable watching: one click to the plots window.
                 if ui.button("Plot v(t)").clicked() {
                     self.watch(vec![id]);
-                    self.show_plots = true;
+                    self.win.plots = true;
                     self.plots.tab = PlotTab::Voltage;
                 }
                 ui.label("group memberships:".to_string());
