@@ -21,10 +21,10 @@ mod help;
 mod inspector;
 mod jobs;
 mod layout;
-mod script;
 #[cfg(not(target_arch = "wasm32"))]
 mod login;
 mod plots;
+mod script;
 mod sync;
 mod toolbar;
 
@@ -297,7 +297,6 @@ pub struct FilesUi {
     /// Recently opened nets (File → Open recent).
     pub recent: VecDeque<String>,
 }
-
 
 /// Login/session state for `--connect http(s)://…`: the open dialog,
 /// remembered token, last successful connect and the reconnect schedule.
@@ -631,83 +630,22 @@ impl EditorApp {
         self.ctl.send(c);
     }
 
-
     /// Apply a structured edit — versioned, delta-able, and expressible
     /// on the wire (unlike the old closure path).
     fn edit_net(&self, e: NetEdit) {
         self.ctl.send_edit(e);
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     // ---------------- panels ----------------
-
-
-
-
-
-
-
-
 
     // ------------------------------------------------------------------
     // Files window — one UI, two backends: the file protocol (remote,
     // per-user root) or std::fs on the local app-data dir.
     // ------------------------------------------------------------------
 
-
-
-
-
-
-
-
-
-
-
-
     // ------------------------------------------------------------------
     // Login dialog — `--connect http(s)://host` multi-user servers.
     // ------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 }
 
 impl eframe::App for EditorApp {
@@ -834,4 +772,3 @@ impl eframe::App for EditorApp {
         self.net_touched = false;
     }
 }
-

@@ -543,17 +543,15 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                                     // can't kill the worker thread silently —
                                     // the Eval arm wrapped `eval_str` the same
                                     // way.
-                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                                        || {
-                                            apply_edit(
-                                                &mut n,
-                                                dt,
-                                                &mut env.rng.borrow_mut(),
-                                                &edit,
-                                                &**cancel,
-                                            )
-                                        },
-                                    ))
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        apply_edit(
+                                            &mut n,
+                                            dt,
+                                            &mut env.rng.borrow_mut(),
+                                            &edit,
+                                            &**cancel,
+                                        )
+                                    }))
                                 } else {
                                     Ok(apply_edit(
                                         &mut n,
@@ -569,10 +567,7 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                                 status!();
                             }
                             match applied {
-                                Err(_) => emit_b(
-                                    &emit,
-                                    con("! script panicked (worker survived)"),
-                                ),
+                                Err(_) => emit_b(&emit, con("! script panicked (worker survived)")),
                                 Ok(Err(e)) => emit_to(
                                     &emit,
                                     client,
@@ -584,10 +579,7 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                                     // carries them to every client, like the
                                     // Eval's post-bump Geo republish did.
                                     if matches!(applied, Applied::Stopped(_)) {
-                                        emit_b(
-                                            &emit,
-                                            con("! Runtime error: stopped by user"),
-                                        );
+                                        emit_b(&emit, con("! Runtime error: stopped by user"));
                                     }
                                     bump(&env);
                                     let gen = env.net_gen.get();
@@ -1579,18 +1571,11 @@ fn script_equiv(e: &NetEdit) -> Option<String> {
         NetEdit::SetSynapseWeights { group, mean, sd } => Some(format!(
             "net.set_synapse_weights({group:?}, {mean:?}, {sd:?})"
         )),
-        NetEdit::SetSynTauDist {
-            src,
-            dst,
-            mean,
-            sd,
-        } => Some(format!(
+        NetEdit::SetSynTauDist { src, dst, mean, sd } => Some(format!(
             "net.set_syn_tau_dist({src:?}, {dst:?}, {mean:?}, {sd:?})"
         )),
         NetEdit::SetExcInh { group, frac } => Some(format!("net.set_exc_inh({group:?}, {frac:?})")),
-        NetEdit::ScriptAdd { name, src } => {
-            Some(format!("net.script_add({name:?}, {src:?})"))
-        }
+        NetEdit::ScriptAdd { name, src } => Some(format!("net.script_add({name:?}, {src:?})")),
         _ => None,
     }
 }
@@ -1936,12 +1921,7 @@ fn apply_edit(
             // Weights are sim-side state — no wire field carries them;
             // the otherwise-empty delta still bumps the client's version.
         }
-        NetEdit::SetSynTauDist {
-            src,
-            dst,
-            mean,
-            sd,
-        } => {
+        NetEdit::SetSynTauDist { src, dst, mean, sd } => {
             group_members(net, src)?;
             group_members(net, dst)?;
             net_format::builders::set_synapse_tau_dist(net, src, dst, *mean, *sd, rng);
@@ -2136,7 +2116,14 @@ mod tests {
         let mut net = big_net(n, syn);
         let mut rng = net_format::Rng::new(0);
         let t = Instant::now();
-        apply_edit(&mut net, 0.1, &mut rng, &NetEdit::MoveNeurons { items }, &|| false).unwrap();
+        apply_edit(
+            &mut net,
+            0.1,
+            &mut rng,
+            &NetEdit::MoveNeurons { items },
+            &|| false,
+        )
+        .unwrap();
         let new = t.elapsed();
         eprintln!("Q13 MoveNeurons 5k of 20k/400k: old {old:?} new {new:?}");
         assert_eq!(

@@ -6,8 +6,6 @@
 
 use eframe::egui;
 
-
-
 /// Q9: `Event::Paste` texts that belong to the network — none while a
 /// widget holds keyboard focus (the field's own Ctrl+V must not also
 /// paste a subnet into the scene).
@@ -23,10 +21,6 @@ pub(super) fn paste_events(events: &[egui::Event], kb_focused: bool) -> Vec<Stri
         })
         .collect()
 }
-
-
-
-
 
 /// The rect floating windows may occupy: below the toolbar, above the
 /// status + hint strips (Stage 15 A/C). Only valid after those panels
@@ -51,11 +45,13 @@ pub(super) fn clamp_window_rect(want: egui::Rect, usable: egui::Rect) -> egui::R
     egui::Rect::from_min_size(min, size)
 }
 
-
 /// A floating window pinned to [`usable_rect`]. egui re-applies the
 /// constraint every frame, so persisted off-screen positions and narrow
 /// resizes get pulled back on-screen automatically.
-pub(super) fn app_win<'open>(ctx: &egui::Context, title: impl Into<egui::WidgetText>) -> egui::Window<'open> {
+pub(super) fn app_win<'open>(
+    ctx: &egui::Context,
+    title: impl Into<egui::WidgetText>,
+) -> egui::Window<'open> {
     egui::Window::new(title).constrain_to(usable_rect(ctx))
 }
 
@@ -76,8 +72,7 @@ pub(super) enum DefWin {
 /// The windows `WindowVis::default` opens on first run — test-visible
 /// mirror checked by `default_open_windows_never_overlap`.
 #[cfg(test)]
-pub(super) const DEFAULT_OPEN: &[DefWin] =
-    &[DefWin::Inspector, DefWin::Plots, DefWin::Console];
+pub(super) const DEFAULT_OPEN: &[DefWin] = &[DefWin::Inspector, DefWin::Plots, DefWin::Console];
 
 /// (window → default rect) table against usable rect `u`.
 ///
@@ -121,10 +116,7 @@ pub(super) fn default_rects(u: egui::Rect) -> [(DefWin, egui::Rect); 7] {
         (
             DefWin::Inputs,
             clamp_window_rect(
-                egui::Rect::from_min_size(
-                    u.min + egui::vec2(260.0, 8.0),
-                    egui::vec2(220.0, 140.0),
-                ),
+                egui::Rect::from_min_size(u.min + egui::vec2(260.0, 8.0), egui::vec2(220.0, 140.0)),
                 u,
             ),
         ),
@@ -153,10 +145,7 @@ pub(super) fn default_rects(u: egui::Rect) -> [(DefWin, egui::Rect); 7] {
         (
             DefWin::Script,
             clamp_window_rect(
-                egui::Rect::from_min_size(
-                    u.min + egui::vec2(12.0, 8.0),
-                    egui::vec2(480.0, 360.0),
-                ),
+                egui::Rect::from_min_size(u.min + egui::vec2(12.0, 8.0), egui::vec2(480.0, 360.0)),
                 u,
             ),
         ),
@@ -172,8 +161,6 @@ pub(super) fn default_rect(w: DefWin, u: egui::Rect) -> egui::Rect {
         .1
 }
 
-
-
 /// U8: the session token persists in eframe's app.ron — keep it
 /// owner-only (0600) instead of the umask default.
 #[cfg(unix)]
@@ -188,9 +175,6 @@ pub(super) fn secure_storage_file() {
 }
 #[cfg(not(unix))]
 pub(super) fn secure_storage_file() {}
-
-
-
 
 #[cfg(test)]
 mod tests {
@@ -328,14 +312,6 @@ mod tests {
         );
     }
 
-
-
-
-
-
-
-
-
     #[test]
     fn paste_events_skip_when_text_field_focused() {
         let evs = vec![
@@ -347,6 +323,4 @@ mod tests {
         // a text field owns the keyboard → it ate the paste
         assert!(paste_events(&evs, true).is_empty());
     }
-
-
 }

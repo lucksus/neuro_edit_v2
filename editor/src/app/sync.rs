@@ -218,7 +218,8 @@ impl EditorApp {
                 // Only a Geo newer than the Run click counts — the pre-run
                 // net can already cover the ids, and watching it just gets
                 // wiped by the eval's net.clear → reset_net_state.
-                let covered = example_geo_covers(self.script.example_base_ver, self.geo.as_deref(), ids);
+                let covered =
+                    example_geo_covers(self.script.example_base_ver, self.geo.as_deref(), ids);
                 if covered {
                     // Rebuild the HashSet only when it differs — a fresh set
                     // gets a new random iteration order and update_watch would
@@ -286,7 +287,8 @@ impl EditorApp {
                     (*id, vs.as_slice(), us)
                 })
                 .collect();
-            self.plots.hist
+            self.plots
+                .hist
                 .feed(snap.time_ms, fired, &watched, self.sim.dt_ms as f64);
             // A reset while the user was panned away snaps the plots
             // back to live view — a rewind always wants "now".

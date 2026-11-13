@@ -281,7 +281,11 @@ impl EditorApp {
     /// Turn follow off when the user pans/zooms away from the imposed
     /// window (bounds no longer match what we set), and back on when
     /// they double-click — egui_plot's own "reset" gesture.
-    pub(super) fn plot_follow(&mut self, pr: &egui_plot::PlotResponse<()>, imposed: Option<(f64, f64)>) {
+    pub(super) fn plot_follow(
+        &mut self,
+        pr: &egui_plot::PlotResponse<()>,
+        imposed: Option<(f64, f64)>,
+    ) {
         if pr.response.double_clicked() {
             self.plots.win.follow = true;
             return;
