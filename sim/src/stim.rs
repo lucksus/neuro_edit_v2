@@ -194,8 +194,8 @@ mod tests {
         net.add_neuron([10.0; 3], net_format::NeuronKind::Excitatory);
         net.add_input("a", vec![(0, 10.0)], [0.0; 3]);
         net.add_input("b", vec![(1, 10.0)], [0.0; 3]);
-        let mut s = crate::Sim::new(&net, crate::SimConfig::default(), crate::BackendKind::Cpu)
-            .unwrap();
+        let mut s =
+            crate::Sim::new(&net, crate::SimConfig::default(), crate::BackendKind::Cpu).unwrap();
         s.set_input_constant(0, 1.0);
         s.play_input(1, vec![5.0; 10]); // plays from t=0
         s.set_external(1, 3.0);
