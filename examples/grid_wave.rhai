@@ -6,14 +6,18 @@ net.clear();
 seed(3);
 
 net.create_2d_grid("sheet", 20, 20, 12.0);
-net.set_exc_inh("sheet", 0.2);              // 20% inhibitory
-net.create_connections("sheet", 1.0, 3.0, 6.0); // denser near, sparse far
+net.set_exc_inh("sheet", 0.2);               // 20% inhibitory
+// p(edge) ≈ exp(-(d/lambda)^2): lambda must be at least the 12-unit
+// spacing or the sheet stays empty; weight 14 lets a spiking neighbor
+// push the next cell over threshold.
+net.create_connections("sheet", 1.0, 15.0, 14.0); // denser near, sparse far
 
-// Drive the left column (every other row).
+// Drive the left column (every other row). Group members run column-
+// major: sheet[0..20] is the left edge, so every other row is r * 2.
 let sheet = net.neurons_of("sheet");
 let drive = [];
 for r in 0..10 {
-    drive.push([sheet[r * 40], 9.0]);
+    drive.push([sheet[r * 2], 9.0]);
 }
 net.add_input("kick", drive);
 sim.set_input("kick", 1.0);

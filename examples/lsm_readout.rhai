@@ -24,7 +24,10 @@ net.clear();
 seed(SEED);
 net.create_3d_grid("res", SIDE, SIDE, SIDE, 20.0);
 net.set_exc_inh("res", 0.2);
-net.create_connections("res", 1.0, 2.5, 0.8);
+// lambda must clear the 20-unit spacing or the reservoir has no synapses
+// at all (exp(-(20/lambda)^2)); weak recurrence keeps the shared-pool
+// signal readable instead of washing it out.
+net.create_connections("res", 1.0, 30.0, 1.0);
 let res = net.neurons_of("res");
 let n_res = res.len();
 
