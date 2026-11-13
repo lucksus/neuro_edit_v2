@@ -175,18 +175,9 @@ pub struct EditorApp {
     /// pushes update it live, no 2 s poll.
     jobs_fetched: bool,
 
-    speed: f32,
-    /// Best steps/s the machine has reached — shown as `(max xN)` next to
-    /// the requested speed so "how fast can this go" is one display.
-    speed_peak: f32,
-    /// Backend the worker reports (request combo selected text).
-    backend: proto::Backend,
-    running: bool,
-    sim_built: bool,
-    busy: bool,
-    dt_ms: f32,
-    noise_hz: f32,
-    noise_kick: f32,
+    /// Run-controls state (speed/backend/busy/dt/noise) — toolbar run
+    /// cluster, fed by `Shared` snapshots.
+    sim: SimControls,
     pub net_path: Option<String>,
 
     dlg: Option<Dialog>,
@@ -381,6 +372,39 @@ pub struct LoginDlg {
     pub rx: Option<std::sync::mpsc::Receiver<Result<(crate::simctl::SimCtl, String), String>>>,
 }
 
+/// Run-controls state shown in the toolbar's sim cluster: requested
+/// speed, worker backend, run/build/busy flags, dt and noise params.
+pub struct SimControls {
+    pub speed: f32,
+    /// Best steps/s the machine has reached — shown as `(max xN)` next to
+    /// the requested speed so "how fast can this go" is one display.
+    pub speed_peak: f32,
+    /// Backend the worker reports (request combo selected text).
+    pub backend: proto::Backend,
+    pub running: bool,
+    pub sim_built: bool,
+    pub busy: bool,
+    pub dt_ms: f32,
+    pub noise_hz: f32,
+    pub noise_kick: f32,
+}
+
+impl Default for SimControls {
+    fn default() -> Self {
+        Self {
+            speed: 1.0,
+            speed_peak: 0.0,
+            backend: proto::Backend::Cpu,
+            running: false,
+            sim_built: false,
+            busy: false,
+            dt_ms: 0.1,
+            noise_hz: 0.0,
+            noise_kick: 15.0,
+        }
+    }
+}
+
 /// Persisted UI state (recent files + window visibility) across sessions.
 /// Window positions/sizes persist separately through egui's own memory
 /// (eframe stores it under the same storage slot).
@@ -523,15 +547,7 @@ impl EditorApp {
             plane_snap: 0,
             plane_geo: 0,
             plane_cfgs_last: Vec::new(),
-            speed: 1.0,
-            speed_peak: 0.0,
-            backend: proto::Backend::Cpu,
-            running: false,
-            sim_built: false,
-            busy: false,
-            dt_ms: 0.1,
-            noise_hz: 0.0,
-            noise_kick: 15.0,
+            sim: SimControls::default(),
             net_path: None,
             dlg: None,
             last_net_gen: 0,
@@ -733,8 +749,8 @@ impl eframe::App for EditorApp {
         // Stage 14 E: repaint on demand, not unconditionally — a quiet app
         // (paused sim, still camera, no drags/picks/uploads) sleeps between
         // input events. Server traffic flags itself via net_touched.
-        let animating = self.running
-            || self.busy
+        let animating = self.sim.running
+            || self.sim.busy
             || self.net_touched
             || self.camera.animating()
             || self.move_drag.is_some()

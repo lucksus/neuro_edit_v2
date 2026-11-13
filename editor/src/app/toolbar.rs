@@ -274,7 +274,7 @@ impl EditorApp {
                 // sim controls — "Stop" (not "Pause"): abort_now flips the
                 // flag on_progress/run chunks/builders watch. A busy script
                 // can't resume anyway, so Pause was a lie.
-                let live = self.running || self.busy;
+                let live = self.sim.running || self.sim.busy;
                 let (run_icon, run_label) = if live {
                     (&ic.stop, "Stop")
                 } else {
@@ -316,30 +316,30 @@ impl EditorApp {
                     ui.add(icons::tinted(&ic.speed, fg))
                         .on_hover_text("Speed (realtime factor)");
                     if ui
-                        .add(egui::Slider::new(&mut self.speed, 0.05..=20.0).logarithmic(true))
+                        .add(egui::Slider::new(&mut self.sim.speed, 0.05..=20.0).logarithmic(true))
                         .changed()
                     {
-                        self.send(ClientMsg::SetSpeed(self.speed));
+                        self.send(ClientMsg::SetSpeed(self.sim.speed));
                     }
                     // One speed display: requested realtime factor + the best
                     // this machine has reached (peak steps/s → realtime).
-                    let max_x = self.speed_peak * self.dt_ms / 1000.0;
+                    let max_x = self.sim.speed_peak * self.sim.dt_ms / 1000.0;
                     ui.label(if max_x > 0.05 {
-                        format!("x{:.1} realtime (max x{:.0})", self.speed, max_x)
+                        format!("x{:.1} realtime (max x{:.0})", self.sim.speed, max_x)
                     } else {
-                        format!("x{:.1} realtime", self.speed)
+                        format!("x{:.1} realtime", self.sim.speed)
                     });
                 });
                 ui.separator();
                 toolbar_group(ui, 120.0, |ui| {
-                    let backend_icon = match self.backend {
+                    let backend_icon = match self.sim.backend {
                         proto::Backend::Cuda => &ic.backend_gpu,
                         proto::Backend::Cpu => &ic.backend_cpu,
                     };
                     ui.add(icons::tinted(backend_icon, ui.visuals().text_color()))
                         .on_hover_text("Backend");
                     egui::ComboBox::from_id_salt("backend")
-                        .selected_text(match self.backend {
+                        .selected_text(match self.sim.backend {
                             proto::Backend::Cuda => "cuda",
                             proto::Backend::Cpu => "cpu",
                         })
@@ -357,14 +357,14 @@ impl EditorApp {
                         .on_hover_text("Time step dt");
                     if ui
                         .add(
-                            egui::DragValue::new(&mut self.dt_ms)
+                            egui::DragValue::new(&mut self.sim.dt_ms)
                                 .range(0.01..=1.0)
                                 .speed(0.01)
                                 .suffix(" ms"),
                         )
                         .changed()
                     {
-                        self.send(ClientMsg::SetDtMs(self.dt_ms));
+                        self.send(ClientMsg::SetDtMs(self.sim.dt_ms));
                     }
                 });
                 toolbar_group(ui, 160.0, |ui| {
@@ -372,7 +372,7 @@ impl EditorApp {
                         .on_hover_text("Background noise rate");
                     if ui
                         .add(
-                            egui::DragValue::new(&mut self.noise_hz)
+                            egui::DragValue::new(&mut self.sim.noise_hz)
                                 .range(0.0..=5000.0)
                                 .speed(1.0)
                                 .suffix(" Hz"),
@@ -380,8 +380,8 @@ impl EditorApp {
                         .changed()
                     {
                         self.send(ClientMsg::SetNoise {
-                            hz: self.noise_hz,
-                            kick: self.noise_kick,
+                            hz: self.sim.noise_hz,
+                            kick: self.sim.noise_kick,
                         });
                     }
                 });
@@ -516,7 +516,7 @@ impl EditorApp {
                         ui.label(label);
                     }
                 }
-                if self.busy {
+                if self.sim.busy {
                     ui.separator();
                     ui.spinner();
                     ui.label("script running");

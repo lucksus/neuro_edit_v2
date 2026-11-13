@@ -174,10 +174,10 @@ impl EditorApp {
         }
         // Toolbar widgets read the worker's live cfg so script-side
         // `sim.set_dt`/`sim.set_noise`/`sim.set_backend` calls show up.
-        self.dt_ms = cfg.dt_ms;
-        self.noise_hz = cfg.noise_rate_hz;
-        self.noise_kick = cfg.noise_kick_mv;
-        self.backend = backend;
+        self.sim.dt_ms = cfg.dt_ms;
+        self.sim.noise_hz = cfg.noise_rate_hz;
+        self.sim.noise_kick = cfg.noise_kick_mv;
+        self.sim.backend = backend;
         let gen_bumped = net_gen != self.last_net_gen;
         if gen_bumped {
             self.last_net_gen = net_gen;
@@ -253,7 +253,7 @@ impl EditorApp {
         if snap.seq != self.last_snap_seq {
             self.last_snap_seq = snap.seq;
             self.last_sim_t = snap.time_ms;
-            self.speed_peak = self.speed_peak.max(snap.steps_per_sec);
+            self.sim.speed_peak = self.sim.speed_peak.max(snap.steps_per_sec);
             self.activity = snap.activity.to_vec();
             self.grid_traces = snap.grid_traces.clone();
             self.input_values = snap.input_values.clone();
@@ -287,7 +287,7 @@ impl EditorApp {
                 })
                 .collect();
             self.hist
-                .feed(snap.time_ms, fired, &watched, self.dt_ms as f64);
+                .feed(snap.time_ms, fired, &watched, self.sim.dt_ms as f64);
             // A reset while the user was panned away snaps the plots
             // back to live view — a rewind always wants "now".
             if self.hist.resets != self.hist_resets_seen {
@@ -295,9 +295,9 @@ impl EditorApp {
                 self.plot_win.follow = true;
             }
         }
-        self.running = running;
-        self.sim_built = sim_built;
-        self.busy = busy;
+        self.sim.running = running;
+        self.sim.sim_built = sim_built;
+        self.sim.busy = busy;
     }
 
     /// Per-frame grid-plane bookkeeping for the renderer: quad params and
