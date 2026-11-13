@@ -49,8 +49,8 @@ impl EditorApp {
 
     /// Context-menu helper: jump the plots panel to this readout's weights.
     pub fn plot_readout_weights(&mut self, k: u32) {
-        self.ro_sel = k as usize;
-        self.plot_tab = PlotTab::Readouts;
+        self.plots.ro_sel = k as usize;
+        self.plots.tab = PlotTab::Readouts;
         self.show_plots = true;
     }
 
@@ -96,8 +96,8 @@ impl EditorApp {
         if ids != self.watch_sent {
             self.watch_sent = ids.clone();
             self.send(ClientMsg::Watch(ids));
-            self.hist.v.retain(|k, _| self.watch_sent.contains(k));
-            self.hist.u.retain(|k, _| self.watch_sent.contains(k));
+            self.plots.hist.v.retain(|k, _| self.watch_sent.contains(k));
+            self.plots.hist.u.retain(|k, _| self.watch_sent.contains(k));
         }
     }
 
@@ -223,7 +223,7 @@ impl EditorApp {
             self.watch_sent.clear();
             self.send(ClientMsg::Watch(Vec::new()));
         }
-        self.hist.clear();
+        self.plots.hist.clear();
         self.particles = Particles::new();
         self.activity.clear();
         self.grid_traces.clear();

@@ -69,7 +69,7 @@ impl EditorApp {
                             name: self.script_name.clone(),
                             script: self.script_text.clone(),
                         });
-                        self.plot_tab = PlotTab::Jobs;
+                        self.plots.tab = PlotTab::Jobs;
                         self.show_plots = true;
                     }
                     if ui.button("Save to net").clicked() {

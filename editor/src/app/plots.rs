@@ -25,7 +25,7 @@ impl EditorApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if let Some(ic) = &self.icons {
-                        let t = &mut self.plot_tab;
+                        let t = &mut self.plots.tab;
                         icons::selectable_value(ui, t, PlotTab::Voltage, &ic.voltage, "v(t)");
                         icons::selectable_value(ui, t, PlotTab::Phase, &ic.phase, "v–u");
                         icons::selectable_value(ui, t, PlotTab::Raster, &ic.raster, "raster");
@@ -33,29 +33,29 @@ impl EditorApp {
                         icons::selectable_value(ui, t, PlotTab::Samples, &ic.samples, "samples");
                         icons::selectable_value(ui, t, PlotTab::Jobs, &ic.jobs, "jobs");
                     }
-                    if self.plot_tab == PlotTab::Jobs && !self.jobs.is_empty() {
+                    if self.plots.tab == PlotTab::Jobs && !self.jobs.is_empty() {
                         ui.separator();
                         ui.label(format!("{} job(s)", self.jobs.len()));
                     }
                     ui.separator();
-                    if matches!(self.plot_tab, PlotTab::Voltage | PlotTab::Phase | PlotTab::Raster) {
+                    if matches!(self.plots.tab, PlotTab::Voltage | PlotTab::Phase | PlotTab::Raster) {
                         ui.separator();
                         ui.label("window");
                         ui.add(
-                            egui::DragValue::new(&mut self.plot_win.len_ms)
+                            egui::DragValue::new(&mut self.plots.win.len_ms)
                                 .range(20.0..=5000.0)
                                 .suffix("ms"),
                         );
-                        if !self.plot_win.follow {
+                        if !self.plots.win.follow {
                             if ui.button("Follow").clicked() {
-                                self.plot_win.follow = true;
+                                self.plots.win.follow = true;
                             }
                         }
-                        if matches!(self.plot_tab, PlotTab::Voltage | PlotTab::Phase) {
-                            ui.checkbox(&mut self.plot_win.auto_y, "Auto Y");
+                        if matches!(self.plots.tab, PlotTab::Voltage | PlotTab::Phase) {
+                            ui.checkbox(&mut self.plots.win.auto_y, "Auto Y");
                         }
                     }
-                    if matches!(self.plot_tab, PlotTab::Voltage | PlotTab::Phase) {
+                    if matches!(self.plots.tab, PlotTab::Voltage | PlotTab::Phase) {
                         let sel_n = self
                             .selection
                             .iter()
@@ -68,21 +68,21 @@ impl EditorApp {
                             sel_n
                         ));
                     }
-                    if self.plot_tab == PlotTab::Raster {
+                    if self.plots.tab == PlotTab::Raster {
                         ui.label("height");
                         ui.add(
-                            egui::DragValue::new(&mut self.raster_h)
+                            egui::DragValue::new(&mut self.plots.raster_h)
                                 .range(40.0..=600.0)
                                 .suffix("px"),
                         );
                     }
                 });
-                match self.plot_tab {
+                match self.plots.tab {
                     PlotTab::Voltage => {
                         // Sliding window ending at "now" while following;
                         // the user's pan/zoom rules once follow is off.
-                        let win = self.plot_win.bounds(self.last_sim_t);
-                        let auto_y = self.plot_win.auto_y;
+                        let win = self.plots.win.bounds(self.plots.last_sim_t);
+                        let auto_y = self.plots.win.auto_y;
                         if self.watch_sent.is_empty() {
                             // U8: readable weak text above the plot, not
                             // tiny in-plot text across the centre line.
@@ -105,13 +105,13 @@ impl EditorApp {
                             p = p.auto_bounds(egui::Vec2b::new(false, false));
                         }
                         let pr = p.show(ui, |ui| {
-                            if self.hist.v.is_empty() {
+                            if self.plots.hist.v.is_empty() {
                                 // Discoverable watching (Stage 13 E): the
                             }
                             // watch_sent order → stable per-neuron colors,
                             // shared with the phase tab.
                             for (ci, &id) in self.watch_sent.iter().enumerate() {
-                                let Some(h) = self.hist.v.get(&id) else { continue };
+                                let Some(h) = self.plots.hist.v.get(&id) else { continue };
                                 let pts: PlotPoints = match win {
                                     Some((lo, hi)) => h
                                         .iter()
@@ -144,7 +144,7 @@ impl EditorApp {
                         // for 2-D trajectory projections — no nullclines
                         // there or here (we don't have per-neuron params
                         // on the wire).
-                        let win = self.plot_win.bounds(self.last_sim_t);
+                        let win = self.plots.win.bounds(self.plots.last_sim_t);
                         let p = egui_plot::Plot::new("phplot")
                             .height(140.0)
                             .y_axis_formatter(|y, range| {
@@ -157,7 +157,7 @@ impl EditorApp {
                             .x_axis_label("v (mV)")
                             .y_axis_label("u");
                         let _ = p.show(ui, |ui| {
-                            if self.hist.u.is_empty() {
+                            if self.plots.hist.u.is_empty() {
                                 ui.text(egui_plot::Text::new(
                                     "hint",
                                     egui_plot::PlotPoint::new(-30.0, -10.0),
@@ -166,7 +166,7 @@ impl EditorApp {
                             }
                             for (ci, &id) in self.watch_sent.iter().enumerate() {
                                 let (Some(vs), Some(us)) =
-                                    (self.hist.v.get(&id), self.hist.u.get(&id))
+                                    (self.plots.hist.v.get(&id), self.plots.hist.u.get(&id))
                                 else {
                                     continue;
                                 };
@@ -204,9 +204,9 @@ impl EditorApp {
                         } else {
                             watches.len() as f64 - 0.5
                         };
-                        let win = self.plot_win.bounds(self.last_sim_t);
+                        let win = self.plots.win.bounds(self.plots.last_sim_t);
                         let plot = egui_plot::Plot::new("raster")
-                            .height(self.raster_h.max(40.0))
+                            .height(self.plots.raster_h.max(40.0))
                             .auto_bounds(egui::Vec2b::new(win.is_none(), false))
                             .include_y(-0.5)
                             .include_y(y_hi);
@@ -227,9 +227,9 @@ impl EditorApp {
                                 }
                             })
                             .show(ui, |ui| {
-                                if self.hist.raster.is_empty() {
+                                if self.plots.hist.raster.is_empty() {
                                     let cx = win.map(|(lo, hi)| (lo + hi) / 2.0)
-                                        .unwrap_or(self.last_sim_t);
+                                        .unwrap_or(self.plots.last_sim_t);
                                     ui.text(egui_plot::Text::new(
                                         "hint",
                                         egui_plot::PlotPoint::new(cx, 0.0),
@@ -238,7 +238,7 @@ impl EditorApp {
                                 }
                                 let mut pts = Vec::new();
                                 let watches = &self.watch_sent;
-                                for &(t, ref fired) in &self.hist.raster {
+                                for &(t, ref fired) in &self.plots.hist.raster {
                                     if let Some((lo, hi)) = win {
                                         if !(lo..=hi).contains(&t) {
                                             continue;
@@ -283,17 +283,17 @@ impl EditorApp {
     /// they double-click — egui_plot's own "reset" gesture.
     pub(super) fn plot_follow(&mut self, pr: &egui_plot::PlotResponse<()>, imposed: Option<(f64, f64)>) {
         if pr.response.double_clicked() {
-            self.plot_win.follow = true;
+            self.plots.win.follow = true;
             return;
         }
         if let Some((lo, hi)) = imposed {
             let b = pr.transform.bounds();
-            let eps = (self.plot_win.len_ms * 1e-6).max(1e-6);
+            let eps = (self.plots.win.len_ms * 1e-6).max(1e-6);
             if pr.response.dragged()
                 || (b.min()[0] - lo).abs() > eps
                 || (b.max()[0] - hi).abs() > eps
             {
-                self.plot_win.follow = false;
+                self.plots.win.follow = false;
             }
         }
     }
@@ -306,19 +306,19 @@ impl EditorApp {
             ui.label("no readouts — net.add_readout(\"ro\", units) in a script");
             return;
         }
-        self.ro_sel = self.ro_sel.min(g.readouts.len() - 1);
+        self.plots.ro_sel = self.plots.ro_sel.min(g.readouts.len() - 1);
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("ro_sel")
-                .selected_text(g.readouts[self.ro_sel].0.clone())
+                .selected_text(g.readouts[self.plots.ro_sel].0.clone())
                 .show_ui(ui, |ui| {
                     for (i, (name, _, _)) in g.readouts.iter().enumerate() {
-                        ui.selectable_value(&mut self.ro_sel, i, name);
+                        ui.selectable_value(&mut self.plots.ro_sel, i, name);
                     }
                 });
-            let (_, units, w) = &g.readouts[self.ro_sel];
+            let (_, units, w) = &g.readouts[self.plots.ro_sel];
             ui.label(format!("{} units, {} weights", units.len(), w.len()));
         });
-        let (_, _, w) = &g.readouts[self.ro_sel];
+        let (_, _, w) = &g.readouts[self.plots.ro_sel];
         if w.is_empty() {
             ui.label("no weights — push them from a script: net.set_readout_weights(\"name\", ro.weights())");
             return;

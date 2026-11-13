@@ -229,7 +229,7 @@ impl EditorApp {
                         self.selection = ids.iter().copied().collect();
                     }
                     self.show_plots = true;
-                    self.plot_tab = PlotTab::Voltage;
+                    self.plots.tab = PlotTab::Voltage;
                 }
                 // Retire only after the watch has stayed applied across a
                 // quiet stretch — a net-gen bump inside the eval (net.clear)
@@ -252,7 +252,7 @@ impl EditorApp {
         }
         if snap.seq != self.last_snap_seq {
             self.last_snap_seq = snap.seq;
-            self.last_sim_t = snap.time_ms;
+            self.plots.last_sim_t = snap.time_ms;
             self.sim.speed_peak = self.sim.speed_peak.max(snap.steps_per_sec);
             self.activity = snap.activity.to_vec();
             self.grid_traces = snap.grid_traces.clone();
@@ -286,13 +286,13 @@ impl EditorApp {
                     (*id, vs.as_slice(), us)
                 })
                 .collect();
-            self.hist
+            self.plots.hist
                 .feed(snap.time_ms, fired, &watched, self.sim.dt_ms as f64);
             // A reset while the user was panned away snaps the plots
             // back to live view — a rewind always wants "now".
-            if self.hist.resets != self.hist_resets_seen {
-                self.hist_resets_seen = self.hist.resets;
-                self.plot_win.follow = true;
+            if self.plots.hist.resets != self.plots.hist_resets_seen {
+                self.plots.hist_resets_seen = self.plots.hist.resets;
+                self.plots.win.follow = true;
             }
         }
         self.sim.running = running;

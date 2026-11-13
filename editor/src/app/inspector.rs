@@ -197,7 +197,7 @@ impl EditorApp {
                 if ui.button("Plot v(t)").clicked() {
                     self.watch(vec![id]);
                     self.show_plots = true;
-                    self.plot_tab = PlotTab::Voltage;
+                    self.plots.tab = PlotTab::Voltage;
                 }
                 ui.label("group memberships:".to_string());
                 for (gname, members) in &g.groups {

@@ -308,7 +308,7 @@ impl EditorApp {
                     }
                     if ui.add(icons::button(&ic.reset, "Reset")).clicked() {
                         self.send(ClientMsg::Reset);
-                        self.hist.clear();
+                        self.plots.hist.clear();
                     }
                 });
                 toolbar_group(ui, 430.0, |ui| {

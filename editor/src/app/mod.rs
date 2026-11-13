@@ -65,15 +65,8 @@ pub struct EditorApp {
     pub last_hover_pick: Option<(u32, u32, u64, u64)>,
     pub activity: Vec<f32>,
     pub particles: Particles,
-    /// v(t) histories + raster, cleared when fed sim time goes backwards.
-    hist: crate::plot::PlotHist,
-    /// Sliding-window/follow state shared by the v(t), raster and
-    /// phase tabs.
-    plot_win: crate::plot::PlotWindow,
-    /// Newest sim time seen in a snapshot — the window's right edge.
-    last_sim_t: f64,
-    /// `hist.resets` as of the last sync — a bump re-enables follow.
-    hist_resets_seen: usize,
+    /// Plots window state: v(t) histories, sliding window, tab, sizes.
+    plots: PlotsUi,
 
     pub selection: HashSet<u32>, // instance ids
     pub mode: Mode,
@@ -156,11 +149,6 @@ pub struct EditorApp {
     login: Option<LoginDlg>,
     /// Remembered (url, session-token) for `remember me` — persisted.
     pub saved_token: Option<(String, String)>,
-    plot_tab: PlotTab,
-    /// Raster strip height in px — draggable in the plots header.
-    raster_h: f32,
-    /// Readout index shown in the weights tab.
-    ro_sel: usize,
     /// Script editor buffer + the name it is saved under in the file.
     script_text: String,
     script_name: String,
@@ -389,6 +377,39 @@ pub struct SimControls {
     pub noise_kick: f32,
 }
 
+/// Plots-window state: v(t)/raster/phase histories, the shared sliding
+/// window, selected tab, raster height and weights-tab readout.
+pub struct PlotsUi {
+    /// v(t) histories + raster, cleared when fed sim time goes backwards.
+    pub hist: crate::plot::PlotHist,
+    /// Sliding-window/follow state shared by the v(t), raster and
+    /// phase tabs.
+    pub win: crate::plot::PlotWindow,
+    /// Newest sim time seen in a snapshot — the window's right edge.
+    pub last_sim_t: f64,
+    /// `hist.resets` as of the last sync — a bump re-enables follow.
+    pub hist_resets_seen: usize,
+    pub tab: PlotTab,
+    /// Raster strip height in px — draggable in the plots header.
+    pub raster_h: f32,
+    /// Readout index shown in the weights tab.
+    pub ro_sel: usize,
+}
+
+impl Default for PlotsUi {
+    fn default() -> Self {
+        Self {
+            hist: crate::plot::PlotHist::default(),
+            win: crate::plot::PlotWindow::default(),
+            last_sim_t: 0.0,
+            hist_resets_seen: 0,
+            tab: PlotTab::Voltage,
+            raster_h: 100.0,
+            ro_sel: 0,
+        }
+    }
+}
+
 impl Default for SimControls {
     fn default() -> Self {
         Self {
@@ -471,10 +492,7 @@ impl EditorApp {
             last_hover_pick: None,
             activity: Vec::new(),
             particles: Particles::new(),
-            hist: crate::plot::PlotHist::default(),
-            plot_win: crate::plot::PlotWindow::default(),
-            last_sim_t: 0.0,
-            hist_resets_seen: 0,
+            plots: PlotsUi::default(),
             selection: HashSet::new(),
             mode: Mode::Navigate,
             plane: Plane::XZ,
@@ -523,9 +541,6 @@ impl EditorApp {
             },
             login: None,
             saved_token: persisted_token,
-            plot_tab: PlotTab::Voltage,
-            raster_h: 100.0,
-            ro_sel: 0,
             script_text: String::new(),
             script_name: "main".into(),
             script_file: "script.rhai".into(),
