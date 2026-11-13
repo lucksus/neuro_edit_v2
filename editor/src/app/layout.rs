@@ -61,7 +61,6 @@ pub(super) fn app_win<'open>(
 /// (U3/Stage 15). The no-overlap tests iterate `DEFAULT_OPEN`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum DefWin {
-    Inspector,
     Plots,
     Inputs,
     Files,
@@ -70,28 +69,18 @@ pub(super) enum DefWin {
 }
 
 /// The windows `WindowVis::default` opens on first run — test-visible
-/// mirror checked by `default_open_windows_never_overlap`. (The console
-/// is a dock now, not a window — Stage 22.)
+/// mirror checked by `default_open_windows_never_overlap`. (Inspector
+/// and console are docks now, not windows — Stage 22.)
 #[cfg(test)]
-pub(super) const DEFAULT_OPEN: &[DefWin] = &[DefWin::Inspector, DefWin::Plots];
+pub(super) const DEFAULT_OPEN: &[DefWin] = &[DefWin::Plots];
 
 /// (window → default rect) table against usable rect `u`.
 ///
-/// U3: Plots anchors bottom-left; Inspector top-right. (The console
-/// used to anchor bottom-right; it is a bottom dock now.)
-pub(super) fn default_rects(u: egui::Rect) -> [(DefWin, egui::Rect); 6] {
+/// U3: Plots anchors bottom-left. (Inspector used to anchor top-right,
+/// the console bottom-right; both are docks now.)
+pub(super) fn default_rects(u: egui::Rect) -> [(DefWin, egui::Rect); 5] {
     let side = egui::vec2(480.0, 220.0);
     [
-        (
-            DefWin::Inspector,
-            clamp_window_rect(
-                egui::Rect::from_min_size(
-                    egui::pos2(u.max.x - 248.0, u.min.y + 8.0),
-                    egui::vec2(240.0, 200.0),
-                ),
-                u,
-            ),
-        ),
         (
             DefWin::Plots,
             clamp_window_rect(

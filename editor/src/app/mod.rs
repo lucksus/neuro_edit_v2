@@ -781,12 +781,14 @@ impl eframe::App for EditorApp {
         self.status_bar(ctx);
         self.hints_bar(ctx);
         self.disconnect_banner(ctx);
-        // The fixed docks (left tools, bottom console) carve their space
-        // off the usable rect before any floating window is laid out, so
-        // windows can never slide under a dock.
+        // The fixed docks carve their space off the usable rect before
+        // any floating window is laid out, so windows can never slide
+        // under a dock — Plots can't cover the inspector, nothing covers
+        // the left tools or the console. The inspector goes before the
+        // console so it keeps its full height.
         self.left_panel(ctx);
-        self.console(ctx);
         self.inspector(ctx);
+        self.console(ctx);
         self.script_window(ctx);
         self.plots(ctx);
         self.inputs_window(ctx);
