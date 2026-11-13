@@ -3221,7 +3221,7 @@ than hiding it.
 
 ### Gates
 
-- `cargo test --workspace` — see count below (needs final run after this NOTES edit)
+- `cargo test --workspace`: **321 passed, 0 failed** (308 at Stage 23 → +13)
 - `editor/web/build.sh` — OK
 - `cargo fmt --check` — clean
 - No sim-behaviour change: MLP is a pure post-processing function; the only
