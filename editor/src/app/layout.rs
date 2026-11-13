@@ -6,8 +6,6 @@
 
 use eframe::egui;
 
-use crate::snap::GeoSnap;
-
 pub(super) fn fmt_size(b: u64) -> String {
     if b >= 1 << 30 {
         format!("{:.1} GB", b as f64 / (1u64 << 30) as f64)
@@ -264,15 +262,6 @@ pub(super) fn secure_storage_file() {
 #[cfg(not(unix))]
 pub(super) fn secure_storage_file() {}
 
-/// Hide-bits for plane members. Member ids come over the wire — an
-/// out-of-range id must not panic the frame.
-pub(super) fn mark_bits(bits: &mut [u32], members: &[u32]) {
-    for &m in members {
-        if let Some(w) = bits.get_mut(m as usize >> 5) {
-            *w |= 1 << (m & 31);
-        }
-    }
-}
 
 /// Parent dir of a path for a `ListFiles` request ("." at the top).
 pub(super) fn dir_of(p: &str) -> String {
@@ -283,19 +272,6 @@ pub(super) fn dir_of(p: &str) -> String {
     }
 }
 
-/// Example auto-watch gate (Stage 13 H): the Geo that may apply the
-/// example's `watch` list must be newer than the version captured when
-/// Run was sent (`base`) and contain every requested neuron id. The
-/// pre-run net can already cover the ids — watching it just gets wiped
-/// by the eval's `net.clear` → reset_net_state.
-pub(super) fn example_geo_covers(base: Option<u64>, geo: Option<&GeoSnap>, ids: &[u32]) -> bool {
-    match (base, geo) {
-        (Some(base), Some(g)) => {
-            g.version != base && ids.iter().all(|&n| (n as usize) < g.pos.len())
-        }
-        _ => false,
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -447,24 +423,6 @@ mod tests {
         assert!(h > 40.0, "groups did not wrap (panel {h}px)");
     }
 
-    #[test]
-    fn example_watch_needs_post_run_geo() {
-        let mut g = GeoSnap::default();
-        g.version = 7;
-        g.pos = vec![[0.0; 3]; 5];
-        let ids = [0u32, 1, 2, 3, 4];
-        // Not armed yet (loaded but never run) — pre-run geo must not apply.
-        assert!(!example_geo_covers(None, Some(&g), &ids));
-        // Same version as at Run — the eval hasn't landed yet.
-        assert!(!example_geo_covers(Some(7), Some(&g), &ids));
-        g.version = 8;
-        assert!(example_geo_covers(Some(7), Some(&g), &ids));
-        // Post-run geo that doesn't cover the ids — e.g. cleared but
-        // not yet rebuilt — must not apply either.
-        g.pos.truncate(3);
-        assert!(!example_geo_covers(Some(7), Some(&g), &ids));
-        assert!(!example_geo_covers(Some(7), None, &ids));
-    }
 
     #[test]
     fn watch_takes_lowest_ids_not_hash_order() {
@@ -553,7 +511,6 @@ mod tests {
         assert!(paste_events(&evs, true).is_empty());
     }
 
-    #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn local_file_errors_reach_status() {
         // Q14: local-mode file ops used to discard errors (`let _ =`)
@@ -602,12 +559,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    #[test]
-    fn mark_bits_ignores_out_of_range_member_ids() {
-        let mut bits = vec![0u32; 2]; // covers ids 0..63
-        mark_bits(&mut bits, &[0, 63]);
-        mark_bits(&mut bits, &[64, u32::MAX]); // must not panic
-        assert_eq!(bits[0], 1);
-        assert_eq!(bits[1], 1 << 31);
-    }
 }
