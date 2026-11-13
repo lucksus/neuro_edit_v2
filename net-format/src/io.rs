@@ -396,6 +396,25 @@ mod tests {
         d
     }
 
+    /// Every `.ne2` shipped under `examples/` must load and validate —
+    /// catches a stale/corrupt fixture (Stage 21: lsm.ne2 carried a
+    /// readout with a trailing bias weight inside `weights`).
+    #[test]
+    fn loads_every_example_ne2() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples");
+        let mut n = 0;
+        for e in std::fs::read_dir(&dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.extension().is_some_and(|x| x == "ne2") {
+                let net = load(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+                net.validate()
+                    .unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+                n += 1;
+            }
+        }
+        assert!(n > 0, "no .ne2 files under {}", dir.display());
+    }
+
     #[test]
     fn roundtrip() {
         let mut net = Network::new();

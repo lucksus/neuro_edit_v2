@@ -1530,13 +1530,32 @@ pub fn register_api(
         let v = net_version.clone();
         engine.register_fn(
             "set_readout_weights",
-            move |n: &mut NetHandle, name: &str, w: rhai::Array| {
+            move |n: &mut NetHandle,
+                  name: &str,
+                  w: rhai::Array|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
                 bump(&v);
                 let mut b = n.borrow_mut();
-                let w: Vec<f32> = w.iter().map(|d| d_f64(d) as f32).collect();
-                if let Some(r) = b.readouts.iter_mut().find(|r| r.name == name) {
-                    r.weights = w;
+                let mut w: Vec<f32> = w.iter().map(|d| d_f64(d) as f32).collect();
+                let Some(r) = b.readouts.iter_mut().find(|r| r.name == name) else {
+                    return Ok(());
+                };
+                // fit_ridge returns the weights with the bias weight
+                // trailing — split it off so the file stays valid
+                // (weights must be one per unit; bias_weight is separate).
+                if w.len() == r.units.len() + 1 {
+                    r.bias_weight = w.pop().unwrap();
                 }
+                if w.len() != r.units.len() {
+                    return Err(format!(
+                        "set_readout_weights: readout {name:?} has {} units, got {} weights",
+                        r.units.len(),
+                        w.len()
+                    )
+                    .into());
+                }
+                r.weights = w;
+                Ok(())
             },
         );
     }

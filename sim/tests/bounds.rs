@@ -33,6 +33,36 @@ fn script_index_out_of_range_is_an_error() {
     }
 }
 
+/// Stage 21: `fit_ridge` returns weights with the bias weight trailing;
+/// `set_readout_weights` must split that off (into `bias_weight`) so the
+/// saved file stays loadable — `weights` must be exactly one per unit.
+#[test]
+fn script_set_readout_weights_splits_bias() {
+    let mut env = env();
+    env.eval_str(
+        "net.add_neuron(0, 0, 0); net.add_neuron(50, 0, 0); net.add_readout(\"ro\", [0, 1])",
+    )
+    .unwrap();
+    // fit_ridge-shaped input: 2 weights + trailing bias weight
+    env.eval_str("net.set_readout_weights(\"ro\", [1.5, -2.0, 0.75])")
+        .unwrap();
+    {
+        let b = env.net.borrow();
+        let r = &b.readouts[0];
+        assert_eq!(r.weights, vec![1.5, -2.0]);
+        assert_eq!(r.bias_weight, 0.75);
+    }
+    // exactly n_units works too
+    env.eval_str("net.set_readout_weights(\"ro\", [3.0, 4.0])")
+        .unwrap();
+    assert_eq!(env.net.borrow().readouts[0].weights, vec![3.0, 4.0]);
+    // anything else is a script error, not a corrupt file
+    let e = env
+        .eval_str("net.set_readout_weights(\"ro\", [1.0, 2.0, 3.0, 4.0])")
+        .expect_err("wrong length must error");
+    assert!(e.contains("units"), "{e}");
+}
+
 #[test]
 fn script_sim_index_out_of_range_is_an_error() {
     let mut env = env();
