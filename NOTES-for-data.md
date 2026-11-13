@@ -2638,3 +2638,188 @@ old files take. `set_readout_weights` now prevents recurrence.
   are dropped before dispatch — belt and braces.
 - The test-only `Lif` in `sim/tests/lif.rs` remains unregistered on
   purpose — it is the plumbing test, AdEx is the real one.
+
+## Stage 22 — UX shell: states, left panel, docked console, inspector with neuron plots
+
+Requested in review/fable-review-1112.md §4 (UI/UX): Adobe/Photoshop-like
+shell, progressive disclosure, explicit Build/Run/Script states, usable at
+800x700 and 1440x900. Editor-only except the protocol descriptor in step 0.
+
+### Commits (each builds on its own; verified `cargo check --workspace --all-targets` per commit)
+
+- `40dfa01` step 0 — `proto::ModelDesc.map: Option<MapDesc>` +
+  `MapPlaneDesc`/`MapSpot` (param indices, axis ranges, labelled region
+  spots carrying full param rows); `PROTO_VERSION` 2 -> 3;
+  `sim::model::Model::param_map()` (default None); izh supplies the classic
+  a-b and c-d planes with 7 spots sharing the PRESETS const rows; serve.rs
+  sends the descriptor in Hello.
+- `9f71cc9` step 1 — `editor/src/app/state.rs`: `EditorState {Build, Run,
+  Script}`, `RunFlags {running, sim_built, busy}` derived from `Status`,
+  precedence busy > sim_built|running; `Act` enable table +
+  `disabled()` reasons; gating applied through toolbar menus/run
+  cluster/mode cluster, view keys + context menu + drag modes,
+  inspector edit zones, console + script eval buttons, dialog commit
+  buttons, `send_edit` funnel.
+- `c209c79` step 2 — `editor/src/app/panel.rs`: fixed left dock
+  (`SidePanel::left("tools_panel")`, resizable 150-400px, default 216px;
+  collapsed = ~44px rail `RAIL_W=34`) with TOOLS / RUN / VIEW / PANELS
+  sections, coloured state band (build/running/script), sim time,
+  `interact_size.y >= 28px` on all controls, `ScrollArea` inside.
+  `toolbar.rs` reduced to menus + file name + dirty marker + status
+  (one <40px row). `Windows.left_panel` + persisted `WindowVis`.
+- `e2c6089` step 3 — `console.rs`: floating `egui::Window` ->
+  `TopBottomPanel::bottom("console_dock")`, resizable 60-400px default
+  180, collapse chevron + View toggle + shortcuts `Ctrl+3` and `` ` ``;
+  dock called before floating windows so `usable_rect` excludes it;
+  `DefWin::Console` removed from `layout.rs`.
+- `2e09007` step 4 — `inspector.rs`: `SidePanel::right("inspector_dock")`
+  resizable right dock; selected neuron -> identity, type picker,
+  descriptor params (empty unit now prints the bare name, fixing Stage
+  21's `b []`), auto-watched V(t) via the existing `update_watch`
+  selection->watch path, then model-specific content: izh -> a-b and c-d
+  `egui_plot` planes with labelled regions, current-params marker,
+  click-a-spot applies that preset (`spot_at` 5%-ellipse hit test);
+  other models -> one plot per state slot from the descriptor, no map.
+  Dock order in `update()`: toolbar -> status -> hints -> banner ->
+  left -> inspector -> console -> floating windows -> viewport, so
+  `usable_rect` provably excludes every dock (Plots can never cover the
+  inspector). `DefWin::Inspector` removed from DEFAULT_OPEN.
+
+### State / enable table (Act -> disabled() reason)
+
+| control | Build | Run (stepping) | Paused Run | Script |
+|---|---|---|---|---|
+| Run/Stop toggle | on | on | on | on |
+| Step 10/100 ms | on | off "running - pause to step" | on | off "worker busy" |
+| Reset | off "no sim built yet" | on | on | off "worker busy" |
+| Speed, Noise, SetInput | on | on | on | off "worker busy" |
+| Backend, Dt | on | off "restarts sim" | on | off "worker busy" |
+| Edit (all net edits) | on | off "edits rebuild sim - pause first" | on | off "worker busy" |
+| New/Load | on | off "replaces net - stop sim" | on | off "worker busy" |
+| Save | on | on | on | off "worker busy" |
+| Eval | on | on | on | off "script already running" |
+| Job | on | on | on | on |
+
+Notes: `sim_built` goes true on the worker's first published sim, so a
+net that was built but never run shows as paused Run ("paused t = 0.0 s")
+- Build strictly means no sim exists yet (empty editor). Edits, backend
+and dt changes are blocked while stepping because the server rebuilds
+the sim and silently loses live state (SetBackend/SetDtMs invalidate).
+
+### Screenshots (all live, debug binary under Xvfb :99, llvmpipe)
+
+- `review/stage22_a_build_{800700,1440900}.png` - BUILD chip, grey
+  "build - no sim yet" band, Reset visibly disabled; 1440 shot shows the
+  "empty network" helper text in the scene.
+- `review/stage22_b_run_izh_{800700,1440900}.png` - `grid_wave.rhai`
+  + `--watch 4` + `--autorun`; green RUNNING band + live t, STOP, gated
+  step/speed; inspector on neuron 4: izh params, spiking V(t) auto-watch,
+  a-b and c-d maps with markers + region labels (RS/IB/CH/FS/LTS/RZ/TC);
+  console shows the script's rate/spikes output; floating Plots window
+  also has the same v(t) tab.
+- `review/stage22_c_adex_{800700,1440900}.png` - `stage22_adex.rhai`
+  converts sheet[0] to `adex_tonic`; inspector shows AdEx params and
+  v(mV)+w(pA) state-slot plots, no map (descriptor supplies none).
+- `review/stage22_d_script_{800700,1440900}.png` - yellow
+  "script running..." band, SCRIPT chip + spinner, disabled
+  step/speed/reset visible, console mid-eval output.
+- `review/stage22_e_console_{800700,1440900}.png` - docked console with
+  eval output, input + Run, collapse control.
+- `review/stage22_web_1440.png` - the served web build in Chromium
+  156 (snap) under Xvfb. This environment's GPU process cannot composite
+  (SharedImageManager mailbox errors; headless -screenshot writes a
+  blank too), so the shot shows the app's own WebGPU gate page
+  ("WebGPU found no GPU" + fix steps) rendered correctly with
+  `--disable-gpu` - proves serve + boot + fallback render. A WebGPU
+  adapter is not offered here even with swiftshader flags.
+
+### What I fixed after looking at the shots
+
+- Black captures were llvmpipe/wgpu init (~15-20s), not a UI bug -
+  lengthened the pre-capture wait.
+- eframe persists window size in `~/.local/share/neuro_editv2/app.ron`;
+  the first 800px run pinned every later launch. `rm app.ron` before
+  each run restored `--window-size` (CLI flags `--watch`, `--autorun`,
+  `--window-size` added in main.rs for deterministic review shots;
+  `EditorApp::arm_example_watch` reuses the example post-Geo
+  watch/selection path).
+- `stage22_script.rhai` failed to parse twice: `1_000_000_000`
+  underscores and `let mut` are both syntax errors in our rhai version -
+  the eval died instantly, no Script state. Fixed to `1000000000` +
+  `let x`; shot then shows busy correctly.
+- AdEx kick 1.0 fired once then adapted to quiet; bumped to 1.6. The
+  200 ms watch window still often lands between tonic spikes, so v/w
+  look flat-but-honest (w sits at baseline by design).
+- Region labels crowd at dock width ~300 (LTS/RS/IB/FS stack top-left
+  on the a-b plane) - left as-is; flagged below.
+- At 800x700 the floating Plots window compresses to ~264px wide between
+  the two docks; it stays inside `usable_rect`, never overlaps the
+  inspector, and scrolls internally - acceptable, flagged below.
+
+### New tests + sabotage evidence (each verified failing)
+
+- `hello_carries_param_map` (sim/tests/serve.rs): Hello's izh desc has 2
+  planes (0,1) and (2,3), all 5 named regions, spot rows = PRESETS rows.
+  Sabotage `param_map() -> None`: fails at `expect("izh provides a
+  design map")` line 1865.
+- `state_derives_from_status`, `transitions_build_run_pause_build`
+  (state.rs): flag->state precedence and each transition. Sabotage
+  `if false && self.busy`: both fail (busy no longer maps to Script).
+- `enable_table` (state.rs): every Act x state cell above. Sabotage
+  `EDIT_RUNNING -> None`: fails "Edit in Run" at line 305.
+- `left_panel_leaves_viewport_room` (panel.rs): dock takes 150-400px,
+  keeps full height, both sizes. Sabotage `width_range(150..=1200)
+  + default 700`: fails at line 460 (`taken` > 400). Note:
+  `default_width(700)` alone does NOT fail - `width_range` clamps it;
+  the test guards the range, not the default.
+- `collapsed_dock_is_a_slim_rail` (panel.rs): rail <= 60px incl. egui
+  frame margin (measured 44px). Sabotage `RAIL_W=300`: fails.
+- `panel_controls_are_at_least_28px` (panel.rs): probe in `left_panel`
+  reports enforced `interact_size.y`. Discovered via its own sabotage:
+  before the override the probe read 20px.
+- `top_bar_is_menus_only` (panel.rs): strip is 1 row, < 40px. Sabotage
+  `exact_height(64)`: fails.
+- `console_dock_carves_bottom_space` (console.rs): dock takes 60-400px
+  off the bottom beside the left dock, scene keeps >=200px; catches the
+  floating-window regression (Window never shrinks available_rect).
+  Sabotage `exact_height(600)`: fails "console ate the scene".
+- `hidden_console_leaves_full_height` (console.rs): `win.console` off
+  releases the strip. Sabotage removing the early-return: fails.
+- `empty_unit_shows_name_only` (inspector.rs): `param_label` prints "b"
+  not "b []". Sabotage `if false && pd.unit.is_empty()`: fails ("b []").
+- `spot_at_hits_region_then_nearest` (inspector.rs): 5%-ellipse hit,
+  nearest wins on overlap, empty space misses, truncated row safe.
+  Sabotage `return Some(0)`: fails the miss asserts.
+- `inspector_dock_carves_right_space` (inspector.rs): dock takes
+  220-520px on the right above the console beside the left dock at both
+  sizes. Sabotage early-return (dock never shows): fails.
+- `usable_rect_excludes_all_docks` (inspector.rs): the rect floating
+  windows clamp to excludes both dock strips at both sizes - the
+  structural "Plots can't cover the inspector" proof. Same sabotage
+  class as above.
+
+### Gates + counts
+
+- `cargo test --workspace`: 36 suites, **291 passed, 0 failed**
+  (277 at Stage 21 close -> +14: 13 editor + 1 serve).
+- `cargo test -p sim --features cuda`: 19 suites, 129 passed, 0 failed.
+- `editor/web/build.sh`: wasm release build OK, dist-web served and
+  rendered (shot above).
+- `cargo fmt --check`: clean.
+- Per-commit `cargo check --workspace --all-targets` on
+  `rev-list --reverse d77ab7f..HEAD` (5 commits): all pass, warnings
+  only (pre-existing test-file warnings).
+
+### Open questions for Nico
+
+- A net that was built but never run shows "paused t = 0.0 s" (sim exists
+  at t=0, so Run-state rules apply: edits would tear it down). Should a
+  never-run sim read differently, e.g. "ready - not started"?
+- At 800x700 the three docks + Plots window leave ~280x200 scene. Option:
+  auto-close Plots under a width threshold, or leave as is?
+- a-b map region labels overlap slightly at narrow dock widths - enlarge
+  labels, drop the fainter ones, or let the map scroll/zoom?
+- The console echoes eval source lines "(25 chars truncated)" - keep the
+  echo or only show print()/error output?
+- Web app under a WebGPU-less browser only shows the gate page - want a
+  degraded 2D/server-rendered view, or is the gate page sufficient?

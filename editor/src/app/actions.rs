@@ -16,6 +16,15 @@ impl EditorApp {
         self.selection = ids.into_iter().collect();
     }
 
+    /// `--watch` driver hook (review screenshots): apply the example
+    /// auto-watch path — the ids become the selection (and the watch)
+    /// once the eval's Geo covers them.
+    pub fn arm_example_watch(&mut self, ids: &'static [u32]) {
+        self.script.example_watch = Some(ids);
+        self.script.example_base_ver = Some(0);
+        self.script.example_deadline_ms = f64::MAX;
+    }
+
     /// Plot/legend label for a watched neuron: its name when set, the
     /// id always — "n7" style falls back to the bare id.
     pub(super) fn watch_label(&self, id: u32) -> String {

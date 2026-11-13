@@ -71,6 +71,18 @@ struct Cli {
     noise_kick: f32,
     #[arg(long, default_value_t = 1)]
     seed: u64,
+    /// Review/screenshot driver: auto-select+watch these neuron ids once
+    /// the script's Geo arrives (comma-separated, e.g. --watch 200).
+    #[arg(long)]
+    watch: Option<String>,
+    /// Review/screenshot driver: start auto-run after the startup script
+    /// (the sim keeps stepping — traces accumulate for shots).
+    #[arg(long)]
+    autorun: bool,
+    /// GUI window size WxH (default 1440x900) — deterministic size for
+    /// review screenshots.
+    #[arg(long)]
+    window_size: Option<String>,
 }
 
 #[cfg(feature = "native")]
@@ -152,6 +164,21 @@ fn main() -> anyhow::Result<()> {
         let code = std::fs::read_to_string(s)?;
         ctl.send(proto::ClientMsg::Eval { code });
     }
+    if cli.autorun {
+        ctl.send(proto::ClientMsg::AutoRun(true));
+    }
+    // --watch ids → the same path a Run click on an example takes:
+    // selection+watch applies when the eval's Geo covers the ids.
+    let shot_watch: Option<&'static [u32]> = cli.watch.as_deref().map(|s| {
+        let ids: Vec<u32> = s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+        &*Box::leak(ids.into_boxed_slice())
+    });
+    let (win_w, win_h) = cli
+        .window_size
+        .as_deref()
+        .and_then(|s| s.split_once('x'))
+        .and_then(|(w, h)| w.parse::<f32>().ok().zip(h.parse::<f32>().ok()))
+        .unwrap_or((1440.0, 900.0));
     let net_path = cli.net.clone();
 
     let icon_img = image::load_from_memory(include_bytes!("../assets/icon_256.png"))
@@ -159,7 +186,7 @@ fn main() -> anyhow::Result<()> {
         .to_rgba8();
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1440.0, 900.0])
+            .with_inner_size([win_w, win_h])
             .with_title(match &cli.connect {
                 Some(a) => format!("neuro_edit v2 — {a}"),
                 None => "neuro_edit v2".to_string(),
@@ -188,6 +215,9 @@ fn main() -> anyhow::Result<()> {
             app.net_path = net_path.clone();
             if let Some(p) = &net_path {
                 app.push_recent(p.clone());
+            }
+            if let Some(ids) = shot_watch {
+                app.arm_example_watch(ids);
             }
             // dark theme — set_theme, not set_visuals: eframe applies the
             // system light scheme AFTER the app creator, which would undo
