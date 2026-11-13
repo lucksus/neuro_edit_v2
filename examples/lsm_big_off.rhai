@@ -185,6 +185,8 @@ print("test mlp   auc=" + f3.call(auc(s_mlp, labs)) +
 
 sim.reset();
 sim.set_noise(60.0, 10.0);
-sim.run(400.0);
-print("done: spikes=" + sim.spikes() +
-      " — signal-off liquid still fires on noise; press Run to continue");
+let s0 = sim.spikes();
+sim.run(2000.0);
+let tail_hz = (sim.spikes() - s0) / n_liq / 2.0;
+print("done: tail rate=" + f3.call(tail_hz) + " Hz over " + n_liq +
+      " neurons on noise; press Run to keep it going");

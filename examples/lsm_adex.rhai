@@ -188,9 +188,12 @@ print("test mlp   auc=" + f3.call(auc(s_mlp, labs)) +
       " acc=" + f3.call(accuracy(s_mlp, labs)) + "   <- the headline");
 
 sim.reset();
-// AdEx noise kick is a current pulse — a bigger kick value is needed
-// than the izh examples use to keep the liquid visibly firing.
-sim.set_noise(200.0, 700.0);
-sim.run(400.0);
-print("done: spikes=" + sim.spikes() +
-      " — AdEx liquid still firing on noise; press Run to continue");
+// The noise kick is mV of depolarisation per Poisson kick — 60 Hz ×
+// 14 mV holds this liquid near ~8 Hz mean for minutes (Stage 24d fixed
+// the kick's units for AdEx; the old pA-value kick died in seconds).
+sim.set_noise(60.0, 14.0);
+let s0 = sim.spikes();
+sim.run(2000.0);
+let tail_hz = (sim.spikes() - s0) / n_liq / 2.0;
+print("done: tail rate=" + f3.call(tail_hz) + " Hz over " + n_liq +
+      " AdEx neurons on noise; press Run to keep it going");
