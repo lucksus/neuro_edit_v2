@@ -2468,3 +2468,13 @@ New tests and what they assert:
 - The lifted `izh#xxxx` name is a 16-bit FNV-1a content hash — stable
   across files built by the same loader, which is all paste-merge
   needs.
+
+### Stage 20 review fix (Data)
+
+`lif_mixed_cpu_matches_cuda` drove indices 0, 25, 18 and 30 of an
+8-neuron net, so only izh neuron 0 got input and no LIF neuron ever
+spiked (counts `[2, 0, 0, 0, 0, 0, 0, 0]`): the GPU LIF threshold and
+reset never ran, and changing the CUDA reset to `x[0] = p[1]` still
+passed. Now neurons 0, 1, 3 and 6 are driven and the test asserts each
+LIF neuron 1, 3 and 6 fires at least twice. With the CUDA reset changed
+to `p[1]` it fails on "mixed-net spike counts diverged".

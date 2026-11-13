@@ -212,9 +212,12 @@ fn lif_mixed_cpu_matches_cuda() {
 
     let mut cpu = Sim::with_params(&net, cfg.clone(), BackendKind::Cpu, params.clone()).unwrap();
     let mut gpu = Sim::with_params(&net, cfg, BackendKind::Cuda, params).unwrap();
-    for s in [0.0, 25.0, 18.0, 30.0] {
-        cpu.set_external(s as usize, 15.0 + s);
-        gpu.set_external(s as usize, 15.0 + s);
+    // Drive the izh neuron 0 and the LIF neurons 1, 3 and 6 hard enough
+    // that every LIF crosses threshold and resets, so the GPU runs the
+    // whole LIF step (integrate, spike, reset), not just the integration.
+    for (i, s) in [(0, 0.0), (1, 25.0), (3, 18.0), (6, 30.0)] {
+        cpu.set_external(i, 15.0 + s);
+        gpu.set_external(i, 15.0 + s);
     }
     cpu.run_steps(300).unwrap();
     gpu.run_steps(300).unwrap();
@@ -227,6 +230,13 @@ fn lif_mixed_cpu_matches_cuda() {
         "mixed-net spike counts diverged"
     );
     assert!(cpu.spikes_total() > 0, "the mixed net must actually fire");
+    let counts = cpu.spike_counts(usize::MAX).unwrap();
+    for i in [1, 3, 6] {
+        assert!(
+            counts[i] >= 2,
+            "LIF neuron {i} must fire and reset: {counts:?}"
+        );
+    }
 
     // state slot 0 (membrane potential) close on every neuron, izh or lif
     let vc = cpu.state(0);
