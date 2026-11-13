@@ -7,7 +7,7 @@ use proto::{ClientMsg, NetEdit};
 
 use super::files::dir_of;
 use super::layout::{app_win, default_rect, usable_rect, DefWin};
-use super::{EditorApp, PlotTab};
+use super::{gate, Act, EditorApp, PlotTab};
 
 impl EditorApp {
     /// Load a bundled example into the script editor (Stage 13 H).
@@ -54,9 +54,10 @@ impl EditorApp {
                 ui.horizontal(|ui| {
                     ui.label("name");
                     ui.text_edit_singleline(&mut self.script.name);
-                    if ui.button("Run").clicked() {
+                    if gate(ui, self.why(Act::Eval), egui::Button::new("Run")).clicked() {
                         self.run_script();
                     }
+                    // Jobs run on their own env — not gated on busy.
                     if ui
                         .button("Run as job")
                         .on_hover_text("background job on the server — survives disconnect; progress in the jobs tab")
@@ -69,7 +70,7 @@ impl EditorApp {
                         self.plots.tab = PlotTab::Jobs;
                         self.win.plots = true;
                     }
-                    if ui.button("Save to net").clicked() {
+                    if gate(ui, self.why(Act::Edit), egui::Button::new("Save to net")).clicked() {
                         self.edit_net(NetEdit::ScriptAdd {
                             name: self.script.name.clone(),
                             src: self.script.text.clone(),
@@ -139,7 +140,8 @@ impl EditorApp {
                             .desired_rows(16)
                             .layouter(&mut lay),
                     );
-                    let run = r.has_focus()
+                    let run = self.can(Act::Eval)
+                        && r.has_focus()
                         && ui.input(|i| {
                             i.key_pressed(egui::Key::Enter)
                                 && (i.modifiers.ctrl || i.modifiers.command)

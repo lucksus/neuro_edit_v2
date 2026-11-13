@@ -25,12 +25,14 @@ mod layout;
 mod login;
 mod plots;
 mod script;
+mod state;
 mod sync;
 mod toolbar;
 
 #[cfg(not(target_arch = "wasm32"))]
 use files::local_files_root;
 use layout::*;
+pub(crate) use state::{gate, gate_ui, Act, EditorState};
 
 #[allow(dead_code)]
 pub struct EditorApp {
@@ -639,8 +641,15 @@ impl EditorApp {
     }
 
     /// Apply a structured edit — versioned, delta-able, and expressible
-    /// on the wire (unlike the old closure path).
-    fn edit_net(&self, e: NetEdit) {
+    /// on the wire (unlike the old closure path). The funnel every
+    /// `NetEdit` goes through, so it's also the last-line guard against
+    /// edits while running/busy (they'd invalidate the live sim) —
+    /// a stale context menu or an open dialog can't slip one past.
+    fn edit_net(&mut self, e: NetEdit) {
+        if let Some(why) = self.why(Act::Edit) {
+            self.status = format!("edit blocked: {why}");
+            return;
+        }
         self.ctl.send_edit(e);
     }
 

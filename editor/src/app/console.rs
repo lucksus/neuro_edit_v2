@@ -6,7 +6,7 @@ use eframe::egui;
 use proto::ClientMsg;
 
 use super::layout::{app_win, default_rect, usable_rect, DefWin};
-use super::EditorApp;
+use super::{gate, Act, EditorApp};
 
 impl EditorApp {
     pub(super) fn console_lines(&self) -> Vec<String> {
@@ -89,8 +89,10 @@ impl EditorApp {
                             }
                         }
                     }
-                    let run = ui.button("Run");
-                    let enter = r.has_focus()
+                    let why = self.why(Act::Eval);
+                    let run = gate(ui, why, egui::Button::new("Run"));
+                    let enter = why.is_none()
+                        && r.has_focus()
                         && ui.input(|i| {
                             i.key_pressed(egui::Key::Enter)
                                 && (i.modifiers.ctrl || i.modifiers.command)

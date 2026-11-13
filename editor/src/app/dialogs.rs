@@ -9,7 +9,7 @@ use proto::{f64_of, ClientMsg, NetEdit};
 
 use super::files::dir_of;
 use super::layout::app_win;
-use super::{Dialog, EditorApp, PendingAction};
+use super::{gate, Act, Dialog, EditorApp, PendingAction};
 
 impl EditorApp {
     pub(super) fn dialog(&mut self, ctx: &egui::Context) {
@@ -135,7 +135,7 @@ impl EditorApp {
             // U8: show the size before Create — a stray
             // 1000×1000 used to go straight to the wire.
             ui.label(format!("= {} neurons", (*w).max(0) * (*h).max(0)));
-            if ui.button("Create").clicked() {
+            if gate(ui, self.why(Act::Edit), egui::Button::new("Create")).clicked() {
                 let (g, w2, h2, d2) = (group.clone(), *w, *h, *dist);
                 self.edit_net(NetEdit::CreateGrid2d {
                     group: g,
@@ -171,7 +171,7 @@ impl EditorApp {
                 ui.add(egui::DragValue::new(h).prefix("h ").range(1..=256));
                 ui.add(egui::DragValue::new(d2).prefix("d ").range(1..=256));
             });
-            if ui.button("Create").clicked() {
+            if gate(ui, self.why(Act::Edit), egui::Button::new("Create")).clicked() {
                 let (g, w2, h2, dd, sp) = (group.clone(), *w, *h, *d2, *spacing);
                 self.edit_net(NetEdit::CreateGrid3d {
                     group: g,
@@ -207,7 +207,7 @@ impl EditorApp {
                 ui.add(egui::DragValue::new(scaling).prefix("scaling ").speed(0.01));
                 ui.add(egui::DragValue::new(lambda).prefix("lambda "));
                 ui.add(egui::DragValue::new(w).prefix("w "));
-                if ui.button("Create").clicked() {
+                if gate(ui, self.why(Act::Edit), egui::Button::new("Create")).clicked() {
                     self.edit_net(NetEdit::CreateConnections {
                         group: group.clone(),
                         scaling: f64_of(*scaling),
@@ -237,7 +237,7 @@ impl EditorApp {
                 });
                 ui.add(egui::DragValue::new(mean).prefix("mean "));
                 ui.add(egui::DragValue::new(sd).prefix("sd "));
-                if ui.button("Apply").clicked() {
+                if gate(ui, self.why(Act::Edit), egui::Button::new("Apply")).clicked() {
                     self.edit_net(NetEdit::SetSynapseWeights {
                         group: group.clone(),
                         mean: f64_of(*mean),
@@ -272,7 +272,7 @@ impl EditorApp {
                 });
                 ui.add(egui::DragValue::new(mean).prefix("mean ms "));
                 ui.add(egui::DragValue::new(sd).prefix("sd "));
-                if ui.button("Apply").clicked() {
+                if gate(ui, self.why(Act::Edit), egui::Button::new("Apply")).clicked() {
                     self.edit_net(NetEdit::SetSynTauDist {
                         src: src.clone(),
                         dst: dst.clone(),
@@ -300,7 +300,7 @@ impl EditorApp {
                     self.group_combo(ui, "ei_group", group);
                 });
                 ui.add(egui::Slider::new(frac, 0.0..=1.0).text("inh frac"));
-                if ui.button("Apply").clicked() {
+                if gate(ui, self.why(Act::Edit), egui::Button::new("Apply")).clicked() {
                     self.edit_net(NetEdit::SetExcInh {
                         group: group.clone(),
                         frac: f64_of(*frac),
@@ -337,7 +337,9 @@ impl EditorApp {
                     })
                     .collect();
                 ui.label(format!("{} targets (from selection)", targets.len()));
-                if ui.button("Create").clicked() && !targets.is_empty() {
+                if gate(ui, self.why(Act::Edit), egui::Button::new("Create")).clicked()
+                    && !targets.is_empty()
+                {
                     let n2 = name.clone();
                     let wt = *weight;
                     let tw: Vec<(u32, f32)> = targets.iter().map(|&t| (t, wt)).collect();
@@ -370,7 +372,7 @@ impl EditorApp {
                 ui.text_edit_singleline(name);
             });
             ui.label("empty (t,value) series — fill via net.samples_write");
-            if ui.button("Create").clicked() {
+            if gate(ui, self.why(Act::Edit), egui::Button::new("Create")).clicked() {
                 let n2 = name.clone();
                 self.edit_net(NetEdit::AddSamples { name: n2 });
                 *keep = false;
@@ -401,7 +403,9 @@ impl EditorApp {
                     })
                     .collect();
                 ui.label(format!("{} units (from selection)", units.len()));
-                if ui.button("Create").clicked() && !units.is_empty() {
+                if gate(ui, self.why(Act::Edit), egui::Button::new("Create")).clicked()
+                    && !units.is_empty()
+                {
                     let n2 = name.clone();
                     self.edit_net(NetEdit::AddReadout { name: n2, units });
                     *keep = false;
@@ -432,7 +436,9 @@ impl EditorApp {
                     })
                     .collect();
                 ui.label(format!("{} neurons", ids.len()));
-                if ui.button("Add").clicked() && !ids.is_empty() {
+                if gate(ui, self.why(Act::Edit), egui::Button::new("Add")).clicked()
+                    && !ids.is_empty()
+                {
                     let nm = name.clone();
                     self.edit_net(NetEdit::AddToGroup { name: nm, ids });
                     *keep = false;
@@ -450,7 +456,7 @@ impl EditorApp {
         app_win(ctx, "Unsaved changes").open(open).show(ctx, |ui| {
             ui.label("The network has unsaved changes — discard them?");
             ui.horizontal(|ui| {
-                if ui.button("Discard").clicked() {
+                if gate(ui, self.why(Act::NewLoad), egui::Button::new("Discard")).clicked() {
                     let act = then.clone();
                     self.do_pending(ctx, act);
                     *keep = false;
@@ -471,7 +477,7 @@ impl EditorApp {
     ) {
         app_win(ctx, "Save as").open(open).show(ctx, |ui| {
             ui.text_edit_singleline(path);
-            if ui.button("Save").clicked() {
+            if gate(ui, self.why(Act::Save), egui::Button::new("Save")).clicked() {
                 let p = path.clone();
                 self.send(ClientMsg::SaveNet { path: p });
                 *keep = false;
@@ -492,7 +498,7 @@ impl EditorApp {
                 if ui.button("list").clicked() {
                     self.send(ClientMsg::ListFiles { path: dir_of(path) });
                 }
-                if ui.button("Load").clicked() {
+                if gate(ui, self.why(Act::NewLoad), egui::Button::new("Load")).clicked() {
                     let p = path.clone();
                     self.guarded(ctx, PendingAction::Load(p));
                     *keep = false;

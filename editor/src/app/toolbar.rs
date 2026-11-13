@@ -10,7 +10,7 @@ use crate::simctl::SimCtl;
 use proto::ClientMsg;
 
 use super::layout::usable_rect;
-use super::{Dialog, EditorApp, Mode, PendingAction};
+use super::{gate, gate_ui, Act, Dialog, EditorApp, EditorState, Mode, PendingAction};
 
 impl EditorApp {
     pub(super) fn toolbar(&mut self, ctx: &egui::Context) {
@@ -24,8 +24,14 @@ impl EditorApp {
             // sibling `horizontal_wrapped` mode row see an over-wide
             // boundary and never wrap — controls clip off-screen instead.
             ui.horizontal_wrapped(|ui| {
+                // The Stage 22 enable table: each action class asks the
+                // editor state for its reason; `gate`/`gate_ui` render
+                // the control disabled with that reason as the tooltip.
+                let why_newload = self.why(Act::NewLoad);
+                let why_save = self.why(Act::Save);
+                let why_edit = self.why(Act::Edit);
                 ui.menu_button("File", |ui| {
-                    if ui.add(icons::button(&ic.new, "New")).clicked() {
+                    if gate(ui, why_newload, icons::button(&ic.new, "New")).clicked() {
                         self.guarded(ctx, PendingAction::New);
                         ui.close();
                     }
@@ -36,7 +42,7 @@ impl EditorApp {
                         self.status = "logged out — saved session forgotten".into();
                         ui.close();
                     }
-                    if ui.add(icons::button(&ic.open, "Load…")).clicked() {
+                    if gate(ui, why_newload, icons::button(&ic.open, "Load…")).clicked() {
                         self.dlg = Some(Dialog::Load {
                             path: self.net_path.clone().unwrap_or_default(),
                         });
@@ -51,14 +57,14 @@ impl EditorApp {
                             }
                             let rec: Vec<String> = self.files.recent.iter().cloned().collect();
                             for p in rec {
-                                if ui.button(&p).clicked() {
+                                if gate(ui, why_newload, egui::Button::new(&p)).clicked() {
                                     self.guarded(ctx, PendingAction::Load(p));
                                     ui.close();
                                 }
                             }
                         },
                     );
-                    if ui.add(icons::button(&ic.save, "Save")).clicked() {
+                    if gate(ui, why_save, icons::button(&ic.save, "Save")).clicked() {
                         match &self.net_path {
                             // Q6: ask for the file; saved_version/recent
                             // follow the server's Saved ack, not the ask.
@@ -74,7 +80,7 @@ impl EditorApp {
                         }
                         ui.close();
                     }
-                    if ui.add(icons::button(&ic.save_as, "Save as…")).clicked() {
+                    if gate(ui, why_save, icons::button(&ic.save_as, "Save as…")).clicked() {
                         self.dlg = Some(Dialog::SaveAs {
                             path: self.net_path.clone().unwrap_or("net.ne2".into()),
                         });
@@ -86,42 +92,42 @@ impl EditorApp {
                     }
                 });
                 ui.menu_button("Edit", |ui| {
-                    let sel = !self.selection.is_empty();
-                    if ui
-                        .add_enabled(sel, egui::Button::new("Copy (Ctrl+C)"))
-                        .clicked()
-                    {
+                    let sel = self.selection.is_empty();
+                    let why_sel = sel.then_some("nothing selected");
+                    if gate(ui, why_sel, egui::Button::new("Copy (Ctrl+C)")).clicked() {
                         self.copy_selection(false);
                         ui.close();
                     }
-                    if ui
-                        .add_enabled(sel, egui::Button::new("Cut (Ctrl+X)"))
-                        .clicked()
-                    {
+                    if gate(ui, why_sel.or(why_edit), egui::Button::new("Cut (Ctrl+X)")).clicked() {
                         self.copy_selection(true);
                         ui.close();
                     }
-                    if ui
-                        .add_enabled(
-                            self.clipboard.is_some(),
-                            egui::Button::new("Paste (Ctrl+V)"),
-                        )
-                        .clicked()
-                    {
+                    let why_paste = if self.clipboard.is_none() {
+                        Some("clipboard is empty")
+                    } else {
+                        why_edit
+                    };
+                    if gate(ui, why_paste, egui::Button::new("Paste (Ctrl+V)")).clicked() {
                         self.paste(None);
                         ui.close();
                     }
                     ui.separator();
-                    if ui
-                        .add_enabled(sel, egui::Button::new("Delete selected (Del)"))
-                        .clicked()
+                    if gate(
+                        ui,
+                        why_sel.or(why_edit),
+                        egui::Button::new("Delete selected (Del)"),
+                    )
+                    .clicked()
                     {
                         self.delete_selection();
                         ui.close();
                     }
-                    if ui
-                        .add_enabled(sel, egui::Button::new("Add selection to group…"))
-                        .clicked()
+                    if gate(
+                        ui,
+                        why_sel.or(why_edit),
+                        egui::Button::new("Add selection to group…"),
+                    )
+                    .clicked()
                     {
                         self.dlg = Some(Dialog::AddToGroup {
                             name: "group".into(),
@@ -130,11 +136,11 @@ impl EditorApp {
                     }
                 });
                 ui.menu_button("Insert", |ui| {
-                    if ui.button("Neuron (I)").clicked() {
+                    if gate(ui, why_edit, egui::Button::new("Neuron (I)")).clicked() {
                         self.mode = Mode::Insert;
                         ui.close();
                     }
-                    if ui.button("2D grid…").clicked() {
+                    if gate(ui, why_edit, egui::Button::new("2D grid…")).clicked() {
                         self.dlg = Some(Dialog::Grid2d {
                             group: "grid".into(),
                             w: 20,
@@ -143,7 +149,7 @@ impl EditorApp {
                         });
                         ui.close();
                     }
-                    if ui.button("3D grid…").clicked() {
+                    if gate(ui, why_edit, egui::Button::new("3D grid…")).clicked() {
                         self.dlg = Some(Dialog::Grid3d {
                             group: "grid".into(),
                             w: 10,
@@ -153,7 +159,7 @@ impl EditorApp {
                         });
                         ui.close();
                     }
-                    if ui.button("Input…").clicked() {
+                    if gate(ui, why_edit, egui::Button::new("Input…")).clicked() {
                         self.dlg = Some(Dialog::NewInput {
                             name: "input".into(),
                             weight: 20.0,
@@ -161,25 +167,28 @@ impl EditorApp {
                         });
                         ui.close();
                     }
-                    if ui.button("Samples…").clicked() {
+                    if gate(ui, why_edit, egui::Button::new("Samples…")).clicked() {
                         self.dlg = Some(Dialog::NewSamples {
                             name: "samples".into(),
                         });
                         ui.close();
                     }
-                    if ui
-                        .add_enabled(
-                            !self.selection.is_empty(),
-                            egui::Button::new("Readout from selection…"),
-                        )
-                        .clicked()
+                    if gate(
+                        ui,
+                        self.selection
+                            .is_empty()
+                            .then_some("nothing selected")
+                            .or(why_edit),
+                        egui::Button::new("Readout from selection…"),
+                    )
+                    .clicked()
                     {
                         self.dlg = Some(Dialog::NewReadout { name: "ro".into() });
                         ui.close();
                     }
                 });
                 ui.menu_button("Group", |ui| {
-                    if ui.button("Create connections…").clicked() {
+                    if gate(ui, why_edit, egui::Button::new("Create connections…")).clicked() {
                         self.dlg = Some(Dialog::Connections {
                             group: "grid".into(),
                             scaling: 0.35,
@@ -188,7 +197,7 @@ impl EditorApp {
                         });
                         ui.close();
                     }
-                    if ui.button("Set synapse weights…").clicked() {
+                    if gate(ui, why_edit, egui::Button::new("Set synapse weights…")).clicked() {
                         self.dlg = Some(Dialog::Weights {
                             group: "grid".into(),
                             mean: 6.0,
@@ -196,7 +205,7 @@ impl EditorApp {
                         });
                         ui.close();
                     }
-                    if ui.button("Set synapse tau…").clicked() {
+                    if gate(ui, why_edit, egui::Button::new("Set synapse tau…")).clicked() {
                         self.dlg = Some(Dialog::SynTau {
                             src: "grid".into(),
                             dst: "grid".into(),
@@ -205,7 +214,7 @@ impl EditorApp {
                         });
                         ui.close();
                     }
-                    if ui.button("Set exc/inh…").clicked() {
+                    if gate(ui, why_edit, egui::Button::new("Set exc/inh…")).clicked() {
                         self.dlg = Some(Dialog::ExcInh {
                             group: "grid".into(),
                             frac: 0.2,
@@ -284,6 +293,8 @@ impl EditorApp {
                 // nested horizontal — wrapping moves a group whole instead
                 // of splitting e.g. the speed slider from its "realtime".
                 toolbar_group(ui, 300.0, |ui| {
+                    // Run/Stop is never gated (Act::RunToggle) — it's how
+                    // you leave Run and how you abort a busy script.
                     if ui.add(icons::button(run_icon, run_label)).clicked() {
                         if live {
                             self.ctl.abort_now();
@@ -292,21 +303,20 @@ impl EditorApp {
                             self.send(ClientMsg::AutoRun(true));
                         }
                     }
-                    if ui
-                        .add(icons::button(&ic.step, "10ms"))
+                    let why_step = self.why(Act::Step);
+                    if gate(ui, why_step, icons::button(&ic.step, "10ms"))
                         .on_hover_text("Step 10 ms")
                         .clicked()
                     {
                         self.send(ClientMsg::RunMs(10.0));
                     }
-                    if ui
-                        .add(icons::button(&ic.step_long, "100ms"))
+                    if gate(ui, why_step, icons::button(&ic.step_long, "100ms"))
                         .on_hover_text("Step 100 ms")
                         .clicked()
                     {
                         self.send(ClientMsg::RunMs(100.0));
                     }
-                    if ui.add(icons::button(&ic.reset, "Reset")).clicked() {
+                    if gate(ui, self.why(Act::Reset), icons::button(&ic.reset, "Reset")).clicked() {
                         self.send(ClientMsg::Reset);
                         self.plots.hist.clear();
                     }
@@ -315,10 +325,13 @@ impl EditorApp {
                     let fg = ui.visuals().text_color();
                     ui.add(icons::tinted(&ic.speed, fg))
                         .on_hover_text("Speed (realtime factor)");
-                    if ui
-                        .add(egui::Slider::new(&mut self.sim.speed, 0.05..=20.0).logarithmic(true))
+                    let changed = gate_ui(ui, self.why(Act::Speed), |ui| {
+                        ui.add(
+                            egui::Slider::new(&mut self.sim.speed, 0.05..=20.0).logarithmic(true),
+                        )
                         .changed()
-                    {
+                    });
+                    if changed.inner {
                         self.send(ClientMsg::SetSpeed(self.sim.speed));
                     }
                     // One speed display: requested realtime factor + the best
@@ -338,47 +351,53 @@ impl EditorApp {
                     };
                     ui.add(icons::tinted(backend_icon, ui.visuals().text_color()))
                         .on_hover_text("Backend");
-                    egui::ComboBox::from_id_salt("backend")
-                        .selected_text(match self.sim.backend {
-                            proto::Backend::Cuda => "cuda",
-                            proto::Backend::Cpu => "cpu",
-                        })
-                        .show_ui(ui, |ui| {
-                            if ui.add(icons::button(&ic.backend_gpu, "cuda")).clicked() {
-                                self.send(ClientMsg::SetBackend(proto::Backend::Cuda));
-                            }
-                            if ui.add(icons::button(&ic.backend_cpu, "cpu")).clicked() {
-                                self.send(ClientMsg::SetBackend(proto::Backend::Cpu));
-                            }
-                        });
+                    gate_ui(ui, self.why(Act::Backend), |ui| {
+                        egui::ComboBox::from_id_salt("backend")
+                            .selected_text(match self.sim.backend {
+                                proto::Backend::Cuda => "cuda",
+                                proto::Backend::Cpu => "cpu",
+                            })
+                            .show_ui(ui, |ui| {
+                                if ui.add(icons::button(&ic.backend_gpu, "cuda")).clicked() {
+                                    self.send(ClientMsg::SetBackend(proto::Backend::Cuda));
+                                }
+                                if ui.add(icons::button(&ic.backend_cpu, "cpu")).clicked() {
+                                    self.send(ClientMsg::SetBackend(proto::Backend::Cpu));
+                                }
+                            });
+                    });
                 });
                 toolbar_group(ui, 140.0, |ui| {
                     ui.add(icons::tinted(&ic.timestep, ui.visuals().text_color()))
                         .on_hover_text("Time step dt");
-                    if ui
-                        .add(
+                    let changed = gate_ui(ui, self.why(Act::Dt), |ui| {
+                        ui.add(
                             egui::DragValue::new(&mut self.sim.dt_ms)
                                 .range(0.01..=1.0)
                                 .speed(0.01)
                                 .suffix(" ms"),
                         )
                         .changed()
-                    {
+                    })
+                    .inner;
+                    if changed {
                         self.send(ClientMsg::SetDtMs(self.sim.dt_ms));
                     }
                 });
                 toolbar_group(ui, 160.0, |ui| {
                     ui.add(icons::tinted(&ic.noise, ui.visuals().text_color()))
                         .on_hover_text("Background noise rate");
-                    if ui
-                        .add(
+                    let changed = gate_ui(ui, self.why(Act::Noise), |ui| {
+                        ui.add(
                             egui::DragValue::new(&mut self.sim.noise_hz)
                                 .range(0.0..=5000.0)
                                 .speed(1.0)
                                 .suffix(" Hz"),
                         )
                         .changed()
-                    {
+                    })
+                    .inner;
+                    if changed {
                         self.send(ClientMsg::SetNoise {
                             hz: self.sim.noise_hz,
                             kick: self.sim.noise_kick,
@@ -388,12 +407,29 @@ impl EditorApp {
             });
             ui.horizontal_wrapped(|ui| {
                 // Same wrapping rule as row 1: groups move whole.
+                let why_edit = self.why(Act::Edit);
                 toolbar_group(ui, 380.0, |ui| {
-                    let m = &mut self.mode;
-                    icons::selectable_value(ui, m, Mode::Navigate, &ic.navigate, "Navigate");
-                    icons::selectable_value(ui, m, Mode::Insert, &ic.insert, "Insert");
-                    icons::selectable_value(ui, m, Mode::Connect, &ic.connect, "Connect");
-                    icons::selectable_value(ui, m, Mode::Move, &ic.mv, "Move");
+                    // The selected marker follows eff_mode — during a
+                    // run edits collapse to Navigate, so that's what the
+                    // UI shows. The stored self.mode is only written by
+                    // an enabled click, so pausing restores it.
+                    let mut shown = self.eff_mode();
+                    for (m, t, name) in [
+                        (Mode::Navigate, &ic.navigate, "Navigate"),
+                        (Mode::Insert, &ic.insert, "Insert"),
+                        (Mode::Connect, &ic.connect, "Connect"),
+                        (Mode::Move, &ic.mv, "Move"),
+                    ] {
+                        let why = if m == Mode::Navigate { None } else { why_edit };
+                        let mut r = gate(ui, why, icons::selectable(shown == m, t, name));
+                        if r.clicked() && shown != m {
+                            shown = m;
+                            r.mark_changed();
+                        }
+                    }
+                    if shown != self.mode {
+                        self.mode = shown;
+                    }
                 });
                 ui.separator();
                 toolbar_group(ui, 240.0, |ui| {
@@ -472,6 +508,16 @@ impl EditorApp {
         };
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                // The explicit editor state (Stage 22) as a colour chip —
+                // the left panel's Run band carries the detail, this is
+                // the always-visible "what mode is the app in".
+                let (name, col) = match self.editor_state() {
+                    EditorState::Build => ("BUILD", egui::Color32::from_rgb(90, 140, 220)),
+                    EditorState::Run => ("RUN", egui::Color32::from_rgb(70, 180, 90)),
+                    EditorState::Script => ("SCRIPT", egui::Color32::from_rgb(220, 160, 60)),
+                };
+                ui.label(egui::RichText::new(name).color(col).strong().monospace());
+                ui.separator();
                 ui.label(format!("t = {t:.1} ms"));
                 ui.separator();
                 ui.label(format!("rate = {rate:.1} Hz"));
@@ -533,6 +579,12 @@ impl EditorApp {
                 ui.label(format!(
                     "plane: {} · Shift: vertical · X/Y/Z: axis lock · Esc: cancel",
                     crate::view::drag_plane_name(md.plane)
+                ));
+            } else if self.eff_mode() != self.mode {
+                // Edits gated (Run/Script): say so up front — the mode
+                // the user left returns when they pause/stop.
+                ui.add(egui::Label::new(
+                    "editing is locked while the worker is busy — click select · right-drag orbit · wheel zoom · F frame",
                 ));
             } else {
                 // U8: under ~1100 px the long hint eats a second row —

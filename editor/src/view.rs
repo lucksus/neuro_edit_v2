@@ -6,7 +6,7 @@ use eframe::{egui, egui_wgpu};
 use egui::epaint::PaintCallbackInfo;
 use glam::{Mat4, Vec2, Vec3};
 
-use crate::app::{EditorApp, Mode, MoveDrag};
+use crate::app::{Act, EditorApp, Mode, MoveDrag};
 use crate::camera::Camera;
 use crate::gpu::{DrawParams, Entity, Gpu};
 use crate::scene::{self, Plane};
@@ -305,7 +305,8 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
             // Clicks queue in app.pick_click so an in-flight hover pick can't
             // drop them; the queue drains as soon as a pick slot frees.
             if resp.clicked()
-                || (resp.drag_started_by(egui::PointerButton::Primary) && app.mode == Mode::Move)
+                || (resp.drag_started_by(egui::PointerButton::Primary)
+                    && app.eff_mode() == Mode::Move)
             {
                 if let Some(mv) = mouse_vp {
                     app.pick_click = Some((mv, app.wall_ms));
@@ -354,7 +355,7 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
             let icon = if app.move_drag.is_some() {
                 egui::CursorIcon::Grabbing
             } else {
-                match app.mode {
+                match app.eff_mode() {
                     Mode::Insert | Mode::Connect => egui::CursorIcon::Crosshair,
                     Mode::Move => egui::CursorIcon::Move,
                     Mode::Navigate => match app.hover {
@@ -381,7 +382,7 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
                     DragPlane::Axis(k) => (None, Some(AXES[k.min(2) as usize])),
                 };
                 scene::drag_plane_vis(&mut pvs, cur, md.anchor, axes, axis_line);
-            } else if app.mode == Mode::Move || app.mode == Mode::Insert {
+            } else if app.eff_mode() == Mode::Move || app.eff_mode() == Mode::Insert {
                 scene::work_plane(app.camera.target, app.plane, &mut pvs);
             }
             if let Some(g) = &app.geo {
@@ -406,7 +407,7 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
                         }
                     }
                 }
-                if app.mode == Mode::Connect {
+                if app.eff_mode() == Mode::Connect {
                     if let (Some(from), Some(mv)) = (app.connect_from, mouse_vp) {
                         if let Some(fp) = inst_pos(g, from) {
                             let (ro, rd) = ray(&app.camera, aspect, mv.x, mv.y);
@@ -557,17 +558,22 @@ fn keys(app: &mut EditorApp, ui: &mut egui::Ui) {
                 app.mode = Mode::Navigate;
             }
         }
-        if i.key_pressed(egui::Key::Delete) {
-            app.delete_selection();
-        }
-        if i.key_pressed(egui::Key::I) {
-            app.mode = Mode::Insert;
-        }
-        if i.key_pressed(egui::Key::C) {
-            app.mode = Mode::Connect;
-        }
-        if i.key_pressed(egui::Key::M) {
-            app.mode = Mode::Move;
+        // Edit-mode keys are gated like their buttons (Stage 22): while
+        // running/busy they don't fire — the reason shows on the tool
+        // buttons' disabled tooltips.
+        if app.can(Act::Edit) {
+            if i.key_pressed(egui::Key::Delete) {
+                app.delete_selection();
+            }
+            if i.key_pressed(egui::Key::I) {
+                app.mode = Mode::Insert;
+            }
+            if i.key_pressed(egui::Key::C) {
+                app.mode = Mode::Connect;
+            }
+            if i.key_pressed(egui::Key::M) {
+                app.mode = Mode::Move;
+            }
         }
         if i.key_pressed(egui::Key::V) && !i.modifiers.ctrl {
             app.mode = Mode::Navigate;
@@ -595,10 +601,10 @@ fn keys(app: &mut EditorApp, ui: &mut egui::Ui) {
         if i.modifiers.ctrl && i.key_pressed(egui::Key::C) {
             app.copy_selection(false);
         }
-        if i.modifiers.ctrl && i.key_pressed(egui::Key::X) {
+        if i.modifiers.ctrl && i.key_pressed(egui::Key::X) && app.can(Act::Edit) {
             app.copy_selection(true);
         }
-        if i.modifiers.ctrl && i.key_pressed(egui::Key::V) {
+        if i.modifiers.ctrl && i.key_pressed(egui::Key::V) && app.can(Act::Edit) {
             app.paste(None);
         }
     });
@@ -610,6 +616,10 @@ fn context_menu(app: &mut EditorApp, resp: &egui::Response) {
         let ent = app
             .hover
             .and_then(|i| app.geo.as_ref().and_then(|g| entity_of(g, i)));
+        let why_edit = app.why(Act::Edit);
+        let gated = |ui: &mut egui::Ui, label: &str| {
+            crate::app::gate(ui, why_edit, egui::Button::new(label))
+        };
         match ent {
             Some(Entity::Neuron(n)) => {
                 ui.label(format!("neuron {n}"));
@@ -618,12 +628,12 @@ fn context_menu(app: &mut EditorApp, resp: &egui::Response) {
                     app.watch(vec![n]);
                     ui.close();
                 }
-                if ui.button("Connect from here").clicked() {
+                if gated(ui, "Connect from here").clicked() {
                     app.mode = Mode::Connect;
                     app.connect_from = app.hover;
                     ui.close();
                 }
-                if ui.button("Delete").clicked() {
+                if gated(ui, "Delete").clicked() {
                     app.delete_entity(n);
                     ui.close();
                 }
@@ -633,11 +643,15 @@ fn context_menu(app: &mut EditorApp, resp: &egui::Response) {
                     ui.label(format!("input {}", g.inputs[k as usize].name));
                 }
                 ui.separator();
-                if ui.button("Set value…").clicked() {
+                // Live input values stay editable during a run
+                // (SetInputConst is applied to the live sim).
+                if crate::app::gate(ui, app.why(Act::SetInput), egui::Button::new("Set value…"))
+                    .clicked()
+                {
                     app.open_input_dialog(k);
                     ui.close();
                 }
-                if ui.button("Connect from here").clicked() {
+                if gated(ui, "Connect from here").clicked() {
                     app.mode = Mode::Connect;
                     app.connect_from = app.hover;
                     ui.close();
@@ -656,11 +670,11 @@ fn context_menu(app: &mut EditorApp, resp: &egui::Response) {
             None => {
                 ui.label("(empty space)");
                 ui.separator();
-                if ui.button("Insert neuron here").clicked() {
+                if gated(ui, "Insert neuron here").clicked() {
                     app.mode = Mode::Insert;
                     ui.close();
                 }
-                if ui.button("Paste").clicked() {
+                if gated(ui, "Paste").clicked() {
                     app.paste(None);
                     ui.close();
                 }
@@ -675,7 +689,7 @@ fn context_menu(app: &mut EditorApp, resp: &egui::Response) {
 }
 
 fn on_pick(app: &mut EditorApp, res: Option<u32>, ctx: &egui::Context) {
-    match app.mode {
+    match app.eff_mode() {
         Mode::Connect => {
             // Only a hit on a neuron/input changes state: a missed click
             // keeps the pending source (dense scenes make small cubes easy
@@ -756,7 +770,7 @@ fn mode_input(
     mouse_vp: Option<Vec2>,
     aspect: f32,
 ) {
-    match app.mode {
+    match app.eff_mode() {
         Mode::Insert => {
             if resp.clicked() {
                 if let Some(mv) = mouse_vp {
@@ -768,7 +782,7 @@ fn mode_input(
             }
         }
         Mode::Move | Mode::Navigate => {
-            let nav = app.mode == Mode::Navigate;
+            let nav = app.eff_mode() == Mode::Navigate;
             if resp.drag_started_by(egui::PointerButton::Primary) {
                 if let Some(mv) = mouse_vp {
                     let (ro, rd) = ray(&app.camera, aspect, mv.x, mv.y);
@@ -780,7 +794,7 @@ fn mode_input(
                             .as_ref()
                             .and_then(|g| nearest_on_ray(g, ro, rd, 6.0))
                     });
-                    match primary_drag_action(app.mode, under) {
+                    match primary_drag_action(app.eff_mode(), under) {
                         DragAction::Move { grab } => {
                             if nav {
                                 if let Some(i) = grab {
