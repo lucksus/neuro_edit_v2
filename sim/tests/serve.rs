@@ -2149,8 +2149,8 @@ fn script_type_api_through_eval() {
     let evs = rig.until(|m| matches!(m, ServerMsg::Geo(_)) || matches!(m, ServerMsg::Error(_)));
     assert!(
         evs.iter().any(|e| matches!(&e.msg,
-            ServerMsg::Console(s) if s.contains("type api ok 1 fs 4"))),
-        "script must have run (1+ models, type_of==fs, 4 izh params): {evs:?}"
+            ServerMsg::Console(s) if s.contains("type api ok 2 fs 4"))),
+        "script must have run (2 models, type_name==fs, 4 izh params): {evs:?}"
     );
     let geo = evs
         .iter()
