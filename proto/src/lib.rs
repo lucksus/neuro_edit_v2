@@ -22,7 +22,10 @@ use serde::{Deserialize, Serialize};
 ///
 /// 3: `ModelDesc` gains `map` — the model's parameter design map
 /// (izh's a–b/c–d regions) for the Stage 22 inspector.
-pub const PROTO_VERSION: u32 = 3;
+///
+/// 4: `ClientMsg` gains `Undo`/`Redo`; `Status` gains the `undo`/`redo`
+/// action labels (Stage 23).
+pub const PROTO_VERSION: u32 = 4;
 
 // ---------------------------------------------------------------------------
 // shared wire copies of host types (proto must not depend on `sim`)
@@ -526,6 +529,11 @@ pub enum ClientMsg {
         base: u64,
         edit: NetEdit,
     },
+    /// Undo / redo the most recent net change on the worker's shared
+    /// history stack — whichever client made it. Applied like an edit:
+    /// net_version bumps and a full `Geo` is published (Stage 23).
+    Undo,
+    Redo,
     /// Serialize the subnet on these ids to JSON; the server answers with
     /// `ServerMsg::Clipboard`.
     CopySubnet {
@@ -702,6 +710,11 @@ pub enum ServerMsg {
         backend: Backend,
         cfg: Config,
         notice: Option<String>,
+        /// Action labels for the shared undo/redo stacks' top entries —
+        /// what the Edit menu shows ("Undo move 12 neurons"). `None`
+        /// means that stack is empty (Stage 23).
+        undo: Option<String>,
+        redo: Option<String>,
     },
     /// One console line (print results, eval errors, log).
     Console(String),
@@ -933,6 +946,8 @@ mod tests {
                     w: 6.0,
                 },
             },
+            ClientMsg::Undo,
+            ClientMsg::Redo,
             ClientMsg::CopySubnet { ids: vec![4, 5] },
             ClientMsg::SetBackend(Backend::Cuda),
             ClientMsg::SetDtMs(0.05),
@@ -1209,6 +1224,8 @@ mod tests {
                     int_weights: false,
                 },
                 notice: Some("hi".into()),
+                undo: Some("move 12 neurons".into()),
+                redo: None,
             },
             ServerMsg::Console("= 42".into()),
             ServerMsg::Activity(Box::new(Activity {

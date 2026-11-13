@@ -142,6 +142,10 @@ pub struct Shared {
     pub backend: proto::Backend,
     /// Worker noticed the backend failed and fell back.
     pub notice: Option<String>,
+    /// Shared undo/redo stack tops — the Edit menu's "Undo <action>" /
+    /// "Redo <action>" labels; `None` = that stack is empty (Stage 23).
+    pub undo_label: Option<String>,
+    pub redo_label: Option<String>,
     /// JSON subnet staged by a copy/cut command for the UI to put on the
     /// system clipboard.
     pub clipboard: Option<String>,
@@ -223,6 +227,8 @@ impl Default for Shared {
             cfg: proto::Config::default(),
             backend: proto::Backend::Cpu,
             notice: None,
+            undo_label: None,
+            redo_label: None,
             clipboard: None,
             files: None,
             file_data: None,
@@ -339,6 +345,8 @@ impl Fold {
                 backend,
                 cfg,
                 notice,
+                undo,
+                redo,
             } => {
                 sh.running = running;
                 sh.busy = busy;
@@ -346,6 +354,8 @@ impl Fold {
                 sh.backend = backend;
                 sh.cfg = cfg;
                 sh.notice = notice;
+                sh.undo_label = undo;
+                sh.redo_label = redo;
             }
             proto::ServerMsg::Console(s) => sh.log(s),
             proto::ServerMsg::Activity(a) => self.fold_activity(sh, *a),

@@ -44,6 +44,193 @@ pub const MIN_ACTIVITY_MS: u64 = 33;
 /// would otherwise flood the wire).
 const MAX_CONSOLE: usize = 400;
 
+// ---- Stage 23: worker-owned network undo ----------------------------------
+//
+// One undoable step is a full (net, rng, net_gen) snapshot taken just before
+// the change. Undo swaps the live state for the snapshot; the displaced live
+// state becomes the redo entry. A snapshot is the only inverse that is
+// byte-exact for every edit kind — including rng-driven builders
+// (`create_connections`, `set_exc_inh`, `InsertSubnetJson`) whose results a
+// typed inverse can't reconstruct — and restoring the rng means random edits
+// after an undo roll the same dice as the first time.
+//
+// The stacks are SHARED across clients: the net is shared, so "revert the
+// last change *I* made" would silently revert whatever landed on top of it
+// from someone else. One ordered history is the honest semantics — Ctrl+Z
+// pops the last net change whoever made it — and every client sees the same
+// menu label through `Status.undo`/`Status.redo`.
+
+/// An undoable step: the state BEFORE the change plus the menu label.
+struct UndoEntry {
+    label: String,
+    snap: UndoSnap,
+}
+
+/// Everything a restore puts back: the net itself, the builder rng (so a
+/// redone `create_connections` doesn't re-roll), and the net generation —
+/// restores that cross a generation bump `net_gen` again so clients drop
+/// id-keyed state, same-generation restores keep it.
+struct UndoSnap {
+    net: Network,
+    rng: net_format::Rng,
+    gen: u64,
+}
+
+/// History bounds — steps OR approximate bytes, whichever hits first.
+/// A step is a deep net clone, so the byte bound is what matters on big
+/// hosted nets; the step bound keeps small nets snappy.
+const UNDO_MAX_STEPS: usize = 64;
+const UNDO_MAX_BYTES: usize = 256 << 20;
+
+/// Rough heap estimate of a `Network` clone — vector capacities plus
+/// string payloads. Good enough for a memory bound; the point is that a
+/// 1M-neuron history can't grow unboundedly.
+fn est_net_bytes(n: &Network) -> usize {
+    use std::mem::size_of as sz;
+    let mut b = sz::<Network>()
+        + n.neurons.capacity() * sz::<net_format::Neuron>()
+        + n.synapses.capacity() * sz::<net_format::Synapse>()
+        + n.types.capacity() * sz::<net_format::NeuronType>()
+        + n.groups.capacity() * sz::<net_format::Group>()
+        + n.inputs.capacity() * sz::<net_format::Input>()
+        + n.samples.capacity() * sz::<net_format::Samples>()
+        + n.readouts.capacity() * sz::<net_format::Readout>()
+        + n.scripts.capacity() * sz::<(String, String)>();
+    for x in &n.neurons {
+        b += x.name.capacity();
+        if let Some(p) = &x.params {
+            b += p.len() * 4;
+        }
+    }
+    for t in &n.types {
+        b += t.name.capacity() + t.model.capacity() + t.params.capacity() * 4;
+    }
+    for g in &n.groups {
+        b += g.name.capacity() + g.members.capacity() * 4;
+    }
+    for i in &n.inputs {
+        b += i.name.capacity() + i.targets.capacity() * 8;
+    }
+    for s in &n.samples {
+        b += s.name.capacity() + (s.times.capacity() + s.values.capacity()) * 4;
+    }
+    for r in &n.readouts {
+        b += r.name.capacity() + r.units.capacity() * 4 + r.weights.capacity() * 4;
+    }
+    for (a, c) in &n.scripts {
+        b += a.capacity() + c.capacity();
+    }
+    b
+}
+
+fn stack_bytes(stack: &std::collections::VecDeque<UndoEntry>) -> usize {
+    stack.iter().map(|e| est_net_bytes(&e.snap.net)).sum()
+}
+
+/// Push one step, evicting the oldest entries past the bounds. A step
+/// bigger than the byte cap is still kept — one net clone is the price
+/// of one undo point — but nothing older survives with it.
+fn push_step(stack: &mut std::collections::VecDeque<UndoEntry>, e: UndoEntry) {
+    push_step_bounded(stack, e, UNDO_MAX_STEPS, UNDO_MAX_BYTES);
+}
+
+fn push_step_bounded(
+    stack: &mut std::collections::VecDeque<UndoEntry>,
+    e: UndoEntry,
+    max_steps: usize,
+    max_bytes: usize,
+) {
+    stack.push_back(e);
+    while stack.len() > max_steps || (stack.len() > 1 && stack_bytes(stack) > max_bytes) {
+        stack.pop_front();
+    }
+}
+
+fn undo_snap(env: &Env) -> UndoSnap {
+    UndoSnap {
+        net: env.net.borrow().clone(),
+        rng: env.rng.borrow().clone(),
+        gen: env.net_gen.get(),
+    }
+}
+
+/// Swap the live net for a snapshot — an edit like any other: the sim is
+/// invalidated and `net_version` raised, which the republish block at the
+/// top of the loop turns into a full `Geo` + `GridTraces` broadcast.
+/// The FIRST invalidate runs against the OLD net so `DriveState::capture`
+/// keys the dropped sim's input drive by the names it actually had —
+/// after the swap the same indexes could be different names.
+fn undo_restore(env: &Env, s: UndoSnap) {
+    env.invalidate_sim();
+    *env.net.borrow_mut() = s.net;
+    *env.rng.borrow_mut() = s.rng;
+    if env.net_gen.get() != s.gen {
+        env.net_gen.set(env.net_gen.get() + 1);
+    }
+    bump(env);
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+/// The Edit-menu label for a `NetEdit` — "move 12 neurons", "delete 3
+/// neurons". Kept server-side: the label names what the worker did.
+fn edit_label(e: &NetEdit) -> String {
+    use NetEdit::*;
+    match e {
+        AddNeuron { .. } => "add neuron".into(),
+        DeleteNeurons { ids } => format!("delete {} neuron{}", ids.len(), plural(ids.len())),
+        Connect { from, to, .. } => format!("connect {from}->{to}"),
+        Disconnect { from, to } => format!("disconnect {from}->{to}"),
+        MoveNeurons { items } => {
+            format!("move {} neuron{}", items.len(), plural(items.len()))
+        }
+        SetNeuronName { .. } => "rename neuron".into(),
+        SetNeuronPos { .. } => "move neuron".into(),
+        SetNeuronKind { id, .. } => format!("kind of neuron {id}"),
+        InsertSubnetJson { .. } => "paste subnet".into(),
+        CreateGrid2d { group, .. } => format!("grid \"{group}\""),
+        CreateGrid3d { group, .. } => format!("grid \"{group}\""),
+        AddInput { name, .. } => format!("input \"{name}\""),
+        AddSamples { name } => format!("samples \"{name}\""),
+        AddReadout { name, .. } => format!("readout \"{name}\""),
+        MoveInputs { items } => format!("move {} input{}", items.len(), plural(items.len())),
+        AddToGroup { name, ids } => {
+            format!("add {} to \"{name}\"", ids.len())
+        }
+        AddInputTarget { name, target, .. } => format!("input \"{name}\" target {target}"),
+        CreateConnections { group, .. } => format!("wire \"{group}\""),
+        SetSynapseWeights { group, .. } => format!("weights \"{group}\""),
+        SetSynTauDist { src, dst, .. } => format!("tau \"{src}\"->\"{dst}\""),
+        SetExcInh { group, .. } => format!("exc/inh \"{group}\""),
+        ScriptAdd { name, .. } => format!("script \"{name}\""),
+        UpsertType { name, .. } => format!("type \"{name}\""),
+        SetNeuronType { ids, .. } => {
+            format!("type of {} neuron{}", ids.len(), plural(ids.len()))
+        }
+        SetNeuronParams { ids, .. } => {
+            format!("params of {} neuron{}", ids.len(), plural(ids.len()))
+        }
+        SetSynapse { from, to, .. } => format!("synapse {from}->{to}"),
+    }
+}
+
+/// One-line label for a script eval — the eval is ONE undo step however
+/// many edits it makes.
+fn eval_label(code: &str) -> String {
+    let one: String = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    let short: String = one.chars().take(48).collect();
+    format!(
+        "eval {short}{}",
+        if one.chars().count() > 48 { "…" } else { "" }
+    )
+}
+
 /// Shared emit handle — the print callback, the mid-run progress hook and
 /// the command loop all produce events through the same sink. Borrows are
 /// never nested (no emit happens inside another emit).
@@ -234,6 +421,11 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
     // Last-emitted Status — changes only.
     let mut last_status: Option<ServerMsg> = None;
     let mut status_busy = false;
+    // Stage 23: the shared network history (see the file-top notes).
+    // `undo`'s top is the most recent change; `redo` is cleared by every
+    // new step and refilled by undos.
+    let mut undo: std::collections::VecDeque<UndoEntry> = Default::default();
+    let mut redo: std::collections::VecDeque<UndoEntry> = Default::default();
 
     macro_rules! status {
         () => {{
@@ -247,6 +439,8 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                 },
                 cfg: cfg_wire(&env.cfg.borrow()),
                 notice: None,
+                undo: undo.back().map(|e| e.label.clone()),
+                redo: redo.back().map(|e| e.label.clone()),
             };
             if last_status.as_ref() != Some(&msg) {
                 last_status = Some(msg.clone());
@@ -391,6 +585,8 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                             },
                             cfg: cfg_wire(&env.cfg.borrow()),
                             notice: None,
+                            undo: undo.back().map(|e| e.label.clone()),
+                            redo: redo.back().map(|e| e.label.clone()),
                         };
                         emit_to(&emit, client, msg);
                         published_geo_version = env.net_version.get();
@@ -401,6 +597,11 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                         running = false;
                     }
                     ClientMsg::Eval { code } => {
+                        // Stage 23: ONE undo step per eval — snapshot before,
+                        // record after if the net (or its generation) moved.
+                        let pre = undo_snap(&env);
+                        let pre_ver = env.net_version.get();
+                        let pre_gen = env.net_gen.get();
                         abort.store(false, Ordering::Relaxed);
                         status_busy = true;
                         status!();
@@ -416,6 +617,16 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                             Ok(Err(e)) => emit_b(&emit, con(format!("! {e}"))),
                             Err(_) => emit_b(&emit, con("! script panicked (worker survived)")),
                         }
+                        if env.net_version.get() != pre_ver || env.net_gen.get() != pre_gen {
+                            push_step(
+                                &mut undo,
+                                UndoEntry {
+                                    label: eval_label(&code),
+                                    snap: pre,
+                                },
+                            );
+                            redo.clear();
+                        }
                         status_busy = false;
                         status!();
                         // sim.* calls inside the eval (set_input, set_noise…)
@@ -429,15 +640,25 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                         }
                     }
                     ClientMsg::LoadNet { path } => {
+                        let pre = undo_snap(&env);
                         match resolve(&env, &path)
                             .and_then(|p| net_format::io::load(&p).map_err(|e| e.to_string()))
                         {
                             Ok(n) => {
                                 // M3: the file's sim settings become live.
                                 crate::meta_to_cfg(&n.meta, &mut env.cfg.borrow_mut());
+                                env.invalidate_sim();
                                 *env.net.borrow_mut() = n;
                                 env.net_gen.set(env.net_gen.get() + 1);
                                 bump(&env);
+                                push_step(
+                                    &mut undo,
+                                    UndoEntry {
+                                        label: format!("load {path}"),
+                                        snap: pre,
+                                    },
+                                );
+                                redo.clear();
                                 // Q7: typed confirmation — clients only
                                 // adopt net_path/recent on this frame.
                                 emit_to(
@@ -489,9 +710,19 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                         }
                     }
                     ClientMsg::NewNet => {
+                        let pre = undo_snap(&env);
+                        env.invalidate_sim();
                         *env.net.borrow_mut() = Network::new();
                         env.net_gen.set(env.net_gen.get() + 1);
                         bump(&env);
+                        push_step(
+                            &mut undo,
+                            UndoEntry {
+                                label: "new net".into(),
+                                snap: pre,
+                            },
+                        );
+                        redo.clear();
                     }
                     ClientMsg::AutoRun(b) => {
                         // Only a fresh start clears abort — stopping must not
@@ -565,6 +796,10 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                                 status!();
                                 emit_b(&emit, con(format!("> {line}")));
                             }
+                            // Stage 23: the pre-edit state for the history
+                            // stack — taken while the version check passed,
+                            // before apply mutates anything.
+                            let pre = undo_snap(&env);
                             // Scope the net borrow: the Delta arm needs fresh
                             // reads (non_grid, geo_snap) — a match scrutinee
                             // RefMut would live across the arms.
@@ -623,6 +858,14 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                                                  (line 1, position 5)"),
                                         );
                                     }
+                                    push_step(
+                                        &mut undo,
+                                        UndoEntry {
+                                            label: edit_label(&edit),
+                                            snap: pre,
+                                        },
+                                    );
+                                    redo.clear();
                                     bump(&env);
                                     let gen = env.net_gen.get();
                                     let ver = env.net_version.get();
@@ -667,6 +910,38 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                             }
                         }
                     }
+                    // Stage 23: shared network history. An undo/redo is an
+                    // edit like any other — `undo_restore` bumps the version
+                    // and the loop-top republish block broadcasts the fresh
+                    // `Geo` to every client on the run.
+                    ClientMsg::Undo => match undo.pop_back() {
+                        None => emit_to(&emit, client, con("nothing to undo")),
+                        Some(e) => {
+                            push_step(
+                                &mut redo,
+                                UndoEntry {
+                                    label: e.label.clone(),
+                                    snap: undo_snap(&env),
+                                },
+                            );
+                            undo_restore(&env, e.snap);
+                            emit_b(&emit, con(format!("undo: {}", e.label)));
+                        }
+                    },
+                    ClientMsg::Redo => match redo.pop_back() {
+                        None => emit_to(&emit, client, con("nothing to redo")),
+                        Some(e) => {
+                            push_step(
+                                &mut undo,
+                                UndoEntry {
+                                    label: e.label.clone(),
+                                    snap: undo_snap(&env),
+                                },
+                            );
+                            undo_restore(&env, e.snap);
+                            emit_b(&emit, con(format!("redo: {}", e.label)));
+                        }
+                    },
                     ClientMsg::CopySubnet { ids } => {
                         let set: HashSet<u32> = ids.into_iter().collect();
                         let sub = env.net.borrow().subnet(&set);
@@ -2270,6 +2545,91 @@ fn disp_lists(net: &Network, srcs: &HashSet<u32>, dt: f32) -> Vec<(u32, Vec<(u32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A small net snapshot for stack-shape tests.
+    fn snap(tag: u32) -> UndoSnap {
+        let mut net = Network::new();
+        net.add_neuron([tag as f32; 3], net_format::NeuronKind::Excitatory);
+        UndoSnap {
+            net,
+            rng: net_format::Rng::new(tag as u64),
+            gen: tag as u64,
+        }
+    }
+
+    /// History is bounded in steps AND bytes: past either, the oldest
+    /// entries are evicted so memory can't grow with the session length.
+    /// Sabotage: removing the pop_front loop (or the `> 1` guard) leaves
+    /// either 70 entries or an empty stack — both asserted against.
+    #[test]
+    fn undo_stack_is_bounded() {
+        let mut s: std::collections::VecDeque<UndoEntry> = Default::default();
+        for i in 0..70 {
+            push_step(
+                &mut s,
+                UndoEntry {
+                    label: format!("e{i}"),
+                    snap: snap(i),
+                },
+            );
+        }
+        assert_eq!(s.len(), UNDO_MAX_STEPS, "step cap evicts the oldest");
+        assert_eq!(s.front().unwrap().label, "e6");
+        assert_eq!(s.back().unwrap().label, "e69");
+        // Byte cap: sized so three entries overfill — evicts down to the
+        // newest one; a lone oversized entry is kept regardless (a step
+        // is never dropped while it's the only undo point).
+        let one = est_net_bytes(&snap(0).net);
+        let mut s2: std::collections::VecDeque<UndoEntry> = Default::default();
+        for i in 0..4u32 {
+            push_step_bounded(
+                &mut s2,
+                UndoEntry {
+                    label: format!("e{i}"),
+                    snap: snap(i),
+                },
+                usize::MAX,
+                one * 2 + one / 2,
+            );
+        }
+        assert!(
+            s2.len() <= 2,
+            "byte cap must evict overflow, got {}",
+            s2.len()
+        );
+        assert_eq!(s2.back().unwrap().label, "e3");
+        let mut s3: std::collections::VecDeque<UndoEntry> = Default::default();
+        push_step_bounded(
+            &mut s3,
+            UndoEntry {
+                label: "huge".into(),
+                snap: snap(0),
+            },
+            usize::MAX,
+            1,
+        );
+        assert_eq!(s3.len(), 1, "a lone oversized step is still kept");
+    }
+
+    /// Menu labels name the action — "Undo move 12 neurons" is the
+    /// target shape.
+    #[test]
+    fn undo_labels_name_actions() {
+        assert_eq!(
+            edit_label(&NetEdit::MoveNeurons {
+                items: (0..12).map(|i| (i, [0.0; 3])).collect()
+            }),
+            "move 12 neurons"
+        );
+        assert_eq!(
+            edit_label(&NetEdit::DeleteNeurons { ids: vec![3] }),
+            "delete 1 neuron"
+        );
+        assert_eq!(
+            eval_label("  net.create_2d_grid(\"g\", 4, 4, 8.0);\n  sim.run(10)"),
+            "eval net.create_2d_grid(\"g\", 4, 4, 8.0); sim.run(10)"
+        );
+    }
 
     /// 20k-neuron net with `syn` random synapses, no groups.
     fn big_net(n: usize, syn: usize) -> Network {

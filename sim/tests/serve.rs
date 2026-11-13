@@ -2231,3 +2231,455 @@ fn script_type_api_through_eval() {
     );
     rig.stop();
 }
+
+// ---------------------------------------------------------------------------
+// Stage 23: shared network undo/redo — worker-owned snapshot stacks, action
+// labels in Status, one step per eval, one stack per run across clients.
+// ---------------------------------------------------------------------------
+
+/// Save the live net through the protocol and read the bytes back —
+/// `data_dir` is None so the path is used verbatim.
+fn saved_bytes(rig: &Rig, path: &str) -> Vec<u8> {
+    rig.send(ClientMsg::SaveNet { path: path.into() });
+    let evs = rig.until(|m| {
+        matches!(m, ServerMsg::Saved { path: p, .. } if p == path)
+            || matches!(m, ServerMsg::Error(_))
+    });
+    for e in &evs {
+        if let ServerMsg::Error(err) = &e.msg {
+            panic!("save {path}: {err}");
+        }
+    }
+    std::fs::read(path).expect("saved .ne2 readable")
+}
+
+/// Next Geo or GeoDelta → the new net_version.
+fn next_version(rig: &Rig) -> u64 {
+    let evs = rig.until(|m| matches!(m, ServerMsg::Geo(_) | ServerMsg::GeoDelta(_)));
+    evs.iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::Geo(g) => Some(g.version),
+            ServerMsg::GeoDelta(d) => Some(d.version),
+            _ => None,
+        })
+        .expect("a publish")
+}
+
+/// Next full Geo (undo republishes whole geometry).
+fn next_geo(rig: &Rig) -> proto::Geo {
+    let evs = rig.until(|m| matches!(m, ServerMsg::Geo(_)));
+    match &evs.last().unwrap().msg {
+        ServerMsg::Geo(g) => (**g).clone(),
+        _ => unreachable!(),
+    }
+}
+
+fn tmp_path(tag: &str) -> String {
+    let d = std::env::temp_dir().join(format!("ne_undo_{}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    d.join(tag).to_string_lossy().into_owned()
+}
+
+/// A net rich enough that every `NetEdit` variant has a valid target:
+/// the group_net fixture plus an input, a readout, a samples node and a
+/// stored script.
+fn rich_net() -> Network {
+    let mut net = group_net();
+    net.upsert_type(net_format::NeuronType {
+        name: "fs".into(),
+        model: "izh".into(),
+        params: vec![0.1, 0.25, -60.0, 4.0],
+        kind: net_format::NeuronKind::Inhibitory,
+        color: None,
+    });
+    net.add_input("kick", vec![(0, 1.0)], [0.0, 10.0, 0.0]);
+    net.add_readout("ro", vec![0, 1]);
+    net.samples_mut("sp").values = vec![0.5, 1.0];
+    net.samples_mut("sp").times = vec![0.0, 1.0];
+    net.scripts.push(("main".into(), "sim.run(1)".into()));
+    net
+}
+
+fn subnet_json_for(ids: &[u32]) -> String {
+    let set: std::collections::HashSet<u32> = ids.iter().copied().collect();
+    let sub = rich_net().subnet(&set);
+    net_format::io::to_json(&sub).unwrap()
+}
+
+/// Every `NetEdit` variant: apply → undo → byte-identical `.ne2` to the
+/// pre-edit file; redo → byte-identical to the post-edit file. Snapshots
+/// make the round trip exact even for rng-driven builders.
+/// Sabotage: dropping `push_step` in the Edit arm (or pushing the
+/// post-edit snapshot) leaves Undo with nothing/wrong to restore — the
+/// `undone` bytes stop matching `before` for every case.
+#[test]
+fn undo_redo_round_trip_all_edit_kinds() {
+    let k = proto::NeuronKind::Inhibitory;
+    let cases: Vec<(&str, NetEdit)> = vec![
+        (
+            "add",
+            NetEdit::AddNeuron {
+                pos: [1.0; 3],
+                kind: proto::NeuronKind::Excitatory,
+            },
+        ),
+        ("del", NetEdit::DeleteNeurons { ids: vec![8] }),
+        (
+            "conn",
+            NetEdit::Connect {
+                from: 8,
+                to: 0,
+                w: 1.0,
+            },
+        ),
+        ("disc", NetEdit::Disconnect { from: 0, to: 5 }),
+        (
+            "move",
+            NetEdit::MoveNeurons {
+                items: vec![(0, [9.0; 3]), (1, [8.0; 3])],
+            },
+        ),
+        (
+            "name",
+            NetEdit::SetNeuronName {
+                id: 0,
+                name: "x".into(),
+            },
+        ),
+        (
+            "pos",
+            NetEdit::SetNeuronPos {
+                id: 0,
+                pos: [3.0; 3],
+            },
+        ),
+        (
+            "kind",
+            NetEdit::SetNeuronKind {
+                id: 0,
+                kind: proto::NeuronKind::Regular,
+            },
+        ),
+        (
+            "paste",
+            NetEdit::InsertSubnetJson {
+                json: subnet_json_for(&[0, 1]),
+                offset: [30.0; 3],
+            },
+        ),
+        (
+            "grid2d",
+            NetEdit::CreateGrid2d {
+                group: "sheet".into(),
+                w: 2,
+                h: 2,
+                spacing: 10.0,
+                origin: [0.0; 3],
+            },
+        ),
+        (
+            "grid3d",
+            NetEdit::CreateGrid3d {
+                group: "vol".into(),
+                w: 2,
+                h: 2,
+                d: 2,
+                spacing: 10.0,
+                origin: [0.0; 3],
+            },
+        ),
+        (
+            "input",
+            NetEdit::AddInput {
+                name: "in2".into(),
+                targets: vec![(1, 1.0)],
+                pos: [1.0, 2.0, 0.0],
+            },
+        ),
+        ("samples", NetEdit::AddSamples { name: "sp2".into() }),
+        (
+            "readout",
+            NetEdit::AddReadout {
+                name: "ro2".into(),
+                units: vec![0, 3],
+            },
+        ),
+        (
+            "movein",
+            NetEdit::MoveInputs {
+                items: vec![(0, [5.0, 9.0, 0.0])],
+            },
+        ),
+        (
+            "togroup",
+            NetEdit::AddToGroup {
+                name: "g".into(),
+                ids: vec![7, 8],
+            },
+        ),
+        (
+            "intarget",
+            NetEdit::AddInputTarget {
+                name: "kick".into(),
+                target: 4,
+                w: 2.0,
+            },
+        ),
+        (
+            "conns",
+            NetEdit::CreateConnections {
+                group: "g".into(),
+                scaling: proto::f64_of(0.3),
+                lambda: proto::f64_of(3.0),
+                w: 0.5,
+            },
+        ),
+        (
+            "weights",
+            NetEdit::SetSynapseWeights {
+                group: "g".into(),
+                mean: proto::f64_of(0.3),
+                sd: proto::f64_of(0.1),
+            },
+        ),
+        (
+            "tau",
+            NetEdit::SetSynTauDist {
+                src: "g".into(),
+                dst: "h".into(),
+                mean: proto::f64_of(0.3),
+                sd: proto::f64_of(0.1),
+            },
+        ),
+        (
+            "excinh",
+            NetEdit::SetExcInh {
+                group: "g".into(),
+                frac: proto::f64_of(0.2),
+            },
+        ),
+        (
+            "script",
+            NetEdit::ScriptAdd {
+                name: "s2".into(),
+                src: "print(1)".into(),
+            },
+        ),
+        (
+            "type",
+            NetEdit::UpsertType {
+                name: "fs2".into(),
+                model: "izh".into(),
+                params: vec![0.1, 0.2, -65.0, 2.0],
+                kind: k,
+                color: None,
+            },
+        ),
+        (
+            "settype",
+            NetEdit::SetNeuronType {
+                ids: vec![0],
+                ty: "fs".into(),
+            },
+        ),
+        (
+            "setparams",
+            NetEdit::SetNeuronParams {
+                ids: vec![0],
+                params: Some(vec![0.02, 0.25, -55.0, 4.0]),
+            },
+        ),
+        (
+            "setsyn",
+            NetEdit::SetSynapse {
+                from: 0,
+                to: 5,
+                w: Some(2.5),
+                tau_ms: Some(3.0),
+                delay_ms: Some(4.0),
+            },
+        ),
+    ];
+    for (tag, edit) in cases {
+        let rig = start(rich_net(), None);
+        let base = subscribe_base(&rig);
+        let before_p = tmp_path(&format!("{tag}_before.ne2"));
+        let after_p = tmp_path(&format!("{tag}_after.ne2"));
+        let undone_p = tmp_path(&format!("{tag}_undone.ne2"));
+        let redone_p = tmp_path(&format!("{tag}_redone.ne2"));
+
+        let before = saved_bytes(&rig, &before_p);
+        rig.send(ClientMsg::Edit {
+            base,
+            edit: edit.clone(),
+        });
+        let v_edit = next_version(&rig);
+        assert_eq!(v_edit, base + 1, "{tag}: edit must bump net_version");
+        let after = saved_bytes(&rig, &after_p);
+        assert_ne!(before, after, "{tag}: edit changed nothing?");
+
+        rig.send(ClientMsg::Undo);
+        let g = next_geo(&rig);
+        assert_eq!(g.version, base + 2, "{tag}: undo bumps net_version");
+        let undone = saved_bytes(&rig, &undone_p);
+        assert_eq!(
+            undone, before,
+            "{tag}: undo must restore the pre-edit net byte-for-byte"
+        );
+
+        rig.send(ClientMsg::Redo);
+        let g = next_geo(&rig);
+        assert_eq!(g.version, base + 3, "{tag}: redo bumps net_version");
+        let redone = saved_bytes(&rig, &redone_p);
+        assert_eq!(
+            redone, after,
+            "{tag}: redo must restore the post-edit net byte-for-byte"
+        );
+        rig.stop();
+    }
+}
+
+/// One eval that mutates the net several times is ONE undo step — the
+/// Status label names the eval, and a single Undo reverts everything it
+/// did.
+/// Sabotage: recording a step per script mutation (or none) — either the
+/// label isn't the eval's, or a second Undo still has steps left.
+#[test]
+fn eval_with_many_edits_is_one_undo_step() {
+    let rig = start(Network::new(), None);
+    rig.send(ClientMsg::Subscribe);
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+
+    rig.send(ClientMsg::Eval {
+        code: r#"
+            net.create_2d_grid("g", 4, 4, 8.0);
+            net.create_connections("g", 0.5, 10.0, 1.0);
+            net.set_exc_inh("g", 0.2);
+            net.add_input("kick", [[0, 1.0]]);
+        "#
+        .into(),
+    });
+    // The eval republishes a Geo — collecting through it also captures
+    // the post-eval Status that names the undo step.
+    let evs = rig.until(|m| matches!(m, ServerMsg::Geo(_)));
+    let label = evs.iter().find_map(|e| match &e.msg {
+        ServerMsg::Status { undo: Some(u), .. } => Some(u.clone()),
+        _ => None,
+    });
+    assert!(
+        label.as_deref().is_some_and(|l| l.starts_with("eval ")),
+        "undo top must name the eval, got {label:?}"
+    );
+    let geo = evs
+        .iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::Geo(g) => Some((**g).clone()),
+            _ => None,
+        })
+        .expect("eval republished geometry");
+    assert_eq!(geo.pos.len(), 16);
+    let v = geo.version;
+
+    rig.send(ClientMsg::Undo);
+    let g = next_geo(&rig);
+    assert_eq!(g.version, v + 1);
+    assert_eq!(g.pos.len(), 0, "one undo must revert the whole eval");
+
+    // The eval was one step — nothing else to undo.
+    rig.send(ClientMsg::Undo);
+    let evs = rig.until(|m| matches!(m, ServerMsg::Console(s) if s.contains("nothing to undo")));
+    assert!(!evs.is_empty());
+
+    // And redo restores it all in one step too.
+    rig.send(ClientMsg::Redo);
+    let g = next_geo(&rig);
+    assert_eq!(g.pos.len(), 16);
+    rig.stop();
+}
+
+/// Two clients share ONE undo stack: the net is shared, so Ctrl+Z pops
+/// the last net change whoever sent it. B's undo reverts A's edit when
+/// A's edit is on top — and A's undo reverts B's edit when B's is.
+/// Sabotage: a per-client stack would undo the wrong entry here — the
+/// second undo asserts the GLOBAL top popped.
+#[test]
+fn undo_is_one_shared_stack_across_clients() {
+    const A: u64 = 7;
+    const B: u64 = 9;
+    let rig = start(Network::new(), None);
+
+    // Both clients hydrate.
+    for id in [A, B] {
+        rig.tx.send((id, ClientMsg::Subscribe)).unwrap();
+        rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(id));
+    }
+    rig.drain(50);
+
+    // A adds a neuron.
+    rig.tx
+        .send((
+            A,
+            ClientMsg::Edit {
+                base: 1,
+                edit: NetEdit::AddNeuron {
+                    pos: [1.0; 3],
+                    kind: proto::NeuronKind::Excitatory,
+                },
+            },
+        ))
+        .unwrap();
+    let v1 = next_version(&rig);
+    assert_eq!(v1, 2);
+
+    // B moves it — B's edit lands on top of A's.
+    rig.tx
+        .send((
+            B,
+            ClientMsg::Edit {
+                base: v1,
+                edit: NetEdit::MoveNeurons {
+                    items: vec![(0, [42.0; 3])],
+                },
+            },
+        ))
+        .unwrap();
+    let v2 = next_version(&rig);
+    assert_eq!(v2, 3);
+
+    // A undoes — the GLOBAL top (B's move) pops, not A's add. The
+    // broadcast Geo reaches every subscriber, not just A.
+    rig.tx.send((A, ClientMsg::Undo)).unwrap();
+    let evs = rig.until_ev(|e| matches!(e.msg, ServerMsg::Geo(_)));
+    let geo_ev = evs
+        .iter()
+        .find(|e| matches!(e.msg, ServerMsg::Geo(_)))
+        .unwrap();
+    assert_eq!(geo_ev.to, None, "undo republishes to all clients");
+    let g = first_geo(&evs);
+    assert_eq!(g.pos.len(), 1, "A's neuron survived the undo of B's move");
+    assert_eq!(g.pos[0], [1.0; 3], "B's move was the step that reverted");
+
+    // B undoes next — now A's add (the only step left) pops.
+    rig.tx.send((B, ClientMsg::Undo)).unwrap();
+    let g = next_geo(&rig);
+    assert_eq!(g.pos.len(), 0, "the second undo pops A's add");
+    rig.stop();
+}
+
+/// Empty stacks answer the requester only — no broadcast noise, no panic.
+#[test]
+fn undo_redo_empty_stack_answers_caller() {
+    let rig = start(Network::new(), None);
+    rig.send(ClientMsg::Subscribe);
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+    rig.send(ClientMsg::Undo);
+    let evs = rig.until(|m| matches!(m, ServerMsg::Console(s) if s.contains("nothing to undo")));
+    assert_eq!(
+        evs.last().unwrap().to,
+        Some(CLIENT),
+        "empty-stack notice is for the requester"
+    );
+    rig.send(ClientMsg::Redo);
+    rig.until(|m| matches!(m, ServerMsg::Console(s) if s.contains("nothing to redo")));
+    rig.stop();
+}
