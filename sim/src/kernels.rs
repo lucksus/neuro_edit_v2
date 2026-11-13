@@ -41,6 +41,7 @@ pub const KERNELS_SRC: &str = r#"
 typedef unsigned long long u64;
 typedef unsigned int u32;
 typedef unsigned short u16;
+typedef unsigned char u8;
 
 // Delay-ring element type. With INT_RING the ring is 32-bit fixed point
 // (WSCALE 4096): int atomicAdd is order-independent, so runs are bitwise
@@ -68,24 +69,25 @@ __device__ __forceinline__ u32 noise_hash(u32 i, u64 t, u64 seed){
 }
 
 // One neuron per thread. t is the absolute step index.
+// xstate/params/model carry the generic model blocks: neuron i's state
+// row is xstate[i*X..], param row params[i*P..], table index model[i].
 // xt_ptr/xt_idx/xsyn/xdecay: per-synapse current traces for synapses with
 // their own tau (C custom synapses, target-major rows like a CSR).
 extern "C" __global__ void neuron_kernel(
     int N, u64 t, int D, float dt,
     float pkick, float kick,
-    float* v, float* u, float* s, float* trace,
-    const float* a, const float* b, const float* c, const float* d,
+    float* xstate, const float* params, const u8* model, int P, int X,
+    float* s, float* trace,
     rt_t* ring,
     const float* ext,
     const float* stim, long long stim_t0, int n_inputs,
     const u32* stim_ptr, const u32* stim_input, const float* stim_w,
     float decay_s, float decay_t,
     u64 seed,
-    int model,
     int* spk, int* cnt_cur,
     u64* spk_row,
     u64* pn_total,
-    const u32* vwatch, int nwatch, float* vrec, float* urec, int vrec_d,
+    const u32* vwatch, int nwatch, float* xrec, int vrec_d,
     const int* gmap, int n_grids, u32* gls, const u32* goff,
     const u32* xt_ptr, const u32* xt_idx, float* xsyn, const float* xdecay)
 {
@@ -116,20 +118,20 @@ extern "C" __global__ void neuron_kernel(
   if(pkick > 0.f && (float)noise_hash((u32)i, t, seed) * 2.3283064e-10f < pkick)
     I += kick;
 
-  // the model step sees p[k], x[k], I, dt and sets `spiked`; stage-1
-  // aliases them onto the fixed v/u/a-d arrays.
-  int mi = model;
-  float x[2] = {v[i], u[i]};
-  const float p[4] = {a[i], b[i], c[i], d[i]};
+  // the model step sees p[k], x[k], I, dt and sets `spiked`; x/p are
+  // this thread's rows of the flat blocks
+  int mi = model[i];
+  float* x = xstate + (u64)i * X;
+  const float* p = params + (u64)i * P;
   bool spiked = false;
   //@MODEL_STEP@
-  v[i] = x[0]; u[i] = x[1];
-  // per-step v/u record for watched neurons (v(t) + v–u phase plots)
+  // per-step state record for watched neurons (v(t) + v–u phase plots):
+  // one ring row holds all X state slots of the watched neuron
   for(int w = 0; w < nwatch; ++w){
     if((u32)i == vwatch[w]){
-      u64 slot = (u64)(t % (u64)vrec_d) * (u64)nwatch + (u64)w;
-      vrec[slot] = x[0];
-      urec[slot] = x[1];
+      u64 slot = (u64)(t % (u64)vrec_d) * (u64)nwatch * (u64)X
+               + (u64)w * (u64)X;
+      for(int k = 0; k < X; ++k) xrec[slot + k] = x[k];
     }
   }
 

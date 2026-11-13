@@ -201,10 +201,23 @@ pub fn cuda_available() -> bool {
 
 impl Sim {
     pub fn new(net: &Network, cfg: SimConfig, kind: BackendKind) -> anyhow::Result<Sim> {
+        Self::with_params(net, cfg, kind, state::NeuronParams::from_network(net))
+    }
+
+    /// Build with explicit params — the file layer's per-neuron
+    /// overrides and test-only models take this path.
+    pub fn with_params(
+        net: &Network,
+        cfg: SimConfig,
+        kind: BackendKind,
+        params: state::NeuronParams,
+    ) -> anyhow::Result<Sim> {
         let inner: Box<dyn Backend> = match kind {
-            BackendKind::Cpu => Box::new(cpu::CpuSim::new(net, cfg).map_err(anyhow::Error::msg)?),
+            BackendKind::Cpu => {
+                Box::new(cpu::CpuSim::with_params(net, cfg, params).map_err(anyhow::Error::msg)?)
+            }
             #[cfg(feature = "cuda")]
-            BackendKind::Cuda => Box::new(cuda::CudaSim::new(net, cfg)?),
+            BackendKind::Cuda => Box::new(cuda::CudaSim::with_params(net, cfg, params)?),
             #[cfg(not(feature = "cuda"))]
             BackendKind::Cuda => anyhow::bail!("sim built without the `cuda` feature"),
         };

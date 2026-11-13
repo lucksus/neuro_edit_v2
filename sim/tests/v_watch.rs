@@ -1,5 +1,5 @@
 //! P2-11: the editor v(t) plot used to get ONE sample per published chunk
-//! (~200 steps), so spikes were invisible. `set_v_watch`/`drain_v` record
+//! (~200 steps), so spikes were invisible. `set_v_watch`/`drain_state` record
 //! every step for watched neurons on both backends.
 
 use net_format::{Network, NeuronKind};
@@ -20,7 +20,7 @@ fn watched_neurons_record_every_step() {
     sim.set_v_watch(&[0, 2]);
     sim.set_external(0, 40.0); // tonic drive -> spikes
     sim.run_steps(200).unwrap();
-    let h = sim.drain_v();
+    let h = sim.drain_state(0);
     assert_eq!(h.len(), 2);
     assert_eq!(h[0].len(), 200, "one sample per step, not one per run");
     assert_eq!(h[1].len(), 200);
@@ -33,9 +33,9 @@ fn watched_neurons_record_every_step() {
     // undriven neuron stays near rest
     assert!(h[1].iter().all(|&v| v < -50.0));
     // drained: second call is empty until more steps run
-    assert!(sim.drain_v()[0].is_empty());
+    assert!(sim.drain_state(0)[0].is_empty());
     sim.run_steps(30).unwrap();
-    assert_eq!(sim.drain_v()[0].len(), 30);
+    assert_eq!(sim.drain_state(0)[0].len(), 30);
 }
 
 #[test]
@@ -53,8 +53,8 @@ fn cuda_drain_matches_cpu() {
     g.set_external(0, 40.0);
     c.run_steps(300).unwrap();
     g.run_steps(300).unwrap();
-    let hc = c.drain_v();
-    let hg = g.drain_v().unwrap();
+    let hc = c.drain_state(0);
+    let hg = g.drain_state(0).unwrap();
     assert_eq!(hc.len(), hg.len());
     for k in 0..hc.len() {
         assert_eq!(hc[k].len(), hg[k].len(), "watched {k} sample count");

@@ -14,7 +14,6 @@
 //! The original applied the decay after using the current in the same update;
 //! a freshly arrived spike therefore contributes its full weight immediately.
 
-use crate::model::{self, NeuronModel};
 use crate::state::{noise_fires, ring_depth, NeuronParams, SimConfig};
 use net_format::{Network, SynCsr};
 
@@ -27,8 +26,9 @@ pub struct CpuSim {
     pub stimulus: crate::stim::Stimulus,
 
     // state
-    pub v: Vec<f32>,
-    pub u: Vec<f32>,
+    /// flat model state: neuron i's row is `x[i*nx .. i*nx+nx]`
+    /// (`params.n_state`); slot 0 is the membrane potential.
+    pub x: Vec<f32>,
     /// decaying synaptic current
     pub s: Vec<f32>,
     /// filtered spike trace for readouts (1 on spike, exponential decay)
@@ -60,12 +60,12 @@ pub struct CpuSim {
     pub pn_total: Vec<u64>,
     pub words: usize,
 
-    /// watched neuron ids whose v (and u) are recorded every step
+    /// watched neuron ids whose state rows are recorded every step
     /// (editor v(t) plot + v–u phase plot)
     pub v_watch: Vec<u32>,
-    /// per-watched-neuron per-step v/u history, capped at `V_HIST_CAP`
-    pub v_hist: Vec<std::collections::VecDeque<f32>>,
-    pub u_hist: Vec<std::collections::VecDeque<f32>>,
+    /// per-state-slot per-watched-neuron per-step history, capped at
+    /// `V_HIST_CAP` — `x_hist[slot][watch]`.
+    pub x_hist: Vec<Vec<std::collections::VecDeque<f32>>>,
 
     /// per-grid-group spike-trace bookkeeping (editor plane view)
     pub grid_watches: Vec<GridWatch>,
@@ -93,10 +93,20 @@ pub struct GridWatch {
 
 impl CpuSim {
     pub fn new(net: &Network, cfg: SimConfig) -> Result<Self, String> {
+        Self::with_params(net, cfg, NeuronParams::from_network(net))
+    }
+
+    /// Build with explicit params — the file layer's per-neuron
+    /// overrides and test-only models take this path.
+    pub fn with_params(
+        net: &Network,
+        cfg: SimConfig,
+        params: NeuronParams,
+    ) -> Result<Self, String> {
         let n = net.neurons.len();
+        params.check(n)?;
         let csr = net.synapse_csr(cfg.dt_ms)?;
         let d = ring_depth(&csr, cfg.dt_ms);
-        let params = NeuronParams::from_network(net);
         let words = n.div_ceil(64);
         // >= 2 keeps the wrap-clear semantics uniform with the CUDA backend
         let spike_record_steps = if cfg.record_spikes {
@@ -108,14 +118,14 @@ impl CpuSim {
         // exponential current; all others keep the merged s[i] path.
         let x = crate::state::XSyn::build(&csr, cfg.dt_ms);
         let xsyn = vec![0.0; x.decay.len()];
+        let x0 = params.x0.clone();
         CpuSim {
             n,
             csr,
             params,
             stim_map: crate::stim::StimMap::from_network(net),
             stimulus: crate::stim::Stimulus::for_network(net),
-            v: vec![0.0; n],
-            u: vec![0.0; n],
+            x: x0,
             s: vec![0.0; n],
             trace: vec![0.0; n],
             ring: vec![0.0; d * n],
@@ -133,8 +143,7 @@ impl CpuSim {
             pn_total: vec![0; n],
             words,
             v_watch: Vec::new(),
-            v_hist: Vec::new(),
-            u_hist: Vec::new(),
+            x_hist: Vec::new(),
             grid_watches: Vec::new(),
             t: 0,
             spikes_total: 0,
@@ -148,11 +157,10 @@ impl CpuSim {
         Ok(self)
     }
 
-    /// Reset dynamical state (v, u, currents, ring, time). Keeps synapses,
-    /// stimulus and ext — the original's `sim.reset()`.
+    /// Reset dynamical state (model state, currents, ring, time). Keeps
+    /// synapses, stimulus and ext — the original's `sim.reset()`.
     pub fn reset_state(&mut self) {
-        self.v.fill(self.params.init_v);
-        self.u.copy_from_slice(&self.params.init_u);
+        self.x.copy_from_slice(&self.params.x0);
         self.s.fill(0.0);
         self.trace.fill(0.0);
         self.ring.fill(0.0);
@@ -165,11 +173,10 @@ impl CpuSim {
         self.pn_total.fill(0);
         self.t = 0;
         self.spikes_total = 0;
-        for d in &mut self.v_hist {
-            d.clear();
-        }
-        for d in &mut self.u_hist {
-            d.clear();
+        for hist in &mut self.x_hist {
+            for d in hist {
+                d.clear();
+            }
         }
         for w in &mut self.grid_watches {
             w.ls.fill(u32::MAX);
@@ -204,6 +211,7 @@ impl CpuSim {
         self.xring[slot].clear();
 
         let slot_base = slot * n;
+        let (np, nx) = (self.params.n_params, self.params.n_state);
         let mut spiked: Vec<u32> = Vec::new();
         for i in 0..n {
             let arr = self.ring[slot_base + i];
@@ -230,20 +238,15 @@ impl CpuSim {
             if p_kick > 0.0 && noise_fires(i as u32, t, self.cfg.seed, p_kick) {
                 input += kick;
             }
-            // the model step — all neurons are izh today; the generic
-            // p/x rows land with the model table. The local arrays alias
-            // the model's param/state slots so the same step text lives
-            // in one file next to the CUDA one.
-            let mut x = [self.v[i], self.u[i]];
-            let p = [
-                self.params.a[i],
-                self.params.b[i],
-                self.params.c[i],
-                self.params.d[i],
-            ];
-            let sp = model::izh::Izhikevich.step(&p, &mut x, input, dt);
-            self.v[i] = x[0];
-            self.u[i] = x[1];
+            // the model step: p row + x row straight out of the flat
+            // blocks, dispatched per-neuron through the model table
+            let model = self.params.models[self.params.model[i] as usize];
+            let sp = model.step(
+                &self.params.p[i * np..i * np + np],
+                &mut self.x[i * nx..i * nx + nx],
+                input,
+                dt,
+            );
             if sp {
                 spiked.push(i as u32);
                 // original sets the readout trace to full on spike, no decay
@@ -304,17 +307,15 @@ impl CpuSim {
         for _ in 0..steps {
             self.step();
             if !self.v_watch.is_empty() {
+                let nx = self.params.n_state;
                 for (k, &id) in self.v_watch.iter().enumerate() {
                     let i = id as usize;
-                    let rv = &mut self.v_hist[k];
-                    rv.push_back(self.v.get(i).copied().unwrap_or(0.0));
-                    if rv.len() > V_HIST_CAP {
-                        rv.pop_front();
-                    }
-                    let ru = &mut self.u_hist[k];
-                    ru.push_back(self.u.get(i).copied().unwrap_or(0.0));
-                    if ru.len() > V_HIST_CAP {
-                        ru.pop_front();
+                    for s in 0..nx {
+                        let d = &mut self.x_hist[s][k];
+                        d.push_back(self.x.get(i * nx + s).copied().unwrap_or(0.0));
+                        if d.len() > V_HIST_CAP {
+                            d.pop_front();
+                        }
                     }
                 }
             }
@@ -329,26 +330,28 @@ impl CpuSim {
             return;
         }
         self.v_watch = ids.to_vec();
-        self.v_hist = vec![std::collections::VecDeque::with_capacity(256); ids.len()];
-        self.u_hist = vec![std::collections::VecDeque::with_capacity(256); ids.len()];
+        self.x_hist = (0..self.params.n_state)
+            .map(|_| vec![std::collections::VecDeque::with_capacity(256); ids.len()])
+            .collect();
     }
 
-    /// Drain per-step v samples recorded since the last drain, one Vec per
-    /// watched neuron (oldest first).
-    pub fn drain_v(&mut self) -> Vec<Vec<f32>> {
-        self.v_hist
-            .iter_mut()
-            .map(|d| d.drain(..).collect())
-            .collect()
+    /// Model state slot column, one value per neuron — slot 0 is the
+    /// membrane potential.
+    pub fn state(&self, slot: usize) -> Vec<f32> {
+        let nx = self.params.n_state;
+        if slot >= nx {
+            return Vec::new();
+        }
+        (0..self.n).map(|i| self.x[i * nx + slot]).collect()
     }
 
-    /// Drain per-step u samples — same cadence/lengths as `drain_v`, for
-    /// the editor's v–u phase plot.
-    pub fn drain_u(&mut self) -> Vec<Vec<f32>> {
-        self.u_hist
-            .iter_mut()
-            .map(|d| d.drain(..).collect())
-            .collect()
+    /// Drain per-step samples for state `slot` recorded since the last
+    /// drain — one Vec per watched neuron (oldest first).
+    pub fn drain_state(&mut self, slot: usize) -> Vec<Vec<f32>> {
+        match self.x_hist.get_mut(slot) {
+            Some(hist) => hist.iter_mut().map(|d| d.drain(..).collect()).collect(),
+            None => vec![Vec::new(); self.v_watch.len()],
+        }
     }
 
     /// Set the grid-group member lists (texel order) whose spike traces the
@@ -519,11 +522,7 @@ impl crate::Backend for CpuSim {
         self.trace.clone()
     }
     fn state(&self, slot: usize) -> Vec<f32> {
-        match slot {
-            0 => self.v.clone(),
-            1 => self.u.clone(),
-            _ => Vec::new(),
-        }
+        CpuSim::state(self, slot)
     }
     fn last_spikes(&self) -> Vec<u32> {
         let Some(row) = self.spike_row(0) else {
@@ -573,7 +572,9 @@ impl crate::Backend for CpuSim {
         self.set_v_watch(ids)
     }
     fn drain_watch(&mut self) -> anyhow::Result<Vec<Vec<Vec<f32>>>> {
-        Ok(vec![self.drain_v(), self.drain_u()])
+        Ok((0..self.params.n_state)
+            .map(|s| self.drain_state(s))
+            .collect())
     }
     fn set_grid_watches(&mut self, groups: &[Vec<u32>]) {
         self.set_grid_watches(groups)

@@ -14,7 +14,6 @@ use cudarc::driver::{
 use cudarc::nvrtc;
 
 use crate::kernels;
-use crate::model;
 use crate::state::{ring_depth, NeuronParams, SimConfig};
 use net_format::{Network, SynCsr};
 
@@ -33,9 +32,10 @@ pub struct CudaSim {
     f_gtrace: CudaFunction,
     f_xsyn: CudaFunction,
 
-    // device state
-    v: CudaSlice<f32>,
-    u: CudaSlice<f32>,
+    // device state — generic model blocks: neuron i's state row is
+    // `x[i*nx ..]`, param row `p[i*np ..]`, model index `model[i]`
+    // (`params` on the host mirror holds the same tables).
+    x: CudaSlice<f32>,
     s: CudaSlice<f32>,
     trace: CudaSlice<f32>,
     ext: CudaSlice<f32>,
@@ -45,10 +45,8 @@ pub struct CudaSim {
     /// Delay ring: f32 elements, or i32 fixed-point (scale 4096) when
     /// `cfg.int_weights` — same 4-byte words either way.
     ring: CudaSlice<u32>,
-    a: CudaSlice<f32>,
-    b: CudaSlice<f32>,
-    c: CudaSlice<f32>,
-    d: CudaSlice<f32>,
+    p: CudaSlice<f32>,
+    model: CudaSlice<u8>,
     // synapses (CSR by source)
     src_ptr: CudaSlice<u32>,
     tgt: CudaSlice<u32>,
@@ -77,15 +75,14 @@ pub struct CudaSim {
     spk_bits: CudaSlice<u64>,
     /// per-neuron lifetime spike totals (exact answer for windows >= t)
     pn_total: CudaSlice<u64>,
-    // per-step v recording for watched neurons (editor v(t) plot)
+    // per-step state recording for watched neurons (editor v(t) plot)
     /// host copy of the watched ids (compared on every set_v_watch call)
     pub v_watch: Vec<u32>,
     /// device copy of `v_watch` (W entries)
     vwatch_dev: CudaSlice<u32>,
-    /// device ring VREC_D x W of per-step v for watched neurons
-    vrec_dev: CudaSlice<f32>,
-    /// device ring VREC_D x W of per-step u (recovery) — the phase plot
-    urec_dev: CudaSlice<f32>,
+    /// device ring VREC_D x W x X of per-step state rows for watched
+    /// neurons — one row carries all state slots
+    xrec_dev: CudaSlice<f32>,
     /// device buffers stale after set_v_watch — uploaded lazily in run_steps
     vrec_dirty: bool,
     /// steps recorded into vrec_dev since the last drain
@@ -115,25 +112,31 @@ pub struct CudaSim {
     words: usize,
     record_rows: usize,
     pub t: u64,
-    init_v: f32,
-    init_u: Vec<f32>,
+    /// host copy of the initial state rows — `reset_state` restores it
+    x0: Vec<f32>,
 }
 
 impl CudaSim {
     pub fn new(net: &Network, cfg: SimConfig) -> Result<Self> {
+        Self::with_params(net, cfg, NeuronParams::from_network(net))
+    }
+
+    /// Build with explicit params — the file layer's per-neuron
+    /// overrides and test-only models take this path.
+    pub fn with_params(net: &Network, cfg: SimConfig, params: NeuronParams) -> Result<Self> {
         let n = net.neurons.len();
+        params.check(n).map_err(anyhow::Error::msg)?;
         let csr = net.synapse_csr(cfg.dt_ms).map_err(anyhow::Error::msg)?;
         let d = ring_depth(&csr, cfg.dt_ms);
-        let params = NeuronParams::from_network(net);
         let stim_map = crate::stim::StimMap::from_network(net);
 
         let ctx = CudaContext::new(0).context("no CUDA device / driver")?;
         let stream = ctx.default_stream();
 
-        // NVRTC compile for this device's arch. int_weights selects the
-        // fixed-point ring; every neuron is model 0 (izh) until the
-        // generic p/x blocks land.
-        let src = kernels::kernel_source(&[&model::izh::Izhikevich], cfg.int_weights);
+        // NVRTC compile for this device's arch: one dispatch case per
+        // entry in the net's model table; int_weights selects the
+        // fixed-point delay ring.
+        let src = kernels::kernel_source(&params.models, cfg.int_weights);
         let ptx = nvrtc::compile_ptx(&src).context("NVRTC compile")?;
         let module: Arc<CudaModule> = ctx.load_module(ptx).context("load_module")?;
         let f_neuron = module.load_function("neuron_kernel")?;
@@ -145,8 +148,7 @@ impl CudaSim {
         let stim_input_host = stim_map.input_idx.clone();
         let stim_w_host = stim_map.weight.clone();
 
-        let init_v = params.init_v;
-        let init_u = params.init_u.clone();
+        let x0 = params.x0.clone();
         let words = n.div_ceil(64);
         // >= 2 rows: prop_kernel clears the row the NEXT step will record
         // into; a depth-1 ring would clear the row just written
@@ -171,17 +173,14 @@ impl CudaSim {
         let n_xsyn = x.decay.len();
 
         let sim = CudaSim {
-            v: stream.clone_htod(&vec![params.init_v; na])?,
-            u: stream.clone_htod(&pad(params.init_u.clone()))?,
+            x: stream.clone_htod(&pad(params.x0.clone()))?,
             s: stream.alloc_zeros(na)?,
             trace: stream.alloc_zeros(na)?,
             ext: stream.alloc_zeros(na)?,
             ext_host: vec![0.0; na],
             ring: stream.alloc_zeros((d * n).max(1))?,
-            a: stream.clone_htod(&pad(params.a.clone()))?,
-            b: stream.clone_htod(&pad(params.b.clone()))?,
-            c: stream.clone_htod(&pad(params.c.clone()))?,
-            d: stream.clone_htod(&pad(params.d.clone()))?,
+            p: stream.clone_htod(&pad(params.p.clone()))?,
+            model: stream.clone_htod(&pad(params.model.clone()))?,
             src_ptr: stream.clone_htod(&pad(csr.src_ptr.clone()))?,
             tgt: stream.clone_htod(&pad(csr.tgt.clone()))?,
             w: stream.clone_htod(&pad(csr.w.clone()))?,
@@ -206,8 +205,7 @@ impl CudaSim {
             pn_total: stream.alloc_zeros(na)?,
             v_watch: Vec::new(),
             vwatch_dev: stream.alloc_zeros(1)?,
-            vrec_dev: stream.alloc_zeros(1)?,
-            urec_dev: stream.alloc_zeros(1)?,
+            xrec_dev: stream.alloc_zeros(1)?,
             vrec_dirty: false,
             vrec_valid: 0,
             grid_watches: Vec::new(),
@@ -225,8 +223,7 @@ impl CudaSim {
             words,
             record_rows,
             t: 0,
-            init_v,
-            init_u,
+            x0,
             ctx,
             stream,
             f_neuron,
@@ -270,8 +267,9 @@ impl CudaSim {
             block_dim: (BLOCK, 1, 1),
             shared_mem_bytes: 0,
         };
-        let model: i32 = 0;
         let n_inputs_i32 = self.n_inputs as i32;
+        let n_params_i32 = self.params.n_params as i32;
+        let n_state_i32 = self.params.n_state as i32;
         let nwatch_i32 = self.v_watch.len() as i32;
         let vrec_d_i32 = VREC_D as i32;
         let n_grids_i32 = self.grid_watches.len() as i32;
@@ -319,14 +317,13 @@ impl CudaSim {
                 .arg(&dt)
                 .arg(&pkick)
                 .arg(&kick)
-                .arg(&mut self.v)
-                .arg(&mut self.u)
+                .arg(&mut self.x)
+                .arg(&self.p)
+                .arg(&self.model)
+                .arg(&n_params_i32)
+                .arg(&n_state_i32)
                 .arg(&mut self.s)
                 .arg(&mut self.trace)
-                .arg(&self.a)
-                .arg(&self.b)
-                .arg(&self.c)
-                .arg(&self.d)
                 .arg(&mut self.ring)
                 .arg(&self.ext)
                 .arg(&self.stim)
@@ -338,7 +335,6 @@ impl CudaSim {
                 .arg(&decay_s)
                 .arg(&decay_t)
                 .arg(&self.cfg.seed)
-                .arg(&model)
                 .arg(&mut self.spk)
                 .arg(&mut *cnt_cur);
             match &mut row_view {
@@ -352,8 +348,7 @@ impl CudaSim {
             b.arg(&mut self.pn_total)
                 .arg(&self.vwatch_dev)
                 .arg(&nwatch_i32)
-                .arg(&mut self.vrec_dev)
-                .arg(&mut self.urec_dev)
+                .arg(&mut self.xrec_dev)
                 .arg(&vrec_d_i32)
                 .arg(&self.gmap)
                 .arg(&n_grids_i32)
@@ -425,8 +420,7 @@ impl CudaSim {
             }
             v
         })?;
-        self.vrec_dev = self.stream.alloc_zeros(VREC_D * w)?;
-        self.urec_dev = self.stream.alloc_zeros(VREC_D * w)?;
+        self.xrec_dev = self.stream.alloc_zeros(VREC_D * w * self.params.n_state)?;
         self.vrec_dirty = false;
         self.vrec_valid = 0;
         Ok(())
@@ -533,55 +527,54 @@ impl CudaSim {
         self.vrec_valid = 0;
     }
 
-    /// Shared body for `drain_v`/`drain_u` — the two rings have the same
-    /// rows and cadence and share `vrec_valid` bookkeeping; `clear` marks
-    /// which drain owns the counter reset.
-    fn drain_rec(&mut self, dev: &CudaSlice<f32>, clear: bool) -> Result<Vec<Vec<f32>>> {
+    /// Read the per-step record ring back and split every state slot —
+    /// `[slot][watch][samples oldest-first]`. One readback per publish;
+    /// resets the shared `vrec_valid` counter.
+    pub fn drain_xrec(&mut self) -> Result<Vec<Vec<Vec<f32>>>> {
         let w = self.v_watch.len();
+        let nx = self.params.n_state;
         if w == 0 || self.vrec_valid == 0 || self.vrec_dirty {
-            return Ok(vec![Vec::new(); w]);
+            return Ok(vec![vec![Vec::new(); w]; nx]);
         }
         self.stream.synchronize()?;
         let k = (self.vrec_valid as usize).min(VREC_D);
         let r0 = (self.t as usize).wrapping_sub(k) % VREC_D;
-        let mut host = vec![0.0f32; k * w];
+        let rowlen = w * nx;
+        let mut host = vec![0.0f32; k * rowlen];
         if r0 + k <= VREC_D {
-            let view = dev.slice(r0 * w..(r0 + k) * w);
+            let view = self.xrec_dev.slice(r0 * rowlen..(r0 + k) * rowlen);
             self.stream.memcpy_dtoh(&view, &mut host)?;
         } else {
             let first = VREC_D - r0;
-            let view = dev.slice(r0 * w..VREC_D * w);
-            self.stream.memcpy_dtoh(&view, &mut host[..first * w])?;
-            let view = dev.slice(0..(k - first) * w);
-            self.stream.memcpy_dtoh(&view, &mut host[first * w..])?;
+            let view = self.xrec_dev.slice(r0 * rowlen..VREC_D * rowlen);
+            self.stream
+                .memcpy_dtoh(&view, &mut host[..first * rowlen])?;
+            let view = self.xrec_dev.slice(0..(k - first) * rowlen);
+            self.stream
+                .memcpy_dtoh(&view, &mut host[first * rowlen..])?;
         }
-        if clear {
-            self.vrec_valid = 0;
-        }
-        let mut out = vec![Vec::with_capacity(k); w];
+        self.vrec_valid = 0;
+        let mut out = vec![vec![Vec::with_capacity(k); w]; nx];
         for r in 0..k {
-            for (c, o) in out.iter_mut().enumerate() {
-                o.push(host[r * w + c]);
+            for c in 0..w {
+                for s in 0..nx {
+                    out[s][c].push(host[r * rowlen + c * nx + s]);
+                }
             }
         }
         Ok(out)
     }
 
-    /// Drain per-step v samples recorded since the last drain, one Vec per
-    /// watched neuron (oldest first). At most `VREC_D` samples survive.
-    pub fn drain_v(&mut self) -> Result<Vec<Vec<f32>>> {
-        let dev = self.vrec_dev.clone();
-        self.drain_rec(&dev, true)
-    }
-
-    /// Drain per-step u samples — same rows/cadence as `drain_v` — for
-    /// the editor's v–u phase plot. NOTE: shares `vrec_valid`'s
-    /// bookkeeping (both rings record in the same loop), so this must
-    /// be called BEFORE `drain_v` at each publish or it reports empty
-    /// after the counter resets. Callers: `Sim::drain_vu`.
-    pub fn drain_u(&mut self) -> Result<Vec<Vec<f32>>> {
-        let dev = self.urec_dev.clone();
-        self.drain_rec(&dev, false)
+    /// Drain per-step samples for state `slot`, one Vec per watched
+    /// neuron (oldest first). At most `VREC_D` samples survive — and a
+    /// drain empties the shared ring, so callers wanting several slots
+    /// use `drain_xrec` once.
+    pub fn drain_state(&mut self, slot: usize) -> Result<Vec<Vec<f32>>> {
+        Ok(self
+            .drain_xrec()?
+            .into_iter()
+            .nth(slot)
+            .unwrap_or_else(|| vec![Vec::new(); self.v_watch.len()]))
     }
 
     pub fn run_steps(&mut self, n_steps: usize) -> Result<()> {
@@ -622,10 +615,7 @@ impl CudaSim {
             return;
         }
         self.stream
-            .memcpy_htod(&vec![self.init_v; self.n], &mut self.v)
-            .unwrap();
-        self.stream
-            .memcpy_htod(&self.init_u.clone(), &mut self.u)
+            .memcpy_htod(&self.x0.clone(), &mut self.x)
             .unwrap();
         self.stream.memset_zeros(&mut self.s).unwrap();
         self.stream.memset_zeros(&mut self.trace).unwrap();
@@ -660,19 +650,16 @@ impl CudaSim {
         self.stream.clone_dtoh(&self.trace).unwrap()
     }
 
-    pub fn v(&self) -> Vec<f32> {
-        if self.n == 0 {
+    /// Model state slot column, one value per neuron — one `x` readback
+    /// for any slot, so `state(0)` (the membrane potential) costs the
+    /// same as any other slot.
+    pub fn state(&self, slot: usize) -> Vec<f32> {
+        let nx = self.params.n_state;
+        if slot >= nx || self.n == 0 {
             return Vec::new();
         }
-        self.stream.clone_dtoh(&self.v).unwrap()
-    }
-
-    /// Recovery-variable readback — state slot 1 for izh (probes/tests).
-    pub fn u(&self) -> Vec<f32> {
-        if self.n == 0 {
-            return Vec::new();
-        }
-        self.stream.clone_dtoh(&self.u).unwrap()
+        let x = self.stream.clone_dtoh(&self.x).unwrap();
+        (0..self.n).map(|i| x[i * nx + slot]).collect()
     }
 
     pub fn spikes_total(&self) -> u64 {
@@ -811,8 +798,9 @@ impl CudaSim {
 
     /// Approximate device memory held by this sim, for reporting.
     pub fn dev_mem_bytes(&self) -> usize {
-        (self.v.len() * 6
-            + self.a.len() * 4
+        (self.x.len()
+            + self.p.len()
+            + self.model.len()
             + self.ring.len()
             + self.stim.len()
             + self.s.len()
@@ -860,11 +848,7 @@ impl crate::Backend for CudaSim {
         self.trace()
     }
     fn state(&self, slot: usize) -> Vec<f32> {
-        match slot {
-            0 => self.v(),
-            1 => self.u(),
-            _ => Vec::new(),
-        }
+        CudaSim::state(self, slot)
     }
     fn last_spikes(&self) -> Vec<u32> {
         self.last_spikes()
@@ -899,12 +883,10 @@ impl crate::Backend for CudaSim {
     fn set_v_watch(&mut self, ids: &[u32]) {
         self.set_v_watch(ids)
     }
-    /// u drains first — its ring shares `vrec_valid`'s counter, which
-    /// `drain_v` resets.
+    /// One ring readback, all slots — the counter resets inside
+    /// `drain_xrec`.
     fn drain_watch(&mut self) -> anyhow::Result<Vec<Vec<Vec<f32>>>> {
-        let u = self.drain_u()?;
-        let v = self.drain_v()?;
-        Ok(vec![v, u])
+        self.drain_xrec()
     }
     fn set_grid_watches(&mut self, groups: &[Vec<u32>]) {
         self.set_grid_watches(groups)

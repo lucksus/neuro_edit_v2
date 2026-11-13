@@ -23,16 +23,24 @@ fn single_neuron_step_matches_hand_computed() {
     // v += 0.1*(0.04*4225 -325 +140 +13 +10) = 0.1*(169-162) = +0.7 -> -64.3
     // u += 0.1*0.02*(0.2*-64.3 - (-13)) = 0.002*(-12.86+13) = +0.00028 -> -12.99972
     sim.run_steps(1).unwrap();
-    assert!((sim.v[0] - (-64.3)).abs() < 1e-4, "v={}", sim.v[0]);
-    assert!((sim.u[0] - (-12.99972)).abs() < 1e-4, "u={}", sim.u[0]);
+    assert!(
+        (sim.state(0)[0] - (-64.3)).abs() < 1e-4,
+        "v={}",
+        sim.state(0)[0]
+    );
+    assert!(
+        (sim.state(1)[0] - (-12.99972)).abs() < 1e-4,
+        "u={}",
+        sim.state(1)[0]
+    );
     // step 2: v=-64.3, u=-12.99972
     // v += 0.1*(0.04*4134.49 -321.5 +140 +12.99972 +10) = 0.1*(165.3796-168.50028)
     sim.run_steps(1).unwrap();
     let v2 = -64.3f64 + 0.1 * (0.04 * 64.3f64 * 64.3 - 5.0 * 64.3 + 140.0 + 12.99972 + 10.0);
     assert!(
-        (sim.v[0] as f64 - v2).abs() < 1e-3,
+        (sim.state(0)[0] as f64 - v2).abs() < 1e-3,
         "v2={} vs {}",
-        sim.v[0],
+        sim.state(0)[0],
         v2
     );
 }
@@ -56,7 +64,7 @@ fn spike_resets_next_step() {
     let trace_on_spike = sim.trace[0];
     sim.run_steps(1).unwrap();
     // one step after the spike: v was reset to c and integrated once
-    assert!(sim.v[0] < -60.0, "v after spike {}", sim.v[0]);
+    assert!(sim.state(0)[0] < -60.0, "v after spike {}", sim.state(0)[0]);
     assert!(sim.trace[0] < trace_on_spike);
 }
 
@@ -229,7 +237,7 @@ fn default_tau_is_bit_exact() {
             fold(w);
         }
     }
-    for &x in &sim.v {
+    for &x in &sim.state(0) {
         fold(x.to_bits() as u64);
     }
     assert_eq!(h, 0x9d79_2bd2_3313_2f5d, "default-path fingerprint changed");
@@ -257,9 +265,13 @@ fn stimulus_reaches_only_its_targets() {
     sim.run_steps(1).unwrap();
     assert_eq!(sim.s[1], s1);
     // v of neuron0 and neuron2 must diverge (2 gets double current)
-    let dv = (sim.v[2] - sim.v[0]).abs();
+    let dv = (sim.state(0)[2] - sim.state(0)[0]).abs();
     assert!(dv > 0.05, "dv={}", dv);
-    assert!((sim.v[0] - -64.8).abs() < 0.2, "v0={}", sim.v[0]);
+    assert!(
+        (sim.state(0)[0] - -64.8).abs() < 0.2,
+        "v0={}",
+        sim.state(0)[0]
+    );
 }
 
 #[test]
@@ -271,7 +283,11 @@ fn played_series_is_step_locked() {
     sim.play_input(0, vec![10.0, 0.0, 0.0]);
     sim.run_steps(1).unwrap();
     // same as the hand-computed I=10 step: v = -64.3
-    assert!((sim.v[0] - (-64.3)).abs() < 1e-4, "v={}", sim.v[0]);
+    assert!(
+        (sim.state(0)[0] - (-64.3)).abs() < 1e-4,
+        "v={}",
+        sim.state(0)[0]
+    );
     // series exhausted -> later steps get 0, not the constant
     assert_eq!(sim.stimulus.value(0, 3), 0.0);
     // with sustained drive the neuron spikes within a few steps
@@ -299,8 +315,8 @@ fn noise_is_deterministic_per_seed() {
     a.run_steps(100).unwrap();
     b.run_steps(100).unwrap();
     c.run_steps(100).unwrap();
-    assert_eq!(a.v, b.v);
-    assert_ne!(a.v, c.v);
+    assert_eq!(a.state(0), b.state(0));
+    assert_ne!(a.state(0), c.state(0));
 }
 
 #[test]
@@ -312,7 +328,7 @@ fn reset_clears_state() {
     sim.run_steps(50).unwrap();
     sim.reset_state();
     assert_eq!(sim.t, 0);
-    assert!(sim.v.iter().all(|&v| v == -65.0));
+    assert!(sim.state(0).iter().all(|&v| v == -65.0));
     assert!(sim.ring.iter().all(|&x| x == 0.0));
     assert!(sim.s.iter().all(|&x| x == 0.0));
 }
@@ -475,7 +491,11 @@ fn tau_below_dt_decays_safely() {
     .unwrap();
     sim.set_external(0, 30.0);
     sim.run_ms(30.0).unwrap();
-    assert!(sim.v[1].is_finite(), "v went non-finite: {}", sim.v[1]);
+    assert!(
+        sim.state(0)[1].is_finite(),
+        "v went non-finite: {}",
+        sim.state(0)[1]
+    );
     // current must not accumulate sign-flipped energy
     for &x in &sim.s {
         assert!(x.is_finite() && x >= 0.0, "negative synaptic current {x}");

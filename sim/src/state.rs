@@ -1,6 +1,7 @@
 //! Shared simulation configuration and the flat parameter layout both
 //! backends (CPU reference and CUDA) are built from.
 
+use crate::model::{self, NeuronModel};
 use net_format::{Network, SynCsr};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -44,46 +45,139 @@ impl Default for SimConfig {
     }
 }
 
-/// Flat neuron parameter/state arrays built from a `Network`.
-#[derive(Clone, Debug)]
+/// Flat per-neuron model/param/state layout both backends run.
+///
+/// `model[i]` indexes `models` — a per-net table in first-use order;
+/// neuron i's param row is `p[i*n_params ..]` and its initial-state row
+/// is `x0[i*n_state ..]`. Row widths are the max over the net's models —
+/// a model only reads its own slots, so a wider global row is harmless.
+#[derive(Clone)]
 pub struct NeuronParams {
-    pub a: Vec<f32>,
-    pub b: Vec<f32>,
-    pub c: Vec<f32>,
-    pub d: Vec<f32>,
-    /// Kind as 0/1 (excitatory/inhibitory) — used for colouring and defaults.
+    /// the net's model table: `model[i]` → registry model
+    pub models: Vec<&'static dyn NeuronModel>,
+    /// per-neuron index into `models`
+    pub model: Vec<u8>,
+    /// max param-row width over `models`
+    pub n_params: usize,
+    /// max state-row width over `models`
+    pub n_state: usize,
+    /// flat param rows, n * n_params
+    pub p: Vec<f32>,
+    /// flat initial-state rows, n * n_state — `reset_state` restores it
+    pub x0: Vec<f32>,
+    /// Kind as 0/1 (excitatory/inhibitory) — colouring and synapse sign.
     pub inhibitory: Vec<u8>,
     pub pos: Vec<[f32; 3]>,
-    pub init_v: f32,
-    pub init_u: Vec<f32>,
+}
+
+impl std::fmt::Debug for NeuronParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NeuronParams")
+            .field(
+                "models",
+                &self.models.iter().map(|m| m.id()).collect::<Vec<_>>(),
+            )
+            .field("model", &self.model)
+            .field("n_params", &self.n_params)
+            .field("n_state", &self.n_state)
+            .field("inhibitory", &self.inhibitory)
+            .field("pos", &self.pos)
+            .finish_non_exhaustive()
+    }
 }
 
 impl NeuronParams {
+    /// Build from a v3-and-earlier net: every neuron names "izh" and its
+    /// params come straight off the enum. (The v4 type-table path lands
+    /// with the format change.)
     pub fn from_network(net: &Network) -> Self {
+        let (_, izh) = model::by_id("izh").expect("izh is registered");
         let n = net.neurons.len();
-        let mut p = NeuronParams {
-            a: vec![0.0; n],
-            b: vec![0.0; n],
-            c: vec![0.0; n],
-            d: vec![0.0; n],
+        let (np, nx) = (izh.params().len(), izh.state().len());
+        let mut params = NeuronParams {
+            models: vec![izh],
+            model: vec![0; n],
+            n_params: np,
+            n_state: nx,
+            p: vec![0.0; n * np],
+            x0: vec![0.0; n * nx],
             inhibitory: vec![0; n],
             pos: vec![[0.0; 3]; n],
-            init_v: -65.0,
-            init_u: vec![0.0; n],
         };
         for (i, neuron) in net.neurons.iter().enumerate() {
-            let [a, b, c, d] = neuron.model.params();
-            p.a[i] = a;
-            p.b[i] = b;
-            p.c[i] = c;
-            p.d[i] = d;
-            p.inhibitory[i] = (neuron.kind == net_format::NeuronKind::Inhibitory) as u8;
-            p.pos[i] = neuron.pos;
+            params.p[i * np..i * np + np].copy_from_slice(&neuron.model.params());
+            izh.init(
+                &params.p[i * np..i * np + np],
+                &mut params.x0[i * nx..i * nx + nx],
+            );
+            params.inhibitory[i] = (neuron.kind == net_format::NeuronKind::Inhibitory) as u8;
+            params.pos[i] = neuron.pos;
         }
+        params
+    }
+
+    /// Re-pack `p`/`x0` to new row widths, zero-padding grown slots —
+    /// model rows keep their contents in the same order.
+    pub fn grow(&mut self, n_params: usize, n_state: usize) {
+        if n_params == self.n_params && n_state == self.n_state {
+            return;
+        }
+        let n = self.model.len();
+        let mut p = vec![0.0; n * n_params];
+        let mut x0 = vec![0.0; n * n_state];
         for i in 0..n {
-            p.init_u[i] = p.b[i] * p.init_v;
+            let kp = self.n_params.min(n_params);
+            p[i * n_params..i * n_params + kp]
+                .copy_from_slice(&self.p[i * self.n_params..i * self.n_params + kp]);
+            let kx = self.n_state.min(n_state);
+            x0[i * n_state..i * n_state + kx]
+                .copy_from_slice(&self.x0[i * self.n_state..i * self.n_state + kx]);
         }
-        p
+        self.p = p;
+        self.x0 = x0;
+        self.n_params = n_params;
+        self.n_state = n_state;
+    }
+
+    /// Point neuron `i` at `models[mi]` with param row `params` and
+    /// re-init its state row. `grow` first when `params` outruns
+    /// `n_params`; a shorter row zero-pads.
+    pub fn set(&mut self, i: usize, mi: u8, params: &[f32]) {
+        self.model[i] = mi;
+        let (np, nx) = (self.n_params, self.n_state);
+        {
+            let row = &mut self.p[i * np..i * np + np];
+            row.fill(0.0);
+            let k = params.len().min(np);
+            row[..k].copy_from_slice(&params[..k]);
+        }
+        let xrow = &mut self.x0[i * nx..i * nx + nx];
+        xrow.fill(0.0);
+        self.models[mi as usize].init(&self.p[i * np..i * np + np], xrow);
+    }
+
+    /// Sanity check a params block against a net before a sim build:
+    /// model indices in range, rows sized right.
+    pub fn check(&self, n: usize) -> Result<(), String> {
+        if self.model.len() != n
+            || self.p.len() != n * self.n_params
+            || self.x0.len() != n * self.n_state
+        {
+            return Err(format!(
+                "param/state rows ({}/{}/{}) don't match {n} neurons",
+                self.model.len(),
+                self.p.len(),
+                self.x0.len()
+            ));
+        }
+        for (i, &mi) in self.model.iter().enumerate() {
+            if mi as usize >= self.models.len() {
+                return Err(format!(
+                    "neuron {i} names model {mi} outside the model table"
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
