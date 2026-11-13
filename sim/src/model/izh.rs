@@ -7,14 +7,24 @@
 
 use net_format::NeuronKind;
 
-use super::{NeuronModel, ParamDef, StateDef};
+use super::{MapPlane, MapSpot, NeuronModel, ParamDef, ParamMap, StateDef};
 
 pub struct Izhikevich;
 
 /// Regular-spiking (cortical) params — the original's Neuron defaults.
 pub const RS: [f32; 4] = [0.02, 0.2, -65.0, 8.0];
+/// Intrinsically bursting.
+pub const IB: [f32; 4] = [0.02, 0.2, -55.0, 4.0];
+/// Chattering.
+pub const CH: [f32; 4] = [0.02, 0.2, -50.0, 2.0];
 /// Fast-spiking params — the stock inhibitory model.
 pub const FS: [f32; 4] = [0.1, 0.2, -65.0, 2.0];
+/// Low-threshold spiking.
+pub const LTS: [f32; 4] = [0.02, 0.25, -65.0, 2.0];
+/// Thalamo-cortical (rebound bursts).
+pub const TC: [f32; 4] = [0.02, 0.25, -65.0, 0.05];
+/// Resonator (subthreshold oscillations).
+pub const RZ: [f32; 4] = [0.1, 0.26, -65.0, 2.0];
 
 static PARAMS: &[ParamDef] = &[
     ParamDef {
@@ -64,7 +74,60 @@ static STATE: &[StateDef] = &[
     },
 ];
 
-static PRESETS: &[(&str, &[f32])] = &[("regular spiking", &RS), ("fast spiking", &FS)];
+static PRESETS: &[(&str, &[f32])] = &[
+    ("regular spiking", &RS),
+    ("intrinsically bursting", &IB),
+    ("chattering", &CH),
+    ("fast spiking", &FS),
+    ("low-threshold spiking", &LTS),
+    ("thalamo-cortical", &TC),
+    ("resonator", &RZ),
+];
+
+/// The classic design map: every cortical cell type on the (a,b) and
+/// (c,d) planes. The map and the preset list share the const rows —
+/// one source of truth. Several types coincide on one plane (RS/IB/CH
+/// share a,b; FS/LTS/RZ share c,d); the inspector stacks their labels
+/// at the shared point and each stays its own click target.
+fn spots() -> Vec<MapSpot> {
+    vec![
+        MapSpot {
+            label: "RS",
+            name: "regular spiking",
+            params: &RS,
+        },
+        MapSpot {
+            label: "IB",
+            name: "intrinsically bursting",
+            params: &IB,
+        },
+        MapSpot {
+            label: "CH",
+            name: "chattering",
+            params: &CH,
+        },
+        MapSpot {
+            label: "FS",
+            name: "fast spiking",
+            params: &FS,
+        },
+        MapSpot {
+            label: "LTS",
+            name: "low-threshold spiking",
+            params: &LTS,
+        },
+        MapSpot {
+            label: "TC",
+            name: "thalamo-cortical",
+            params: &TC,
+        },
+        MapSpot {
+            label: "RZ",
+            name: "resonator",
+            params: &RZ,
+        },
+    ]
+}
 
 impl NeuronModel for Izhikevich {
     fn id(&self) -> &'static str {
@@ -81,6 +144,26 @@ impl NeuronModel for Izhikevich {
     }
     fn presets(&self) -> &'static [(&'static str, &'static [f32])] {
         PRESETS
+    }
+    fn param_map(&self) -> Option<ParamMap> {
+        Some(ParamMap {
+            planes: vec![
+                MapPlane {
+                    x: 0,
+                    y: 1,
+                    x_range: (0.0, 0.15),
+                    y_range: (0.0, 0.3),
+                    spots: spots(),
+                },
+                MapPlane {
+                    x: 2,
+                    y: 3,
+                    x_range: (-70.0, -45.0),
+                    y_range: (-1.0, 10.0),
+                    spots: spots(),
+                },
+            ],
+        })
     }
     fn default_for(&self, kind: NeuronKind) -> &'static [f32] {
         match kind {

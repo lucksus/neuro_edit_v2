@@ -31,6 +31,40 @@ pub struct StateDef {
     pub plot_range: (f32, f32),
 }
 
+/// One clickable spot on a parameter design map — a named region whose
+/// param row is applied on click. The spot's position on its plane is
+/// read off `params[x], params[y]`, so region coordinates can never
+/// drift from the preset data.
+#[derive(Clone, Debug)]
+pub struct MapSpot {
+    /// Short label drawn on the map ("RS", "IB", …).
+    pub label: &'static str,
+    /// Full region name for tooltips ("regular spiking").
+    pub name: &'static str,
+    /// Param row applied on click (full `params()` length).
+    pub params: &'static [f32],
+}
+
+/// One 2-D plane of a design map (for izh: a–b and c–d).
+#[derive(Clone, Debug)]
+pub struct MapPlane {
+    /// Param-row indices drawn on the x/y axes.
+    pub x: usize,
+    pub y: usize,
+    /// Axis display ranges in parameter units.
+    pub x_range: (f32, f32),
+    pub y_range: (f32, f32),
+    pub spots: Vec<MapSpot>,
+}
+
+/// A model's canonical parameter design map — the classic Izhikevich
+/// a–b / c–d diagram is the example. Models without one return `None`
+/// from `param_map()` and the inspector just skips the widget.
+#[derive(Clone, Debug)]
+pub struct ParamMap {
+    pub planes: Vec<MapPlane>,
+}
+
 /// One neuron model: descriptors + CPU step + CUDA step text.
 /// `Sync` — the registry hands out `&'static dyn` shared across threads.
 pub trait NeuronModel: Sync {
@@ -44,6 +78,11 @@ pub trait NeuronModel: Sync {
     fn state(&self) -> &'static [StateDef];
     /// Named parameter presets ("regular spiking", "fast spiking").
     fn presets(&self) -> &'static [(&'static str, &'static [f32])];
+    /// The parameter design map the inspector draws, if the model has
+    /// a canonical one. Default: none.
+    fn param_map(&self) -> Option<ParamMap> {
+        None
+    }
     /// Stock params for a neuron kind (for izh, inhibitory = fast spiking).
     fn default_for(&self, kind: NeuronKind) -> &'static [f32];
     /// Initial state for param row `p` (izh: v = −65, u = b·v).

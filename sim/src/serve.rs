@@ -1578,6 +1578,27 @@ pub fn model_descs() -> Vec<proto::ModelDesc> {
                 .iter()
                 .map(|(n, p)| (n.to_string(), p.to_vec()))
                 .collect(),
+            map: m.param_map().map(|pm| proto::MapDesc {
+                planes: pm
+                    .planes
+                    .iter()
+                    .map(|p| proto::MapPlaneDesc {
+                        x: p.x,
+                        y: p.y,
+                        x_range: p.x_range,
+                        y_range: p.y_range,
+                        spots: p
+                            .spots
+                            .iter()
+                            .map(|s| proto::MapSpot {
+                                label: s.label.into(),
+                                name: s.name.into(),
+                                params: s.params.to_vec(),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            }),
         })
         .collect()
 }

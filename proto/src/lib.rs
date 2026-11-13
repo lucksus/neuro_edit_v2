@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 /// `Activity::watched` replaces fixed `watched_v`/`watched_u`, and
 /// `NetEdit` gains the type/param edits. v1 bundles are refused at
 /// Hello time (they must not decode v2 frames) and told to reload.
-pub const PROTO_VERSION: u32 = 2;
+///
+/// 3: `ModelDesc` gains `map` — the model's parameter design map
+/// (izh's a–b/c–d regions) for the Stage 22 inspector.
+pub const PROTO_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // shared wire copies of host types (proto must not depend on `sim`)
@@ -78,6 +81,38 @@ pub struct StateDesc {
     pub plot_range: (f32, f32),
 }
 
+/// A clickable spot on a parameter design map: a named region whose
+/// param row is applied on click. The spot's position on the plane is
+/// `params[x], params[y]` of the plane's axis indices.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MapSpot {
+    /// Short label drawn on the map ("RS").
+    pub label: String,
+    /// Full region name for tooltips ("regular spiking").
+    pub name: String,
+    /// Param row applied on click.
+    pub params: Vec<f32>,
+}
+
+/// One 2-D plane of a design map (izh: a–b and c–d).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MapPlaneDesc {
+    /// Param-row indices drawn on the x/y axes.
+    pub x: usize,
+    pub y: usize,
+    /// Axis display ranges in parameter units.
+    pub x_range: (f32, f32),
+    pub y_range: (f32, f32),
+    pub spots: Vec<MapSpot>,
+}
+
+/// A model's parameter design map (Stage 22). `None` on `ModelDesc.map`
+/// means the model has no canonical one — the inspector draws none.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MapDesc {
+    pub planes: Vec<MapPlaneDesc>,
+}
+
 /// A registered neuron model as the client needs it: everything the
 /// inspector and the plot tabs are built from. `id` is the file-format
 /// key (never renamed); `label` is for display.
@@ -89,6 +124,9 @@ pub struct ModelDesc {
     pub state: Vec<StateDesc>,
     /// (preset name, full param row).
     pub presets: Vec<(String, Vec<f32>)>,
+    /// The parameter design map (izh's a–b/c–d diagram); `None` when
+    /// the model has no canonical one.
+    pub map: Option<MapDesc>,
 }
 
 /// One neuron-type row (the wire copy of `net_format::NeuronType`).
@@ -1118,6 +1156,19 @@ mod tests {
                         },
                     ],
                     presets: vec![("regular spiking".into(), vec![0.02, 0.2, -65.0, 8.0])],
+                    map: Some(MapDesc {
+                        planes: vec![MapPlaneDesc {
+                            x: 0,
+                            y: 1,
+                            x_range: (0.0, 0.15),
+                            y_range: (0.0, 0.3),
+                            spots: vec![MapSpot {
+                                label: "RS".into(),
+                                name: "regular spiking".into(),
+                                params: vec![0.02, 0.2, -65.0, 8.0],
+                            }],
+                        }],
+                    }),
                 }],
             },
             ServerMsg::Geo(Box::new(geo)),

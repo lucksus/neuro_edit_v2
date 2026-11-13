@@ -1843,6 +1843,64 @@ fn hello_carries_model_descriptors() {
     rig.stop();
 }
 
+/// Stage 22: `Hello` carries izh's parameter design map — the a–b and
+/// c–d planes with every named cortical region — and the spot rows are
+/// the same data the preset picker applies. Models without a canonical
+/// map (AdEx) ship `map: None`.
+#[test]
+fn hello_carries_param_map() {
+    let rig = start(Network::new(), None);
+    rig.send(ClientMsg::Hello {
+        proto: proto::PROTO_VERSION,
+    });
+    let evs = rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+    let hello = evs
+        .iter()
+        .find_map(|e| match &e.msg {
+            ServerMsg::Hello { models, .. } => Some(models),
+            _ => None,
+        })
+        .expect("a Hello reply");
+    let izh = hello.iter().find(|m| m.id == "izh").expect("izh model");
+    let map = izh.map.as_ref().expect("izh provides a design map");
+    assert_eq!(map.planes.len(), 2, "a-b and c-d planes");
+    assert_eq!((map.planes[0].x, map.planes[0].y), (0, 1));
+    assert_eq!((map.planes[1].x, map.planes[1].y), (2, 3));
+    for name in [
+        "regular spiking",
+        "intrinsically bursting",
+        "chattering",
+        "fast spiking",
+        "low-threshold spiking",
+    ] {
+        assert!(
+            map.planes
+                .iter()
+                .all(|p| p.spots.iter().any(|s| s.name == name)),
+            "map is missing region {name}"
+        );
+    }
+    // A spot's row and its coordinates must agree with the preset list:
+    // the marker and the click data are one source of truth.
+    let rs = map.planes[0]
+        .spots
+        .iter()
+        .find(|s| s.name == "regular spiking")
+        .unwrap();
+    assert_eq!(
+        izh.presets
+            .iter()
+            .find(|(n, _)| n == "regular spiking")
+            .map(|(_, p)| p.as_slice()),
+        Some(rs.params.as_slice()),
+        "map row must be the preset row"
+    );
+    assert!((rs.params[0] - 0.02).abs() < 1e-6 && (rs.params[1] - 0.2).abs() < 1e-6);
+    let adex = hello.iter().find(|m| m.id == "adex").expect("adex model");
+    assert!(adex.map.is_none(), "AdEx has no canonical map");
+    rig.stop();
+}
+
 /// `Geo` carries the type table, per-neuron `ty`, and overrides.
 #[test]
 fn geo_carries_types_and_overrides() {
