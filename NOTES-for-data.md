@@ -2478,3 +2478,163 @@ reset never ran, and changing the CUDA reset to `x[0] = p[1]` still
 passed. Now neurons 0, 1, 3 and 6 are driven and the test asserts each
 LIF neuron 1, 3 and 6 fires at least twice. With the CUDA reset changed
 to `p[1]` it fails on "mixed-net spike counts diverged".
+
+## Stage 21 — neuron-model abstraction: protocol, editor, AdEx (review 1.6 stages 4–6)
+
+Commits `dd88403` (protocol 2), `7b5f191` (editor), `daadba3` (AdEx),
+`60c1ec6` (lsm.ne2), `99ba4b0` (stale models() count) plus the
+fanout-test/NOTES commit, on top of `c9a4507`. Goal reached: a new neuron model is ONE new file under
+`sim/src/model/` plus one registry line, and the editor renders it —
+inspector params, plot tabs, presets — with no editor change (AdEx is
+the proof). No behaviour change for existing nets: headless scene
+screenshots byte-identical, bench spike counts bitwise identical.
+
+### What changed where
+
+- `proto/src/lib.rs` — `PROTO_VERSION = 2`. `Hello.models` carries
+  `ModelDesc { id, label, params: [ParamDesc{name, unit, default,
+  min, max, doc}], state: [StateDesc{name, unit, plot_range}],
+  presets }` straight from `model::MODELS`. `Geo`/`GeoDelta` carry
+  `types: [TypeRow{name, model, params, kind, color}]`, per-neuron
+  `ty`, and per-neuron `params` overrides. `Activity.watched` is
+  `[watch][slot][samples]` — the fixed `watched_v`/`watched_u` pair is
+  gone. New edits: `UpsertType`, `SetNeuronType`, `SetNeuronParams`,
+  `SetSynapse`. `ServerEvent` gains `except: Vec<u64>`.
+- `net-format` — `NeuronType.color: Option<[f32;3]>`; format version
+  4 → 5 (`load_v4` lifts colorless rows to `None`; v1–v3 paths were
+  already colour-free). `io::save_json`/bincode round-trip it.
+- `sim/src/serve.rs` — Hello hydrates with `models`; Geo publishes the
+  type table + overrides; `run_published` records/drains every state
+  slot for watched neurons; `Watch` applies `set_v_watch` immediately
+  (was deferred to the next publish — watches set before a run saw
+  nothing). New edit arms map to `net.upsert_type` / `net.set_type` /
+  param overrides / `net.set_synapse`.
+- `server/src/lib.rs` + `runs.rs` — `fanout` takes the whole
+  `ServerEvent`; broadcasts skip every client id in `except`.
+- `sim/src/script.rs` — `models()` (registry descriptors), `net.def_
+  type(name, model_id, #{param: v} | [v..], kind)`, `net.set_type(
+  ids|group, name)`, `net.set_param(id, param_name, v)`,
+  `net.type_name(id)`. Rhai reserves `type_of` outright (parse error
+  on registration AND on call), so the readback is `type_name`.
+  `net.set_izh` stays as shorthand. `set_readout_weights` accepts the
+  `fit_ridge` shape (n+1 → trailing weight into `bias_weight`) or
+  exactly n; anything else is a script error.
+- `editor` — `Shared.models` arrives with Hello; `GeoSnap` folds
+  types/ty/params; `PlotHist` is per state slot. Inspector: type
+  ComboBox, model label, preset picker, one control per `ParamDesc`
+  (range slider + unit + doc tooltip), override marker + reset-to-
+  type. Plots: `PlotTab::State(slot)` — one tab per `StateDesc` of the
+  plotted model, y-range/labels from the descriptor, phase tab only
+  when ≥2 slots. Type colours ride `Inst.aux` bit 3 + RGB8 in bits
+  8..31; unset → old kind colours (bit-identical on old scenes).
+- `sim/src/model/adex.rs` — the second real model: adaptive
+  exponential IF (Brette & Gerstner 2005; Naud 2008 tonic params).
+  10 params, state `[v, w]`, tonic + non-adapting presets, same
+  entry-reset convention as izh, exponential argument clamped at
+  10·Δ_T. One registry line; `docs/manual/adding-a-model.md` walks
+  the commit.
+
+### Stale-bundle behaviour (protocol 2)
+
+A client `Hello` with `proto != 2` gets a targeted `Error` ("stale
+bundle — reload the page"), is added to the worker's refused set, and
+every later broadcast is stamped `except` for it — fanout skips those
+ids, so a v1 bundle never sees a v2 frame to mis-decode. Refused
+clients cannot un-refuse (another Hello/Subscribe is dropped); `Bye`
+is still honoured so the worker joins cleanly. The editor also closes
+the socket locally on a `Hello` protocol mismatch.
+
+### Screenshots
+
+`review/stage21_inspector_{800,1440}.png` — live native session under
+Xvfb: grid_wave.rhai running, neuron #355 selected, inspector showing
+type combo / model: Izhikevich / param sliders with units, plot tabs
+`v(t) u(t) v–u` built from state descriptors. No-selection headless
+scene shots stay byte-identical to Stage 20's hashes
+(800: `578633f4…2f95`, 1440: `198dbfb5…fae6`).
+
+### GPU bench (10k neurons, 1M synapses, K=100, wscale 0.7, w-inh 5, noise 500, 3000 ms, 3 runs)
+
+- after step 1 (mid-stage): 0.344 / 0.319 / 0.323 s
+- final: 0.340 / 0.341 / 0.341 s — mean ≈ 0.341 s vs Stage 20's
+  ≈ 0.313 s → +8.9 %, inside the 10 % stop. Spikes bitwise identical
+  (2448300). An early contaminated run (suite racing on the same GPU)
+  read 0.39–0.45 s — discounted.
+
+### Test counts
+
+`c9a4507` 262 → HEAD 286 (+24).
+
+New tests, what they assert, and the sabotage that was shown to fail:
+
+- `hello_carries_model_descriptors` (serve.rs) — the Hello arriving
+  at a v2 client lists every registry model with param/state
+  descriptors (found a real bug during development: descriptors were
+  empty until hydration order was fixed).
+- `geo_carries_types_and_overrides` — Geo's `types`/`ty`/`params`
+  reflect def_type/set_type/set_param edits; found the
+  targeted-vs-broadcast Geo confusion during development (assert
+  must wait for `to == None`).
+- `activity_watched_carries_state_slots` — `Activity.watched` carries per-slot
+  series for every registered state, matching CPU drains.
+- `type_and_param_edits_round_trip`, `upsert_type_edit_carries_
+  types` — each new edit applies and republishes (type rows on the
+  wire for UpsertType, ty/params overrides for the others).
+- `stale_proto_hello_is_refused_then_dropped` — a `proto: 1` Hello
+  gets exactly one targeted `Error`, no broadcast ever reaches it
+  (waits for the `to == None` Geo and asserts `except` stamps it);
+  found two real bugs — the refused set dropped `Bye` and hung the
+  worker, and broadcasts were unstamped.
+- `fanout_skips_except_clients` (server/src/lib.rs) — a broadcast
+  stamped `except=[7]` writes nothing to client 7's queue while
+  client 8 receives it; sabotage: dropping `ev.except.contains(id)
+  ||` from fanout fails on "excluded client must get nothing".
+- `script_type_api_through_eval` — the five script fns end-to-end
+  through `Eval`: models() length, def_type/set_type land in the
+  next Geo, set_param lands as an override. (Rhai quirk: `type_of`
+  is a reserved word — the API is `type_name`.)
+- `help_types_lists_type_api` (help.rs) — the help topics
+  list the new fns.
+- `worker_publishes_models_and_types` (editor/tests/worker.rs)
+ — the simctl layer hands the editor model descriptors, the type
+  table, and non-empty per-slot watch series; found a real bug —
+  `Watch` deferred `set_v_watch` past the run's steps.
+- `adex_is_registered_with_descriptors`, `adex_mixed_net_fires_on_
+  cpu`, `adex_mixed_cpu_matches_cuda` (sim/tests/adex.rs) —
+  registration + descriptor surface; every adex neuron in a mixed
+  net fires ≥ 2 (fires AND resets) on CPU, and CPU/CUDA lifetime
+  spike counts are exactly equal. Sabotages: removing the registry
+  line fails `adex_is_registered` at "adex must be in MODELS";
+  dropping `x[1] += p[7]` from `cuda_step` fails the parity assert
+  ("mixed-net spike counts diverged", gpu=[11,19,0,15,23,0,30,0] vs
+  cpu=[11,9,0,6,11,0,15,0]).
+- `loads_every_example_ne2` (io.rs) — every `.ne2` under `examples/`
+  loads + validates. Verified failing on the pre-repair `lsm.ne2`
+  (the fixture itself was the broken input: readout 'ro' had 513
+  weights for 512 units — `fit_ridge`'s trailing bias weight had
+  been stored inside `weights`).
+- `script_set_readout_weights_splits_bias` (bounds.rs) — n+1 input
+  splits the trailing weight into `bias_weight`, n works verbatim,
+  other lengths are a script error. Sabotage: disabling the split
+  fails at the first eval's unwrap (script errors "got 3 weights").
+- `script_type_api_through_eval` expectation bump `99ba4b0` —
+  `models().len()` is now 2, not 1.
+
+### lsm.ne2 repair
+
+The file was stale/corrupt, not a loader off-by-one: decoded through
+`load_v3`, moved `weights[512]` → `bias_weight` (value preserved),
+re-validated, re-saved as v5 — the same type-table migration users'
+old files take. `set_readout_weights` now prevents recurrence.
+
+### Open questions / judgement calls
+
+- `net.type_name(id)` instead of the review's `type_of` — Rhai
+  reserves the name; flagged in help text.
+- AdEx inhibitory default is the non-adapting row (`a=0, b=0`) — a
+  modelling choice, no canonical "inhibitory AdEx" exists.
+- The `except` field is a broadcast-level guard; a stale client that
+  re-Subscribes still gets nothing targeted because refused messages
+  are dropped before dispatch — belt and braces.
+- The test-only `Lif` in `sim/tests/lif.rs` remains unregistered on
+  purpose — it is the plumbing test, AdEx is the real one.

@@ -736,6 +736,28 @@ mod tests {
         assert!(cls.contains_key(&3));
     }
 
+    /// Stage 21: a broadcast stamped with `except` is not written to the
+    /// excluded client's queue — a stale-bundle client must never
+    /// receive a v2 frame it would mis-decode.
+    #[test]
+    fn fanout_skips_except_clients() {
+        use super::{fanout, CLIENT_QUEUE};
+        use std::collections::HashMap;
+        use std::sync::mpsc;
+        let mut cls: HashMap<u64, mpsc::SyncSender<Vec<u8>>> = HashMap::new();
+        let (tx1, rx1) = mpsc::sync_channel(CLIENT_QUEUE);
+        let (tx2, rx2) = mpsc::sync_channel(CLIENT_QUEUE);
+        cls.insert(7, tx1);
+        cls.insert(8, tx2);
+        let mut ev = proto::ServerEvent::broadcast(proto::ServerMsg::Error("x".into()));
+        ev.except = vec![7];
+        fanout(&mut cls, &ev, b"x");
+        assert!(rx1.try_recv().is_err(), "excluded client must get nothing");
+        assert_eq!(rx2.try_recv().unwrap(), b"x");
+        // excluded clients stay connected (their Bye can still arrive)
+        assert!(cls.contains_key(&7) && cls.contains_key(&8));
+    }
+
     #[test]
     fn piped_password_reads_first_line_only() {
         // trailing lines after the password must be ignored
