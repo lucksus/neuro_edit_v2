@@ -107,8 +107,8 @@ impl EditorApp {
             self.last_dirty_seq = dirty_seq;
         }
         if let Some((path, text)) = file_data {
-            self.script_file = path;
-            self.script_text = text;
+            self.script.file = path;
+            self.script.text = text;
             self.status = "loaded".into();
         }
         if let Some(p) = file_written {
@@ -211,14 +211,14 @@ impl EditorApp {
         // net.clear may land a frame AFTER the covering Geo and clear the
         // selection again — keep re-applying until update_watch has sent
         // the watch (watch_sent matches), then stop.
-        if let Some(ids) = self.example_watch {
-            if ids.is_empty() || self.wall_ms > self.example_deadline_ms {
-                self.example_watch = None;
+        if let Some(ids) = self.script.example_watch {
+            if ids.is_empty() || self.wall_ms > self.script.example_deadline_ms {
+                self.script.example_watch = None;
             } else {
                 // Only a Geo newer than the Run click counts — the pre-run
                 // net can already cover the ids, and watching it just gets
                 // wiped by the eval's net.clear → reset_net_state.
-                let covered = example_geo_covers(self.example_base_ver, self.geo.as_deref(), ids);
+                let covered = example_geo_covers(self.script.example_base_ver, self.geo.as_deref(), ids);
                 if covered {
                     // Rebuild the HashSet only when it differs — a fresh set
                     // gets a new random iteration order and update_watch would
@@ -240,13 +240,13 @@ impl EditorApp {
                     && ids.iter().all(|n| self.watch_sent.contains(n))
                     && !gen_bumped
                 {
-                    self.example_quiet += 1;
-                    if self.example_quiet > 30 {
-                        self.example_watch = None;
-                        self.example_quiet = 0;
+                    self.script.example_quiet += 1;
+                    if self.script.example_quiet > 30 {
+                        self.script.example_watch = None;
+                        self.script.example_quiet = 0;
                     }
                 } else {
-                    self.example_quiet = 0;
+                    self.script.example_quiet = 0;
                 }
             }
         }

@@ -138,10 +138,8 @@ pub struct EditorApp {
     files: FilesUi,
     /// Multi-user login + reconnect state (`--connect http(s)://…`).
     login: LoginUi,
-    /// Script editor buffer + the name it is saved under in the file.
-    script_text: String,
-    script_name: String,
-    script_file: String,
+    /// Script editor buffer, file name, example-run watch state.
+    script: ScriptUi,
     /// Server jobs (list + live progress rows + last opened detail).
     jobs: JobsUi,
 
@@ -157,18 +155,6 @@ pub struct EditorApp {
     /// `GeoSnap::version` at the last save — anything newer = unsaved edits.
     saved_version: u64,
     watch_sent: Vec<u32>,
-    /// Neuron ids an example asked to watch on Run (see examples.rs).
-    example_watch: Option<&'static [u32]>,
-    /// `geo_version` when the example's Run was sent — the watch applies
-    /// only to geometry newer than that (the pre-run net may already
-    /// contain the ids; watching them early just gets wiped by the
-    /// eval's net.clear → reset).
-    example_base_ver: Option<u64>,
-    /// `wall_ms` deadline for the post-Run Geo — a script that never
-    /// builds a covering net must not fire the watch on a later,
-    /// unrelated net change.
-    example_deadline_ms: f64,
-    example_quiet: u8,
     pub status: String,
     /// Mode as of last frame — a change clears `status` (stale
     /// mode-scoped messages like "connect: missed" shouldn't stick).
@@ -389,6 +375,41 @@ pub struct SimControls {
     pub noise_kick: f32,
 }
 
+/// Script-window state: editor buffer + file name, plus the
+/// example-run auto-watch handshake (see examples.rs).
+pub struct ScriptUi {
+    /// Editor buffer + the name it is saved under in the file.
+    pub text: String,
+    pub name: String,
+    pub file: String,
+    /// Neuron ids an example asked to watch on Run (see examples.rs).
+    pub example_watch: Option<&'static [u32]>,
+    /// `geo_version` when the example's Run was sent — the watch applies
+    /// only to geometry newer than that (the pre-run net may already
+    /// contain the ids; watching them early just gets wiped by the
+    /// eval's net.clear → reset).
+    pub example_base_ver: Option<u64>,
+    /// `wall_ms` deadline for the post-Run Geo — a script that never
+    /// builds a covering net must not fire the watch on a later,
+    /// unrelated net change.
+    pub example_deadline_ms: f64,
+    pub example_quiet: u8,
+}
+
+impl Default for ScriptUi {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            name: "main".into(),
+            file: "script.rhai".into(),
+            example_watch: None,
+            example_base_ver: None,
+            example_deadline_ms: f64::MAX,
+            example_quiet: 0,
+        }
+    }
+}
+
 /// Jobs-tab state: the server job list, live per-job progress rows,
 /// the last opened detail snapshot and the selected job id.
 #[derive(Default)]
@@ -565,9 +586,7 @@ impl EditorApp {
                 saved_token: persisted_token,
                 ..Default::default()
             },
-            script_text: String::new(),
-            script_name: "main".into(),
-            script_file: "script.rhai".into(),
+            script: ScriptUi::default(),
             jobs: JobsUi::default(),
             show_grid: true,
             show_synapses: true,
@@ -588,10 +607,6 @@ impl EditorApp {
             last_net_gen: 0,
             saved_version: 0,
             watch_sent: Vec::new(),
-            example_watch: None,
-            example_base_ver: None,
-            example_deadline_ms: f64::MAX,
-            example_quiet: 0,
             status: String::new(),
             last_mode: Mode::Navigate,
             clipboard: None,

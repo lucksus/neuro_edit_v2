@@ -387,8 +387,8 @@ impl EditorApp {
                     let p = root.join(&self.files.cwd).join(&e.name);
                     match std::fs::read_to_string(&p) {
                         Ok(t) => {
-                            self.script_file = p.to_string_lossy().into_owned();
-                            self.script_text = t;
+                            self.script.file = p.to_string_lossy().into_owned();
+                            self.script.text = t;
                         }
                         Err(err) => self.files.status = format!("read {}: {err}", e.name),
                     }

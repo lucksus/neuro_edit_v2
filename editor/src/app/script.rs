@@ -12,12 +12,12 @@ use super::{EditorApp, PlotTab};
 impl EditorApp {
     /// Load a bundled example into the script editor (Stage 13 H).
     pub(super) fn load_example(&mut self, ex: &'static crate::examples::Example) {
-        self.script_name = ex.file.trim_end_matches(".rhai").to_string();
-        self.script_text = ex.src.to_string();
-        self.example_watch = Some(ex.watch);
-        self.example_base_ver = None;
-        self.example_deadline_ms = f64::MAX;
-        self.example_quiet = 0;
+        self.script.name = ex.file.trim_end_matches(".rhai").to_string();
+        self.script.text = ex.src.to_string();
+        self.script.example_watch = Some(ex.watch);
+        self.script.example_base_ver = None;
+        self.script.example_deadline_ms = f64::MAX;
+        self.script.example_quiet = 0;
         self.show_script = true;
         self.status = format!("example {:?} loaded — press Run", ex.name);
     }
@@ -26,14 +26,14 @@ impl EditorApp {
     /// example's `watch` list stays pending until the post-Eval Geo
     /// covers the ids — sync_shared applies it via the selection.
     pub(super) fn run_script(&mut self) {
-        let code = self.script_text.clone();
+        let code = self.script.text.clone();
         self.send(ClientMsg::Eval { code });
         // Auto-watch arms on Run: only a Geo newer than this version is
         // the eval's result — the pre-run net may already cover the ids.
-        if self.example_watch.is_some() {
-            self.example_base_ver = Some(self.geo_version);
-            self.example_deadline_ms = self.wall_ms + 45_000.0;
-            self.example_quiet = 0;
+        if self.script.example_watch.is_some() {
+            self.script.example_base_ver = Some(self.geo_version);
+            self.script.example_deadline_ms = self.wall_ms + 45_000.0;
+            self.script.example_quiet = 0;
         }
     }
 
@@ -56,7 +56,7 @@ impl EditorApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("name");
-                    ui.text_edit_singleline(&mut self.script_name);
+                    ui.text_edit_singleline(&mut self.script.name);
                     if ui.button("Run").clicked() {
                         self.run_script();
                     }
@@ -66,18 +66,18 @@ impl EditorApp {
                         .clicked()
                     {
                         self.send(ClientMsg::StartJob {
-                            name: self.script_name.clone(),
-                            script: self.script_text.clone(),
+                            name: self.script.name.clone(),
+                            script: self.script.text.clone(),
                         });
                         self.plots.tab = PlotTab::Jobs;
                         self.show_plots = true;
                     }
                     if ui.button("Save to net").clicked() {
                         self.edit_net(NetEdit::ScriptAdd {
-                            name: self.script_name.clone(),
-                            src: self.script_text.clone(),
+                            name: self.script.name.clone(),
+                            src: self.script.text.clone(),
                         });
-                        self.status = format!("script {:?} saved to net", self.script_name);
+                        self.status = format!("script {:?} saved to net", self.script.name);
                     }
                     ui.menu_button("Examples", |ui| {
                         for ex in crate::examples::EXAMPLES {
@@ -90,21 +90,21 @@ impl EditorApp {
                 });
                 ui.horizontal(|ui| {
                     ui.label("file");
-                    ui.text_edit_singleline(&mut self.script_file);
+                    ui.text_edit_singleline(&mut self.script.file);
                     if ui.button("Open").clicked() {
                         self.send(ClientMsg::ReadFile {
-                            path: self.script_file.clone(),
+                            path: self.script.file.clone(),
                         });
                     }
                     if ui.button("Save").clicked() {
                         self.send(ClientMsg::WriteFile {
-                            path: self.script_file.clone(),
-                            data: self.script_text.clone().into_bytes(),
+                            path: self.script.file.clone(),
+                            data: self.script.text.clone().into_bytes(),
                         });
                     }
                     if ui.button("List").clicked() {
                         self.send(ClientMsg::ListFiles {
-                            path: dir_of(&self.script_file),
+                            path: dir_of(&self.script.file),
                         });
                     }
                 });
@@ -112,7 +112,7 @@ impl EditorApp {
                     if is_dir {
                         self.send(ClientMsg::ListFiles { path: p });
                     } else {
-                        self.script_file = p.clone();
+                        self.script.file = p.clone();
                         self.send(ClientMsg::ReadFile { path: p });
                     }
                 }
@@ -123,8 +123,8 @@ impl EditorApp {
                             ui.label("in file:");
                             for (name, code) in &g.scripts {
                                 if ui.button(name).clicked() {
-                                    self.script_name = name.clone();
-                                    self.script_text = code.clone();
+                                    self.script.name = name.clone();
+                                    self.script.text = code.clone();
                                 }
                             }
                         });
@@ -136,7 +136,7 @@ impl EditorApp {
                         crate::syntax::highlight(ui, s.as_str(), wrap)
                     };
                     let r = ui.add(
-                        egui::TextEdit::multiline(&mut self.script_text)
+                        egui::TextEdit::multiline(&mut self.script.text)
                             .code_editor()
                             .desired_width(f32::INFINITY)
                             .desired_rows(16)
@@ -147,7 +147,7 @@ impl EditorApp {
                             i.key_pressed(egui::Key::Enter)
                                 && (i.modifiers.ctrl || i.modifiers.command)
                         });
-                    if run && !self.script_text.trim().is_empty() {
+                    if run && !self.script.text.trim().is_empty() {
                         self.run_script();
                     }
                 });
