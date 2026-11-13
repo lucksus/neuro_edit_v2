@@ -222,7 +222,7 @@ pub fn set_synapse_tau_on_inhibitory(net: &mut Network, group: &str, tau: f64) {
             .members
             .iter()
             .copied()
-            .filter(|&m| net.neurons[m as usize].kind == NeuronKind::Inhibitory)
+            .filter(|&m| net.neuron_kind(m) == NeuronKind::Inhibitory)
             .collect(),
         None => return,
     };

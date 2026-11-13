@@ -87,33 +87,66 @@ impl std::fmt::Debug for NeuronParams {
 }
 
 impl NeuronParams {
-    /// Build from a v3-and-earlier net: every neuron names "izh" and its
-    /// params come straight off the enum. (The v4 type-table path lands
-    /// with the format change.)
-    pub fn from_network(net: &Network) -> Self {
-        let (_, izh) = model::by_id("izh").expect("izh is registered");
+    /// Pull the sim-facing blocks out of a v4 net: each neuron's type
+    /// names a registered model, its effective param row (override or
+    /// type) becomes its `p` row, and `x0` is the model's init of that
+    /// row. `Err` on a dangling `ty`, an unregistered model id, or a
+    /// param row that doesn't match the model's descriptor width.
+    pub fn from_network(net: &Network) -> Result<Self, String> {
         let n = net.neurons.len();
-        let (np, nx) = (izh.params().len(), izh.state().len());
         let mut params = NeuronParams {
-            models: vec![izh],
-            model: vec![0; n],
-            n_params: np,
-            n_state: nx,
-            p: vec![0.0; n * np],
-            x0: vec![0.0; n * nx],
-            inhibitory: vec![0; n],
-            pos: vec![[0.0; 3]; n],
+            models: Vec::new(),
+            model: Vec::with_capacity(n),
+            n_params: 0,
+            n_state: 0,
+            p: Vec::new(),
+            x0: Vec::new(),
+            inhibitory: Vec::with_capacity(n),
+            pos: Vec::with_capacity(n),
         };
+        let mut rows: Vec<(Vec<f32>, Vec<f32>)> = Vec::with_capacity(n);
         for (i, neuron) in net.neurons.iter().enumerate() {
-            params.p[i * np..i * np + np].copy_from_slice(&neuron.model.params());
-            izh.init(
-                &params.p[i * np..i * np + np],
-                &mut params.x0[i * nx..i * nx + nx],
-            );
-            params.inhibitory[i] = (neuron.kind == net_format::NeuronKind::Inhibitory) as u8;
-            params.pos[i] = neuron.pos;
+            let ty = net
+                .neuron_type(i as u32)
+                .ok_or_else(|| format!("neuron {i}: ty {} out of range", neuron.ty))?;
+            let (_, m) = model::by_id(&ty.model)
+                .ok_or_else(|| format!("neuron {i}: unknown model {:?}", ty.model))?;
+            let p = net.neuron_params(i as u32);
+            if p.len() != m.params().len() {
+                return Err(format!(
+                    "neuron {i}: {} params, model {} wants {}",
+                    p.len(),
+                    m.id(),
+                    m.params().len()
+                ));
+            }
+            let mi = match params.models.iter().position(|e| e.id() == m.id()) {
+                Some(k) => k as u8,
+                None => {
+                    params.models.push(m);
+                    params.models.len() as u8 - 1
+                }
+            };
+            params.n_params = params.n_params.max(m.params().len());
+            params.n_state = params.n_state.max(m.state().len());
+            params.model.push(mi);
+            params
+                .inhibitory
+                .push((ty.kind == net_format::NeuronKind::Inhibitory) as u8);
+            params.pos.push(neuron.pos);
+            let mut x0 = vec![0.0; m.state().len()];
+            m.init(p, &mut x0);
+            rows.push((p.to_vec(), x0));
         }
-        params
+        // Pad all rows to the widest — a model only reads its own slots.
+        params.p = vec![0.0; n * params.n_params];
+        params.x0 = vec![0.0; n * params.n_state];
+        for (i, (p, x0)) in rows.into_iter().enumerate() {
+            params.p[i * params.n_params..i * params.n_params + p.len()].copy_from_slice(&p);
+            params.x0[i * params.n_state..i * params.n_state + x0.len()].copy_from_slice(&x0);
+        }
+        params.check(n)?;
+        Ok(params)
     }
 
     /// Re-pack `p`/`x0` to new row widths, zero-padding grown slots —

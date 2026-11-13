@@ -93,7 +93,7 @@ pub struct GridWatch {
 
 impl CpuSim {
     pub fn new(net: &Network, cfg: SimConfig) -> Result<Self, String> {
-        Self::with_params(net, cfg, NeuronParams::from_network(net))
+        Self::with_params(net, cfg, NeuronParams::from_network(net)?)
     }
 
     /// Build with explicit params — the file layer's per-neuron

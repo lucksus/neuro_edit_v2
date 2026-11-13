@@ -107,7 +107,7 @@ impl NeuronModel for Lif {
 /// Params where neurons `lif_ids` run the test LIF (table index 1) and
 /// the rest run izh — exercises mixed P/X rows on both backends.
 fn mixed_params(net: &Network, lif_ids: &[usize]) -> NeuronParams {
-    let mut p = NeuronParams::from_network(net);
+    let mut p = NeuronParams::from_network(net).unwrap();
     p.models.push(&LIF);
     p.grow(5, 2);
     for &i in lif_ids {

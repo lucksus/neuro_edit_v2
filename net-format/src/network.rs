@@ -49,6 +49,10 @@ impl NeuronModel {
     }
 }
 
+/// Stock izh param rows — the regular- and fast-spiking kind defaults.
+pub const IZH_RS_PARAMS: [f32; 4] = [0.02, 0.2, -65.0, 8.0];
+pub const IZH_FS_PARAMS: [f32; 4] = [0.1, 0.2, -65.0, 2.0];
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum NeuronKind {
     Excitatory,
@@ -58,12 +62,28 @@ pub enum NeuronKind {
     Regular,
 }
 
+/// A reusable neuron definition — the type table `Network::types` holds.
+/// Neurons point at a type by index and may override its params; the
+/// name is the identity that file loading and subnet copy/paste key on.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NeuronType {
+    pub name: String,
+    /// Registry id of the model this type instantiates (`"izh"` today).
+    pub model: String,
+    /// The model's parameter row (izh: `[a, b, c, d]`).
+    pub params: Vec<f32>,
+    pub kind: NeuronKind,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Neuron {
     pub name: String,
     pub pos: [f32; 3],
-    pub model: NeuronModel,
-    pub kind: NeuronKind,
+    /// Index into `Network::types`.
+    pub ty: u16,
+    /// Per-neuron param override — `None` = the type's row.
+    #[serde(default)]
+    pub params: Option<Box<[f32]>>,
 }
 
 /// One synapse = the original's (axon, synapse) pair collapsed: the axon only
@@ -314,6 +334,8 @@ impl Default for Meta {
 /// The whole editable network.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Network {
+    /// The type table — `Neuron::ty` indexes into this.
+    pub types: Vec<NeuronType>,
     pub neurons: Vec<Neuron>,
     pub synapses: Vec<Synapse>,
     pub groups: Vec<Group>,
@@ -348,43 +370,97 @@ impl Network {
     }
 
     pub fn add_neuron(&mut self, pos: [f32; 3], kind: NeuronKind) -> u32 {
+        let ty = self.default_type_for(kind);
         let id = self.neurons.len() as u32;
         self.neurons.push(Neuron {
             name: format!("Neuron_{id}"),
             pos,
-            model: NeuronModel::default(),
-            kind,
+            ty,
+            params: None,
         });
-        self.apply_kind_default(id);
         id
     }
 
-    /// Model defaults follow the kind while the parameters are untouched:
-    /// setting `Inhibitory` on a neuron whose model is still the stock
-    /// regular-spiking default swaps in fast-spiking defaults, and going
-    /// back to `Excitatory` on a stock fast-spiking model restores
-    /// regular-spiking. A model the user changed is never overwritten —
-    /// "explicitly set" means "differs from either kind's stock params".
-    fn apply_kind_default(&mut self, id: u32) {
+    /// The canonical type for `kind` — the stock izh row for that kind
+    /// (exc/inh/regular), found or appended.
+    fn default_type_for(&mut self, kind: NeuronKind) -> u16 {
+        let (base, params) = match kind {
+            NeuronKind::Inhibitory => ("inh", IZH_FS_PARAMS),
+            NeuronKind::Regular => ("regular", IZH_RS_PARAMS),
+            NeuronKind::Excitatory => ("exc", IZH_RS_PARAMS),
+        };
+        if let Some(i) = self
+            .types
+            .iter()
+            .position(|t| t.model == "izh" && t.kind == kind && t.params[..] == params[..])
+        {
+            return i as u16;
+        }
+        let mut name = base.to_string();
+        for k in 2u32.. {
+            if self.types.iter().all(|t| t.name != name) {
+                break;
+            }
+            name = format!("{base}{k}");
+        }
+        self.types.push(NeuronType {
+            name,
+            model: "izh".into(),
+            params: params.to_vec(),
+            kind,
+        });
+        self.types.len() as u16 - 1
+    }
+
+    /// Set a neuron's kind — points it at the kind's canonical type.
+    /// A neuron still on a stock param row picks up the new kind's
+    /// stock row; one with custom params keeps them as an override.
+    pub fn set_kind(&mut self, id: u32, kind: NeuronKind) {
+        let eff = self.neuron_params(id).to_vec();
+        let stock = eff[..] == IZH_RS_PARAMS[..] || eff[..] == IZH_FS_PARAMS[..];
+        let ty = self.default_type_for(kind);
         let n = &mut self.neurons[id as usize];
-        n.model = match n.kind {
-            NeuronKind::Inhibitory if n.model == NeuronModel::regular_spiking() => {
-                NeuronModel::fast_spiking()
-            }
-            NeuronKind::Excitatory | NeuronKind::Regular
-                if n.model == NeuronModel::fast_spiking() =>
-            {
-                NeuronModel::regular_spiking()
-            }
-            _ => n.model.clone(),
+        n.ty = ty;
+        n.params = if stock {
+            None
+        } else {
+            Some(eff.into_boxed_slice())
         };
     }
 
-    /// Set a neuron's kind (Dale's-law label), applying kind-appropriate
-    /// model defaults while the model is a stock default.
-    pub fn set_kind(&mut self, id: u32, kind: NeuronKind) {
-        self.neurons[id as usize].kind = kind;
-        self.apply_kind_default(id);
+    /// The neuron's type row, if its `ty` is in range.
+    pub fn neuron_type(&self, id: u32) -> Option<&NeuronType> {
+        self.types.get(self.neurons.get(id as usize)?.ty as usize)
+    }
+
+    /// The neuron's effective param row — its override or the type's.
+    pub fn neuron_params(&self, id: u32) -> &[f32] {
+        let n = &self.neurons[id as usize];
+        n.params
+            .as_deref()
+            .or_else(|| self.types.get(n.ty as usize).map(|t| t.params.as_slice()))
+            .unwrap_or(&[])
+    }
+
+    /// The neuron's effective kind — read off its type (Dale's law,
+    /// editor colour).
+    pub fn neuron_kind(&self, id: u32) -> NeuronKind {
+        self.neuron_type(id)
+            .map(|t| t.kind)
+            .unwrap_or(NeuronKind::Regular)
+    }
+
+    /// Per-neuron izh param override — the script's `net.set_izh`.
+    pub fn set_izh(&mut self, id: u32, a: f32, b: f32, c: f32, d: f32) {
+        self.neurons[id as usize].params = Some(Box::new([a, b, c, d]));
+    }
+
+    /// Look up a type by name.
+    pub fn type_index(&self, name: &str) -> Option<u16> {
+        self.types
+            .iter()
+            .position(|t| t.name == name)
+            .map(|i| i as u16)
     }
 
     pub fn neuron(&self, id: u32) -> &Neuron {
@@ -480,7 +556,7 @@ impl Network {
             // Dale's law: the source's kind sets the sign — the stored
             // weight is a magnitude. Both backends then inhibit without
             // any further code.
-            let inh = self.neurons[s.src as usize].kind == NeuronKind::Inhibitory;
+            let inh = self.neuron_kind(s.src) == NeuronKind::Inhibitory;
             csr.w.push(if inh { -s.w.abs() } else { s.w.abs() });
             csr.tau_ms.push(s.tau_ms);
             let steps = (s.delay_ms / dt_ms).round().max(1.0);
@@ -653,12 +729,26 @@ impl Network {
         let mut map = std::collections::HashMap::new();
         let mut ids: Vec<u32> = ids.iter().copied().collect();
         ids.sort_unstable();
+        let mut tmap: std::collections::HashMap<u16, u16> = std::collections::HashMap::new();
         for id in ids {
             if (id as usize) >= self.neurons.len() {
                 continue;
             }
+            let ty = *tmap.entry(self.neurons[id as usize].ty).or_insert_with(|| {
+                let t = self.neuron_type(id).cloned().unwrap_or_else(|| NeuronType {
+                    name: "exc".into(),
+                    model: "izh".into(),
+                    params: IZH_RS_PARAMS.to_vec(),
+                    kind: NeuronKind::Excitatory,
+                });
+                sub.types.push(t);
+                sub.types.len() as u16 - 1
+            });
             map.insert(id, sub.neurons.len() as u32);
-            sub.neurons.push(self.neurons[id as usize].clone());
+            sub.neurons.push(Neuron {
+                ty,
+                ..self.neurons[id as usize].clone()
+            });
         }
         for s in &self.synapses {
             if let (Some(&a), Some(&b)) = (map.get(&s.src), map.get(&s.tgt)) {
@@ -695,11 +785,27 @@ impl Network {
     /// Merge a sub-network (from `subnet`) into this one at `offset`; returns
     /// the new ids in `src` order. Delays of pasted synapses are kept as-is.
     pub fn insert_subnet(&mut self, src: &Network, offset: [f32; 3]) -> Vec<u32> {
+        // Merge the subnet's type table by name: a same-named type is
+        // reused, a new name appended — the name is the identity.
+        let mut tmap: Vec<u16> = Vec::with_capacity(src.types.len());
+        for t in &src.types {
+            tmap.push(match self.types.iter().position(|e| e.name == t.name) {
+                Some(i) => i as u16,
+                None => {
+                    self.types.push(t.clone());
+                    self.types.len() as u16 - 1
+                }
+            });
+        }
         let map: Vec<u32> = src
             .neurons
             .iter()
             .map(|neu| {
                 let mut neu = neu.clone();
+                neu.ty = tmap
+                    .get(neu.ty as usize)
+                    .copied()
+                    .unwrap_or_else(|| self.default_type_for(NeuronKind::Excitatory));
                 neu.pos[0] += offset[0];
                 neu.pos[1] += offset[1];
                 neu.pos[2] += offset[2];
@@ -762,12 +868,46 @@ impl Network {
                 return Err(format!("meta.{name} {v} must be finite and >= 0"));
             }
         }
+        for (i, t) in self.types.iter().enumerate() {
+            if t.name.is_empty() || self.types[..i].iter().any(|e| e.name == t.name) {
+                return Err(format!(
+                    "type {i} {:?} has a missing/duplicate name",
+                    t.name
+                ));
+            }
+            if t.model.is_empty() {
+                return Err(format!("type {:?} has an empty model id", t.name));
+            }
+            if t.params.is_empty() || !t.params.iter().all(|p| p.is_finite()) {
+                return Err(format!("type {:?} has bad params", t.name));
+            }
+        }
+        if self.types.len() > u16::MAX as usize + 1 {
+            return Err(format!(
+                "{} types exceed the u16 ty index",
+                self.types.len()
+            ));
+        }
         for (i, nrn) in self.neurons.iter().enumerate() {
             if !nrn.pos.iter().all(|p| p.is_finite()) {
                 return Err(format!("neuron {i} has non-finite pos {:?}", nrn.pos));
             }
-            if !nrn.model.params().iter().all(|p| p.is_finite()) {
-                return Err(format!("neuron {i} has non-finite model params"));
+            let Some(t) = self.types.get(nrn.ty as usize) else {
+                return Err(format!(
+                    "neuron {i} has ty {} but only {} types exist",
+                    nrn.ty,
+                    self.types.len()
+                ));
+            };
+            if let Some(p) = &nrn.params {
+                if p.len() != t.params.len() || !p.iter().all(|x| x.is_finite()) {
+                    return Err(format!(
+                        "neuron {i} has a bad param override ({} values, type {} wants {})",
+                        p.len(),
+                        t.name,
+                        t.params.len()
+                    ));
+                }
             }
         }
         for (i, s) in self.synapses.iter().enumerate() {

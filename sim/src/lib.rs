@@ -201,7 +201,12 @@ pub fn cuda_available() -> bool {
 
 impl Sim {
     pub fn new(net: &Network, cfg: SimConfig, kind: BackendKind) -> anyhow::Result<Sim> {
-        Self::with_params(net, cfg, kind, state::NeuronParams::from_network(net))
+        Self::with_params(
+            net,
+            cfg,
+            kind,
+            state::NeuronParams::from_network(net).map_err(anyhow::Error::msg)?,
+        )
     }
 
     /// Build with explicit params — the file layer's per-neuron

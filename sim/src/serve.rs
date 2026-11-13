@@ -1501,9 +1501,9 @@ pub fn geo_from_net(net: &Network, dt: f32) -> Geo {
     let mut pos = Vec::with_capacity(n);
     let mut kind = Vec::with_capacity(n);
     let mut names = Vec::with_capacity(n);
-    for neu in &net.neurons {
+    for (i, neu) in net.neurons.iter().enumerate() {
         pos.push(neu.pos);
-        kind.push(match neu.kind {
+        kind.push(match net.neuron_kind(i as u32) {
             net_format::NeuronKind::Inhibitory => 1,
             _ => 0,
         });
@@ -1621,7 +1621,7 @@ fn apply_edit(
         NeuronRow {
             id,
             pos: neu.pos,
-            kind: match neu.kind {
+            kind: match net.neuron_kind(id) {
                 net_format::NeuronKind::Inhibitory => 1,
                 _ => 0,
             },

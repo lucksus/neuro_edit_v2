@@ -118,7 +118,11 @@ pub struct CudaSim {
 
 impl CudaSim {
     pub fn new(net: &Network, cfg: SimConfig) -> Result<Self> {
-        Self::with_params(net, cfg, NeuronParams::from_network(net))
+        Self::with_params(
+            net,
+            cfg,
+            NeuronParams::from_network(net).map_err(anyhow::Error::msg)?,
+        )
     }
 
     /// Build with explicit params — the file layer's per-neuron

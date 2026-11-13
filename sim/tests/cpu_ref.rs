@@ -410,22 +410,17 @@ fn set_kind_reweights_and_defaults() {
         "kind flip must re-sign"
     );
     assert_eq!(
-        net.neuron(a).model.params(),
-        [0.1, 0.2, -65.0, 2.0],
+        net.neuron_params(a),
+        &[0.1, 0.2, -65.0, 2.0],
         "stock RS model swaps to FS defaults"
     );
 
     // user-set params survive the flip back and forth
-    net.neuron_mut(a).model = net_format::NeuronModel::Izhikevich {
-        a: 0.03,
-        b: 0.25,
-        c: -60.0,
-        d: 4.0,
-    };
+    net.set_izh(a, 0.03, 0.25, -60.0, 4.0);
     net.set_kind(a, NeuronKind::Excitatory);
-    assert_eq!(net.neuron(a).model.params()[0], 0.03, "explicit model kept");
+    assert_eq!(net.neuron_params(a)[0], 0.03, "explicit model kept");
     net.set_kind(a, NeuronKind::Inhibitory);
-    assert_eq!(net.neuron(a).model.params()[0], 0.03);
+    assert_eq!(net.neuron_params(a)[0], 0.03);
 }
 
 /// M2: the tutorial liquid must get real delay structure — with the

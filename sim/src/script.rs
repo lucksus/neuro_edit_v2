@@ -1017,12 +1017,13 @@ pub fn register_api(
                   -> Result<(), Box<rhai::EvalAltResult>> {
                 let id = nid(id, n.borrow().neurons.len())?;
                 invalidate(&s, n, &dr, &v);
-                n.borrow_mut().neuron_mut(id).model = net_format::NeuronModel::Izhikevich {
-                    a: d_f64(&a) as f32,
-                    b: d_f64(&b) as f32,
-                    c: d_f64(&c) as f32,
-                    d: d_f64(&d) as f32,
-                };
+                n.borrow_mut().set_izh(
+                    id,
+                    d_f64(&a) as f32,
+                    d_f64(&b) as f32,
+                    d_f64(&c) as f32,
+                    d_f64(&d) as f32,
+                );
                 Ok(())
             },
         );
@@ -1057,7 +1058,7 @@ pub fn register_api(
             "kind",
             |n: &mut NetHandle, id: rhai::INT| -> Result<String, Box<rhai::EvalAltResult>> {
                 let id = nid(id, n.borrow().neurons.len())?;
-                Ok(match n.borrow().neuron(id).kind {
+                Ok(match n.borrow().neuron_kind(id) {
                     net_format::NeuronKind::Excitatory => "exc",
                     net_format::NeuronKind::Inhibitory => "inh",
                     net_format::NeuronKind::Regular => "regular",

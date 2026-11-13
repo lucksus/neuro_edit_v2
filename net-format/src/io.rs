@@ -9,7 +9,82 @@ use std::path::Path;
 use crate::Network;
 
 const MAGIC: &[u8; 4] = b"NE2\0";
-const FORMAT_VERSION: u32 = 3;
+const FORMAT_VERSION: u32 = 4;
+
+/// `Neuron` as serialized through format v3 — model+kind inline per
+/// neuron, before the type table existed.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct NeuronV3 {
+    name: String,
+    pos: [f32; 3],
+    model: crate::NeuronModel,
+    kind: crate::NeuronKind,
+}
+
+/// Lift pre-v4 neurons (inline model+kind) into the type table: each
+/// distinct (params, kind) row becomes one type — canonical names for
+/// the stock presets (`exc`/`inh`/`regular`), a stable `izh#xxxx`
+/// content hash for custom rows so two files that drifted the same
+/// custom cell still merge on paste.
+fn lift_neurons(v3: Vec<NeuronV3>) -> (Vec<crate::NeuronType>, Vec<crate::Neuron>) {
+    use crate::NeuronKind::*;
+    let mut types: Vec<crate::NeuronType> = Vec::new();
+    let mut lut: std::collections::HashMap<([u32; 4], u8), u16> = Default::default();
+    let mut neurons = Vec::with_capacity(v3.len());
+    for nv in v3 {
+        let p = nv.model.params();
+        let key = (p.map(f32::to_bits), nv.kind as u8);
+        let ty = *lut.entry(key).or_insert_with(|| {
+            let name = match (p, nv.kind) {
+                (crate::IZH_RS_PARAMS, Excitatory) => "exc".to_string(),
+                (crate::IZH_FS_PARAMS, Inhibitory) => "inh".to_string(),
+                (crate::IZH_RS_PARAMS, Regular) => "regular".to_string(),
+                _ => {
+                    // FNV-1a over the param bits + kind.
+                    let mut h = 0xcbf2_9ce4_8422_2325u64;
+                    for b in p.iter().flat_map(|x| x.to_bits().to_le_bytes()) {
+                        h = (h ^ b as u64).wrapping_mul(0x1_0000_01b3);
+                    }
+                    h = (h ^ nv.kind as u64).wrapping_mul(0x1_0000_01b3);
+                    format!("izh#{:04x}", h & 0xffff)
+                }
+            };
+            // A name already used by a different row gets a suffix.
+            let base = name;
+            let mut name = base.clone();
+            for k in 2u32.. {
+                if types.iter().all(|t| t.name != name) {
+                    break;
+                }
+                name = format!("{base}{k}");
+            }
+            types.push(crate::NeuronType {
+                name,
+                model: "izh".into(),
+                params: p.to_vec(),
+                kind: nv.kind,
+            });
+            types.len() as u16 - 1
+        });
+        neurons.push(crate::Neuron {
+            name: nv.name,
+            pos: nv.pos,
+            ty,
+            params: None,
+        });
+    }
+    (types, neurons)
+}
+
+/// Decode a v1/v2/v3 `neurons` blob (the old inline layout) into
+/// (types, neurons) for today's `Network`.
+fn de_lift_neurons(
+    r: &mut impl Read,
+) -> Result<(Vec<crate::NeuronType>, Vec<crate::Neuron>), LoadError> {
+    let v3: Vec<NeuronV3> =
+        bincode::deserialize_from(r).map_err(|e| LoadError::Decode(format!("neurons: {e}")))?;
+    Ok(lift_neurons(v3))
+}
 
 /// `Group` as serialized by format v1 — before the `grid` field existed.
 #[derive(serde::Deserialize)]
@@ -47,8 +122,10 @@ fn load_v1(r: &mut impl Read) -> Result<Network, LoadError> {
     fn de<T: serde::de::DeserializeOwned>(t: &str, r: &mut impl Read) -> Result<T, LoadError> {
         bincode::deserialize_from(r).map_err(|e| LoadError::Decode(format!("{t}: {e}")))
     }
+    let (types, neurons) = de_lift_neurons(r)?;
     let net = Network {
-        neurons: de("neurons", r)?,
+        types,
+        neurons,
         synapses: {
             let ss: Vec<SynapseV2> = de("synapses", r)?;
             lift_synapses(ss)
@@ -78,12 +155,35 @@ fn load_v2(r: &mut impl Read) -> Result<Network, LoadError> {
     fn de<T: serde::de::DeserializeOwned>(t: &str, r: &mut impl Read) -> Result<T, LoadError> {
         bincode::deserialize_from(r).map_err(|e| LoadError::Decode(format!("{t}: {e}")))
     }
+    let (types, neurons) = de_lift_neurons(r)?;
     let net = Network {
-        neurons: de("neurons", r)?,
+        types,
+        neurons,
         synapses: {
             let ss: Vec<SynapseV2> = de("synapses", r)?;
             lift_synapses(ss)
         },
+        groups: de("groups", r)?,
+        inputs: de("inputs", r)?,
+        samples: de("samples", r)?,
+        readouts: de("readouts", r)?,
+        scripts: de("scripts", r)?,
+        meta: de("meta", r)?,
+    };
+    Ok(net)
+}
+
+/// Decode a v3 stream field-by-field — the v4 field order minus the
+/// `types` table; neurons carry their model+kind inline.
+fn load_v3(r: &mut impl Read) -> Result<Network, LoadError> {
+    fn de<T: serde::de::DeserializeOwned>(t: &str, r: &mut impl Read) -> Result<T, LoadError> {
+        bincode::deserialize_from(r).map_err(|e| LoadError::Decode(format!("{t}: {e}")))
+    }
+    let (types, neurons) = de_lift_neurons(r)?;
+    let net = Network {
+        types,
+        neurons,
+        synapses: de("synapses", r)?,
         groups: de("groups", r)?,
         inputs: de("inputs", r)?,
         samples: de("samples", r)?,
@@ -150,6 +250,7 @@ pub fn load(path: impl AsRef<Path>) -> Result<Network, LoadError> {
     let mut net = match version {
         1 => load_v1(&mut r)?,
         2 => load_v2(&mut r)?,
+        3 => load_v3(&mut r)?,
         FORMAT_VERSION => {
             bincode::deserialize_from(&mut r).map_err(|e| LoadError::Decode(e.to_string()))?
         }
@@ -279,6 +380,27 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// `net`'s neurons in the old inline (model+kind) v1..v3 layout —
+    /// hand-built fixtures serialize this, the migration loaders read it.
+    fn neurons_v3(net: &Network) -> Vec<NeuronV3> {
+        (0..net.neurons.len())
+            .map(|i| {
+                let p = net.neuron_params(i as u32);
+                NeuronV3 {
+                    name: net.neurons[i].name.clone(),
+                    pos: net.neurons[i].pos,
+                    model: crate::NeuronModel::Izhikevich {
+                        a: p[0],
+                        b: p[1],
+                        c: p[2],
+                        d: p[3],
+                    },
+                    kind: net.neuron_kind(i as u32),
+                }
+            })
+            .collect()
+    }
+
     #[test]
     fn v2_file_lifts_synapses_with_default_tau() {
         // hand-build a v2 stream: same field order as v3 minus tau_ms
@@ -292,7 +414,7 @@ mod tests {
             let mut w = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
             w.write_all(MAGIC).unwrap();
             w.write_all(&2u32.to_le_bytes()).unwrap();
-            bincode::serialize_into(&mut w, &net.neurons).unwrap();
+            bincode::serialize_into(&mut w, &neurons_v3(&net)).unwrap();
             let v2syns: Vec<SynapseV2> = net
                 .synapses
                 .iter()
@@ -398,7 +520,7 @@ mod tests {
         let mut w = Vec::new();
         w.extend_from_slice(b"NE2\0");
         w.extend_from_slice(&1u32.to_le_bytes());
-        bincode::serialize_into(&mut w, &net.neurons).unwrap();
+        bincode::serialize_into(&mut w, &neurons_v3(&net)).unwrap();
         let syns: Vec<SynapseV2> = net
             .synapses
             .iter()
