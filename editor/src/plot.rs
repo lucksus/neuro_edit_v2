@@ -114,6 +114,25 @@ pub fn y_label_hits_corner(
     mark.value - *range.start() < 0.5 * mark.step_size
 }
 
+/// Auto Y never zooms tighter than this fraction of the descriptor's
+/// `plot_range` — without it a resting neuron's ±0.03 mV noise floor
+/// stretched across the whole axis and read as a fake spike train
+/// (Stage 22B: the Plots window "spiked" while the inspector honestly
+/// showed the same flat data pinned to its descriptor range).
+pub const AUTO_Y_MIN_FRAC: f64 = 0.12;
+
+/// `[lo, hi]` the Auto-Y plot axis should show for windowed data
+/// spanning `dmin..dmax` on a state slot whose descriptor range is
+/// `plot_range`: pad the data by ~15 %, but never narrower than
+/// `AUTO_Y_MIN_FRAC` of the descriptor span (expanded around the data
+/// mid). Real excursions still fit; noise can't fill the plot.
+pub fn fit_auto_y(dmin: f64, dmax: f64, plot_range: (f64, f64)) -> (f64, f64) {
+    let min_span = ((plot_range.1 - plot_range.0) * AUTO_Y_MIN_FRAC).max(1e-3);
+    let span = ((dmax - dmin) * 1.15).max(min_span);
+    let mid = (dmin + dmax) / 2.0;
+    (mid - span / 2.0, mid + span / 2.0)
+}
+
 /// Stable per-watch color, shared by the v(t) and phase tabs — keyed
 /// by the position in the sent watch list so the same neuron draws the
 /// same color in both (the histories are HashMaps; iterating them
@@ -270,6 +289,33 @@ mod tests {
         assert!(y_label_hits_corner(&mk(-85.0), &r));
         assert!(!y_label_hits_corner(&mk(-80.0), &r));
         assert!(!y_label_hits_corner(&mk(40.0), &r));
+    }
+
+    /// Stage 22B: Auto Y must never stretch a resting noise floor into
+    /// a full-height fake spike — the fitted span never goes below
+    /// AUTO_Y_MIN_FRAC of the descriptor range. A real excursion still
+    /// fits the data.
+    /// Sabotage: `min_span` forced to 0 (or `.max()` dropped) → the
+    /// flat-data case returns a ~0.1 span and fails the bound.
+    #[test]
+    fn auto_y_clamps_noise_floor() {
+        let range = (-90.0, 40.0); // izh v descriptor
+        let min_span = (range.1 - range.0) * AUTO_Y_MIN_FRAC;
+        // Flat resting data (±0.035 mV) → at least min_span, centred on it.
+        let (lo, hi) = fit_auto_y(-70.18, -70.11, range);
+        assert!(
+            hi - lo >= min_span - 1e-6,
+            "noise floor stretched to {:.3} — fakes a spike",
+            hi - lo
+        );
+        assert!(lo < -70.18 && hi > -70.11, "data must stay inside");
+        // A real ~90 mV swing fits the data, wider than min_span.
+        let (lo, hi) = fit_auto_y(-80.0, 25.0, range);
+        assert!(hi - lo > min_span * 3.0, "real spikes should zoom in");
+        assert!(lo < -80.0 && hi > 25.0);
+        // Degenerate single-point data still yields a sane span.
+        let (lo, hi) = fit_auto_y(-65.0, -65.0, range);
+        assert!(hi - lo >= min_span - 1e-6);
     }
 
     /// Stage 13 B: follow mode yields the trailing window; once off,

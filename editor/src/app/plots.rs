@@ -7,11 +7,24 @@ use egui_plot::{Line, PlotPoints};
 use crate::gpu::Entity;
 use crate::icons;
 
-use super::layout::{app_win, default_rect, usable_rect, DefWin};
+use super::layout::{app_win, default_rect, narrow_mode, usable_rect, DefWin};
 use super::{EditorApp, PlotTab};
 
 impl EditorApp {
     pub(super) fn plots(&mut self, ctx: &egui::Context) {
+        // Stage 22B: on the first laid-out frame of a narrow window the
+        // floating Plots window stays closed — it would squeeze into
+        // the ~260 px strip between the docks. The user (or the
+        // inspector's "Open in Plots window") can still open it; on
+        // wide windows nothing changes.
+        if !self.win.narrow_defaults_done {
+            if ctx.screen_rect().width() > 0.0 {
+                self.win.narrow_defaults_done = true;
+                if narrow_mode(ctx) {
+                    self.win.plots = false;
+                }
+            }
+        }
         if !self.win.plots {
             return;
         }
@@ -114,15 +127,20 @@ impl EditorApp {
                                     format!("{:.0}", y.value)
                                 }
                             });
-                        if win.is_none() || auto_y {
-                            // x (or y too when following) from the data.
-                            p = p.auto_bounds(egui::Vec2b::new(win.is_none(), auto_y));
+                        if win.is_none() {
+                            // Panned away: egui fits both axes.
+                            p = p.auto_bounds(egui::Vec2b::new(true, auto_y));
                         } else {
+                            // Following: x is the follow window, y we set
+                            // ourselves below (Auto Y goes through
+                            // fit_auto_y's min-span clamp).
                             p = p.auto_bounds(egui::Vec2b::new(false, false));
                         }
                         let pr = p.show(ui, |ui| {
                             // watch_sent order → stable per-neuron colors,
                             // shared with the phase tab.
+                            let mut dmin = f64::MAX;
+                            let mut dmax = f64::MIN;
                             for (ci, &id) in self.watch_sent.iter().enumerate() {
                                 let Some(h) = self
                                     .plots
@@ -132,7 +150,7 @@ impl EditorApp {
                                 else {
                                     continue;
                                 };
-                                let pts: PlotPoints = match win {
+                                let pts_vec: Vec<[f64; 2]> = match win {
                                     Some((lo, hi)) => h
                                         .iter()
                                         .filter(|(t, _)| (lo..=hi).contains(t))
@@ -140,18 +158,25 @@ impl EditorApp {
                                         .collect(),
                                     None => h.iter().map(|(t, v)| [*t, *v as f64]).collect(),
                                 };
+                                for p in &pts_vec {
+                                    dmin = dmin.min(p[1]);
+                                    dmax = dmax.max(p[1]);
+                                }
                                 ui.line(
-                                    Line::new(self.watch_label(id), pts)
+                                    Line::new(self.watch_label(id), PlotPoints::from(pts_vec))
                                         .color(crate::plot::watch_color(ci)),
                                 );
                             }
                             if let Some((lo, hi)) = win {
                                 ui.set_plot_bounds_x(lo..=hi);
-                                if !auto_y {
+                                let (y0, y1) = if auto_y && dmin <= dmax {
+                                    crate::plot::fit_auto_y(dmin, dmax, y_range)
+                                } else {
                                     // Descriptor plot_range: spikes can't
                                     // bounce the axis entering/leaving.
-                                    ui.set_plot_bounds_y(y_range.0..=y_range.1);
-                                }
+                                    y_range
+                                };
+                                ui.set_plot_bounds_y(y0..=y1);
                             }
                         });
                         self.plot_follow(&pr, win);

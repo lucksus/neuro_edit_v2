@@ -169,8 +169,14 @@ mod tests {
                 "console dock took {taken:.0}px at {w}x{h} — docked?"
             );
             assert!(avail.height() >= 200.0, "console ate the scene: {avail:?}");
-            // The dock must not span under the left panel either.
-            assert!(avail.min.x >= 150.0, "console slid under the left dock");
+            // The dock must not span under the left panel either
+            // (Stage 22B: at narrow widths that's the ~44 px rail).
+            let left_min = if crate::app::layout::narrow_mode(&ctx) {
+                28.0
+            } else {
+                150.0
+            };
+            assert!(avail.min.x >= left_min, "console slid under the left dock");
         }
     }
 

@@ -2823,3 +2823,166 @@ the sim and silently loses live state (SetBackend/SetDtMs invalidate).
   echo or only show print()/error output?
 - Web app under a WebGPU-less browser only shows the gate page - want a
   degraded 2D/server-rendered view, or is the gate page sufficient?
+
+## Stage 22B — fixes from Data's look at the Stage 22 screenshots
+
+All five review items addressed; `review/stage22b_*.png` retaken at both
+sizes and inspected (checks listed per shot below).
+
+### 1. AdEx inspector "empty" plots — was a drive + display bug, not routing
+
+Root cause, confirmed by instrumenting `PlotHist` live: the inspector and
+the Plots window read the **same** history map (`plots.hist.slot(s)[id]`,
+fed once per frame by `sync_shared()` from `snap.watched`), and the data
+was genuinely flat — the AdEx cell never fired. `stage22_adex.rhai`
+shared grid_wave's `kick` (9.0 × 1.6 ≈ 14 pA), ~40× below the ~600 pA a
+tonic AdEx needs to push `v` over `VT` (`gL·(VT−EL) ≈ 30 nS × 20.2 mV`).
+The Plots window's **Auto Y** then stretched the ±0.03 mV resting noise
+floor across the whole axis, which read exactly like a spike wave, while
+the inspector — pinned to the descriptor's −90..40 mV range — honestly
+drew it flat. Nothing was mis-routed; the scene was under-driven and
+Auto-Y was lying about it.
+
+Fixes:
+
+- `review/stage22_adex.rhai`: the converted cell gets its own
+  `adex_drive` input at 900 pA so the scene really spikes (inspector
+  v/w traces now show spikes + adaptation).
+- `editor/src/plot.rs`: `fit_auto_y()` — Auto Y now pads the observed
+  data range by ~15 % but never zooms tighter than `AUTO_Y_MIN_FRAC`
+  (12 %) of the descriptor's `plot_range`, so a noise floor can no
+  longer fill the plot. Wired into the Plots State tab in
+  `editor/src/app/plots.rs` (following mode; Auto-Y off still uses the
+  descriptor range verbatim).
+
+Regression test `adex_scene_watch_series_change_over_time`
+(`sim/tests/adex.rs`) evals the actual `stage22_adex.rhai`, watches the
+converted cell through the same `set_v_watch`/`drain_watch` path the
+inspector uses, and asserts BOTH state slots sweep a real range
+(v > 40 mV, w > 10 pA). Shown failing on the pre-fix script: v stayed
+in −70.18..−70.11 mV and the assert reported "the scene's drive is too
+weak". Sabotage: drop `adex_drive` (or `set_input 0`) → both asserts
+fail on the noise floor.
+
+### 2. Narrow layout — exact rules (below `NARROW_W` = 1100 px)
+
+`layout::narrow_mode()`; all rules apply only under 1100 px:
+
+- **Inspector**: collapses to a 34 px right rail (« opens) whenever
+  nothing is selected; auto-expands once on the selection edge (empty →
+  non-empty), so a fresh selection always opens it; "»" collapses back.
+  Dock geometry: default 260 px, range 180–360 (wide: 300, 220–520).
+- **Left tools dock**: starts as the 34 px rail (`win.left_narrow_open`
+  defaults false) — a resizable SidePanel grows to its content
+  min-width (~232 px of tool rows) regardless of `default_width`, so a
+  slimmer default alone could not hit the scene target. "»" opens the
+  dock (slimmer default 170 px, still resizable to 400); "«" returns
+  to the rail instead of hiding the panel outright.
+- **Plots window**: does not open on the first laid-out frame
+  (`narrow_defaults_done` consumes the default-open once). Explicit
+  opens still work — `Ctrl+?`/panel toggles, "Open in Plots window",
+  and the `--watch`/example-watch path — and it stays clamped to
+  `usable_rect` between the docks (~490 px wide at 800), never cut off
+  or under the inspector.
+
+Result at 800×700 with a neuron selected: rail 44 + inspector 260 +
+console dock → ~496 px scene = **62 %** of the width (target was ≥45 %).
+With the user-opened left dock it's 800−232−260 ≈ 308 px — the user's
+choice, and the dock stays bounded.
+
+### 3. Parameter maps — shaded regions + collision-free labels
+
+`inspector.rs`: each spot now draws as a shaded ellipse — the same
+5%-of-range region `spot_at` hit-tests, so the visible region IS the
+clickable one ("what you see is what you click"). Labels go through
+`map_labels()`:
+
+- spots sharing a centre (RS/IB/CH at (0.02,0.2), TC/LTS at (0.02,0.25)
+  on a–b; FS/LTS/RZ at (−65,2) on c–d) form one column fanned
+  vertically beside their ellipse — right side, or left when the
+  cluster sits past ~60 % of the x range;
+- columns that still collide push apart vertically (4 passes);
+- a column covering the current-params marker flips to the other side;
+- the white-cross marker draws last, always on top;
+- label text is tinted its region's `watch_color`.
+
+### 4. Stray row under the inspector plots
+
+The "raster/phase ☐ Plots" remnant is now an explicit
+**"Open in Plots window"** button (tooltip: "open the Plots window on
+this neuron's traces") — opens `win.plots` on `PlotTab::State(0)`.
+
+### 5. Editing while running — rebuild semantics confirmed, gate stays
+
+Checked `c9a4507` (and today's code): `ClientMsg::Edit` → `bump(env)` →
+`env.invalidate_sim()` → `stash_drive()` drops the sim and caches drive
+state (`sim/src/serve.rs` `bump`, `sim/src/script.rs:240`/`458`; the
+same path existed at c9a4507 — `SetBackend`/`SetDtMs` invalidate too).
+The next Run builds a fresh sim at t=0 and re-applies the drive —
+param edits never applied live, before or after Stage 22. Nothing was
+taken away; the "edits rebuild the sim — pause the run first" gate is
+the honest description of the code path and stays.
+
+### Screenshots (`review/stage22b_*.png`, gitignored, debug binary on Xvfb :99)
+
+Checked each myself:
+
+- `a_build_{1440900,800700}` — BUILD/paused chip, Reset disabled, empty
+  console eval echo; 800 px: rails only, scene ~700 px, nothing cut off.
+- `b_run_izh_{1440900,800700}` — RUNNING band, STOP, gated controls;
+  inspector on Neuron_4: izh params, spiking v(mV), a–b + c–d maps with
+  shaded ellipses, all labels readable (TC/LTS/CH/IB/RS fanned left of
+  the coincident cluster, RZ/FS right), white marker on top, "edits
+  rebuild the sim — pause the run first" gate note visible; 800 px:
+  rail + auto-opened inspector + Plots clamped in the usable strip,
+  scene ~62 %.
+- `c_adex_{1440900,800700}` — AdEx params (C/gL/EL/VT/dT/a/tau_w/b/Vr/
+  Vpeak) and BOTH state plots visibly changing: v(mV) spiking, w(pA)
+  sawtooth adaptation; Plots v(t) shows the same real spikes (no more
+  noise-floor wave); "Open in Plots window" button present.
+- `d_script_{1440900,800700}` — yellow "script running…" band, SCRIPT
+  chip + "script running" status, gated controls, console mid-eval.
+- `e_console_{1440900,800700}` — docked console: eval echo, input + Run,
+  clear + collapse controls.
+- `web_1440` — served `editor/dist-web` in Chromium under Xvfb: the
+  app's own WebGPU gate page ("WebGPU found no GPU" + fix steps), same
+  as Stage 22 — this box's GPU process still can't composite, so the
+  gate page is the renderable result.
+
+### New/updated tests + sabotage evidence (each verified failing)
+
+- `adex_scene_watch_series_change_over_time` (sim/tests/adex.rs):
+  script-driven watch of the converted cell; sabotage = drop
+  `adex_drive` → v/w ranges collapse to noise floor (verified failing
+  before the script fix).
+- `auto_y_clamps_noise_floor` (editor/src/plot.rs): `fit_auto_y` floors
+  the span at 12 % of descriptor range incl. the degenerate
+  single-point case; sabotage = drop `.max(min_span)` → fails.
+- `map_labels_never_overlap` (inspector.rs): real izh a–b + c–d spot
+  geometry; every label rect pairwise disjoint, none covering a marker
+  parked on a spot. Sabotage = stack all labels at the cluster centre →
+  coincident rects overlap, fails.
+- `map_ellipses_match_hit_regions` (inspector.rs): every spot's ellipse
+  centred on its params at the `spot_at` radius. Sabotage = centre at
+  (0,0) → fails.
+- `inspector_dock_carves_right_space` (inspector.rs, updated): narrow +
+  no selection → 28..60 px rail; selection → bounded dock (180–360
+  narrow / 220–520 wide) and scene ≥45 %. Sabotage = never rail → fails.
+- `usable_rect_excludes_all_docks` (inspector.rs, updated): narrow
+  thresholds (rail 28 px / inspector 180 px min).
+- `left_panel_leaves_viewport_room` (panel.rs, updated): narrow default
+  ≤60 px rail; user-opened dock 150–400. Sabotage = always dock →
+  ~232 px, fails.
+- `console_dock_carves_bottom_space` (console.rs, updated): narrow left
+  bound 28 px (rail).
+
+### Gates + counts
+
+- `cargo test --workspace`: all suites green — **293 passed, 0 failed**
+  (36 `test result` lines summed; new tests added: `auto_y_clamps_
+  noise_floor`, `map_labels_never_overlap`, `map_ellipses_match_hit_
+  regions` in editor, `adex_scene_watch_series_change_over_time` in
+  sim; three existing dock tests updated for the narrow rules).
+- `editor/web/build.sh`: wasm release build OK; dist-web served on
+  :3422 and rendered (web_1440 shot).
+- `cargo fmt --all --check`: clean.

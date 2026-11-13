@@ -122,6 +122,55 @@ fn adex_mixed_cpu_matches_cuda() {
     }
 }
 
+/// Stage 22B regression on the REVIEW SCENE itself: in
+/// `stage22_c_adex_*.png` the inspector's v(mV)/w(pA) traces sat flat
+/// while the Plots window looked like it was spiking — that spike was
+/// Auto Y stretching a ±0.03 mV resting noise floor, not a routing bug
+/// (the inspector reads the same `PlotHist` map as the tabs). The real
+/// defect: the scene's shared `kick` delivered ~14 pA to the AdEx cell,
+/// ~40× below what a tonic AdEx needs to cross VT, so it never fired.
+///
+/// This evals the actual `review/stage22_adex.rhai`, watches the
+/// converted cell exactly the way the inspector does (selection →
+/// `Watch` → `set_v_watch`), and requires BOTH state slots to sweep a
+/// real range — a spike is tens of mV and each reset steps w by b.
+/// Sabotage: drop `adex_drive` in the script back to the shared kick
+/// (or `sim.set_input("adex_drive", 0.0)`) → v range collapses to the
+/// noise floor and both asserts fail.
+#[test]
+fn adex_scene_watch_series_change_over_time() {
+    let mut env = sim::script::Env::new(Network::new(), BackendKind::Cpu, 1).unwrap();
+    let _ = env
+        .eval_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../review/stage22_adex.rhai"
+        ))
+        .unwrap();
+    let h = env.sim_handle().unwrap();
+    let mut sim = h.borrow_mut();
+    sim.set_v_watch(&[0]);
+    sim.run_steps(1000).unwrap();
+    let states = sim.drain_watch().unwrap();
+    assert!(
+        states.len() >= 2,
+        "adex publishes two state slots (v, w): {states:?}"
+    );
+    let range = |s: &[Vec<f32>]| -> (f32, f32) {
+        s[0].iter()
+            .fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)))
+    };
+    let (vmin, vmax) = range(&states[0]);
+    let (wmin, wmax) = range(&states[1]);
+    assert!(
+        vmax - vmin > 40.0,
+        "adex v must swing across a spike ({vmin:.2}..{vmax:.2}) — the scene's drive is too weak"
+    );
+    assert!(
+        wmax - wmin > 10.0,
+        "adex w must build adaptation ({wmin:.2}..{wmax:.2})"
+    );
+}
+
 /// Same mixed net on CPU alone: the registered model must reach the
 /// sim through `from_network` and every adex neuron must fire and
 /// reset (counts ≥ 2) — keeps the acceptance green on GPU-less hosts.

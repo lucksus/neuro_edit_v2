@@ -30,6 +30,18 @@ pub(super) fn usable_rect(ctx: &egui::Context) -> egui::Rect {
     ctx.available_rect()
 }
 
+/// Stage 22B: below this window width the shell switches to the narrow
+/// layout — the inspector docks as a slim rail until something is
+/// selected, the left dock defaults slimmer, and the Plots window does
+/// not open on first run. At 800 px wide, an open inspector then leaves
+/// the scene ≥ ~45 % of the width.
+pub(crate) const NARROW_W: f32 = 1100.0;
+
+/// True in the narrow layout — see [`NARROW_W`].
+pub(crate) fn narrow_mode(ctx: &egui::Context) -> bool {
+    ctx.screen_rect().width() < NARROW_W
+}
+
 /// Clamp `want` fully inside `usable`, shrinking if too big. Used for
 /// window *defaults* so first-run/narrow viewports start on-screen;
 /// `constrain_to` then keeps dragged/resized windows inside too.

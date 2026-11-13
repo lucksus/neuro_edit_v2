@@ -499,6 +499,21 @@ pub struct Windows {
     /// Stage 22: the fixed left Tools/Run/View dock is expanded
     /// (off = slim rail).
     pub left_panel: bool,
+    /// Stage 22B narrow layout: the inspector rail expanded (auto-opens
+    /// on selection; the "«" control or an empty selection returns to
+    /// the rail).
+    pub insp_narrow_open: bool,
+    /// Stage 22B narrow layout: the left tools dock expanded. Starts
+    /// false at narrow widths (rail keeps the tool icons reachable and
+    /// the scene wide); "»" sets it, "«" clears it. Ignored at wide
+    /// widths where `left_panel` alone decides.
+    pub left_narrow_open: bool,
+    /// Last frame's "selection non-empty" — the rail auto-opens on the
+    /// transition edge only, so collapsing while selected sticks.
+    pub insp_narrow_sel_seen: bool,
+    /// First nonzero screen size consumed — the narrow default rules
+    /// (e.g. Plots stays closed) apply once, then the user owns them.
+    pub narrow_defaults_done: bool,
 }
 
 impl Default for Windows {
@@ -514,6 +529,10 @@ impl Default for Windows {
             manual_page: 0,
             files: false,
             left_panel: true,
+            insp_narrow_open: false,
+            left_narrow_open: false,
+            insp_narrow_sel_seen: false,
+            narrow_defaults_done: false,
         }
     }
 }

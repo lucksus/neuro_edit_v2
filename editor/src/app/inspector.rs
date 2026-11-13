@@ -9,7 +9,7 @@ use egui_plot::{Line, PlotPoints};
 use crate::gpu::Entity;
 use proto::{ClientMsg, NetEdit};
 
-use super::layout::{app_win, default_rect, usable_rect, DefWin};
+use super::layout::{app_win, default_rect, narrow_mode, usable_rect, DefWin};
 use super::{gate, gate_ui, Act, EditorApp, PlotTab};
 
 /// `name [unit]` — but an empty unit is just the name (Stage 21's
@@ -20,6 +20,193 @@ pub(super) fn param_label(pd: &proto::ParamDesc) -> String {
     } else {
         format!("{} [{}]", pd.name, pd.unit)
     }
+}
+
+/// Fraction of the axis range one label character is assumed to occupy
+/// (≈10 px of text on a ~230 px map) — deliberately generous so the
+/// collision resolver errs toward separating labels.
+const MAP_LABEL_CHAR_W: f64 = 0.034;
+/// Fraction of the y range per stacked label line.
+const MAP_LABEL_LINE_H: f64 = 0.09;
+/// A spot's shaded region is exactly `spot_at`'s 5%-of-range ellipse —
+/// what you see is what you can click.
+const MAP_REGION_FRAC: f64 = 0.05;
+
+/// One laid-out map label: the `Text` anchor point, which corner of the
+/// text sits there, and the data-space rect the text is estimated to
+/// cover (the collision resolver's currency — also what tests assert).
+pub(super) struct MapLabel {
+    pub spot: usize,
+    pub pos: [f64; 2],
+    pub align: egui::Align2,
+    /// The collision resolver's currency — asserted in tests, not
+    /// needed by the draw itself (Text anchors at `pos`).
+    #[allow(dead_code)]
+    pub rect: [f64; 4],
+}
+
+/// (center, member spot indices) — spots sharing a centre (within
+/// ~0.1% of a range) draw concentric ellipses and share one label
+/// column. Order = first-seen spot order, stable.
+pub(super) fn map_clusters(plane: &proto::MapPlaneDesc) -> Vec<([f64; 2], Vec<usize>)> {
+    let xr = plane.x_range.1 - plane.x_range.0;
+    let yr = plane.y_range.1 - plane.y_range.0;
+    let mut out: Vec<([f64; 2], Vec<usize>)> = Vec::new();
+    for (i, s) in plane.spots.iter().enumerate() {
+        let (Some(&px), Some(&py)) = (s.params.get(plane.x), s.params.get(plane.y)) else {
+            continue;
+        };
+        let c = [px as f64, py as f64];
+        if let Some(cl) = out.iter_mut().find(|(cc, _)| {
+            (cc[0] - c[0]).abs() < xr as f64 * 1e-3 && (cc[1] - c[1]).abs() < yr as f64 * 1e-3
+        }) {
+            cl.1.push(i);
+        } else {
+            out.push((c, vec![i]));
+        }
+    }
+    out
+}
+
+/// The spot's shaded click region, centred on its param pair — the
+/// same 5%-of-range ellipse [`spot_at`] hit-tests.
+pub(super) fn spot_ellipse(
+    plane: &proto::MapPlaneDesc,
+    s: &proto::MapSpot,
+) -> Option<([f64; 2], [f64; 2])> {
+    let xr = (plane.x_range.1 - plane.x_range.0) as f64;
+    let yr = (plane.y_range.1 - plane.y_range.0) as f64;
+    let (Some(&px), Some(&py)) = (s.params.get(plane.x), s.params.get(plane.y)) else {
+        return None;
+    };
+    Some((
+        [px as f64, py as f64],
+        [xr * MAP_REGION_FRAC, yr * MAP_REGION_FRAC],
+    ))
+}
+
+/// Position every spot's label so none overlap each other or the
+/// current-params marker:
+/// - coincident spots share one column whose labels fan vertically;
+/// - the column sits just right of the cluster's ellipse (left when
+///   the cluster is in the right ~40 % of the plane);
+/// - columns that still collide get pushed apart vertically;
+/// - a column covering the marker flips to the other side.
+pub(super) fn map_labels(plane: &proto::MapPlaneDesc, marker: Option<[f64; 2]>) -> Vec<MapLabel> {
+    let xr = (plane.x_range.1 - plane.x_range.0) as f64;
+    let yr = (plane.y_range.1 - plane.y_range.0) as f64;
+    if xr <= 0.0 || yr <= 0.0 {
+        return Vec::new();
+    }
+    let char_w = MAP_LABEL_CHAR_W * xr;
+    let line_h = MAP_LABEL_LINE_H * yr;
+    let rx = xr * MAP_REGION_FRAC;
+    let clusters = map_clusters(plane);
+    // column side + per-line centres before collision resolution
+    struct Col {
+        members: Vec<usize>,
+        c: [f64; 2],
+        right: bool,
+        ys: Vec<f64>,
+    }
+    let mut cols: Vec<Col> = clusters
+        .iter()
+        .map(|(c, members)| {
+            let n = members.len() as f64;
+            let ys = members
+                .iter()
+                .enumerate()
+                .map(|(k, _)| c[1] + (k as f64 - (n - 1.0) / 2.0) * line_h)
+                .collect();
+            Col {
+                members: members.clone(),
+                c: *c,
+                right: c[0] <= plane.x_range.0 as f64 + xr * 0.6,
+                ys,
+            }
+        })
+        .collect();
+    let rect = |col: &Col, k: usize| -> [f64; 4] {
+        let s = &plane.spots[col.members[k]];
+        let w = s.label.chars().count().max(1) as f64 * char_w;
+        let ax = if col.right {
+            col.c[0] + rx * 1.5
+        } else {
+            col.c[0] - rx * 1.5
+        };
+        let cy = col.ys[k];
+        if col.right {
+            [ax, ax + w, cy - line_h / 2.0, cy + line_h / 2.0]
+        } else {
+            [ax - w, ax, cy - line_h / 2.0, cy + line_h / 2.0]
+        }
+    };
+    let overlap = |a: [f64; 4], b: [f64; 4]| -> f64 {
+        let ox = a[1].min(b[1]) - a[0].max(b[0]);
+        let oy = a[3].min(b[3]) - a[2].max(b[2]);
+        if ox > 0.0 && oy > 0.0 {
+            oy
+        } else {
+            0.0
+        }
+    };
+    // Push colliding columns apart vertically (the later one moves
+    // toward its own side of the plane). Four passes suffice for the
+    // handful of clusters a real map has.
+    for _ in 0..4 {
+        let mut moved = false;
+        for j in 0..cols.len() {
+            for i in 0..j {
+                let shift = (0..cols[j].members.len())
+                    .flat_map(|kj| (0..cols[i].members.len()).map(move |ki| (kj, ki)))
+                    .map(|(kj, ki)| overlap(rect(&cols[j], kj), rect(&cols[i], ki)))
+                    .fold(0.0_f64, f64::max);
+                if shift > 0.0 {
+                    let down = cols[j].c[1] < cols[i].c[1];
+                    let d = (shift + line_h * 0.25) * if down { -1.0 } else { 1.0 };
+                    for y in &mut cols[j].ys {
+                        *y += d;
+                    }
+                    moved = true;
+                }
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+    // A column covering the marker flips to the other side.
+    if let Some(m) = marker {
+        for col in &mut cols {
+            if (0..col.members.len()).any(|k| {
+                let r = rect(col, k);
+                m[0] >= r[0] && m[0] <= r[1] && m[1] >= r[2] && m[1] <= r[3]
+            }) {
+                col.right = !col.right;
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for col in &cols {
+        for (k, &spot) in col.members.iter().enumerate() {
+            let r = rect(col, k);
+            out.push(MapLabel {
+                spot,
+                pos: if col.right {
+                    [r[0], col.ys[k]]
+                } else {
+                    [r[1], col.ys[k]]
+                },
+                align: if col.right {
+                    egui::Align2::LEFT_CENTER
+                } else {
+                    egui::Align2::RIGHT_CENTER
+                },
+                rect: r,
+            });
+        }
+    }
+    out
 }
 
 /// The map spot nearest to plot point `p`, inside a 5%-of-range ellipse
@@ -49,24 +236,65 @@ pub(super) fn spot_at(plane: &proto::MapPlaneDesc, p: [f64; 2]) -> Option<usize>
 impl EditorApp {
     /// The right dock: identity + editable props on top, live traces and
     /// the parameter map below — a taller inspector than the old window.
+    ///
+    /// Stage 22B narrow rule (`NARROW_W`, ~1100 px): the dock becomes a
+    /// slim rail that auto-expands the moment a selection exists, and
+    /// returns to the rail when the selection empties. The » control
+    /// collapses back to the rail; Ctrl+1 / the PANELS toggle still
+    /// hide the inspector entirely.
     pub(super) fn inspector(&mut self, ctx: &egui::Context) {
         if !self.win.inspector {
             return;
         }
+        let narrow = narrow_mode(ctx);
+        if narrow {
+            let has_sel = !self.selection.is_empty();
+            if has_sel && !self.win.insp_narrow_sel_seen {
+                self.win.insp_narrow_open = true;
+            }
+            self.win.insp_narrow_sel_seen = has_sel;
+            if !self.win.insp_narrow_open {
+                egui::SidePanel::right("inspector_rail")
+                    .resizable(false)
+                    .exact_width(super::panel::RAIL_W)
+                    .show(ctx, |ui| {
+                        ui.spacing_mut().interact_size.y = super::panel::PANEL_CONTROL_H;
+                        if ui.button("«").on_hover_text("open inspector").clicked() {
+                            self.win.insp_narrow_open = true;
+                        }
+                        ui.separator();
+                        ui.weak("…");
+                    });
+                return;
+            }
+        }
+        let (def_w, lo_w, hi_w) = if narrow {
+            (260.0, 180.0, 360.0)
+        } else {
+            (300.0, 220.0, 520.0)
+        };
         egui::SidePanel::right("inspector_dock")
             .resizable(true)
-            .default_width(300.0)
-            .width_range(220.0..=520.0)
+            .default_width(def_w)
+            .width_range(lo_w..=hi_w)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.heading("Inspector");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .button("»")
-                            .on_hover_text("hide inspector (Ctrl+1 to reopen)")
+                            .on_hover_text(if narrow {
+                                "collapse to the rail (reopens on selection)"
+                            } else {
+                                "hide inspector (Ctrl+1 to reopen)"
+                            })
                             .clicked()
                         {
-                            self.win.inspector = false;
+                            if narrow {
+                                self.win.insp_narrow_open = false;
+                            } else {
+                                self.win.inspector = false;
+                            }
                         }
                     });
                 });
@@ -311,6 +539,14 @@ impl EditorApp {
                 .get(plane.y)
                 .map(param_label)
                 .unwrap_or_else(|| format!("p{}", plane.y));
+            // The marker sits on the neuron's own param row — labels
+            // are laid out around it (map_labels flips a covering
+            // column to the other side of its cluster).
+            let marker = match (eff.get(plane.x), eff.get(plane.y)) {
+                (Some(&cx), Some(&cy)) => Some([cx as f64, cy as f64]),
+                _ => None,
+            };
+            let labels = map_labels(plane, marker);
             let inner = gate_ui(ui, why_edit, |ui| {
                 egui_plot::Plot::new(("insp_map", id, pi))
                     .height(140.0)
@@ -322,20 +558,46 @@ impl EditorApp {
                     .include_y(plane.y_range.1 as f64)
                     .label_formatter(|_, _| String::new())
                     .show(ui, |ui| {
-                        for s in &plane.spots {
-                            if let (Some(&px), Some(&py)) =
-                                (s.params.get(plane.x), s.params.get(plane.y))
-                            {
-                                ui.text(egui_plot::Text::new(
-                                    "",
-                                    egui_plot::PlotPoint::new(px as f64, py as f64),
-                                    egui::RichText::new(&s.label).strong().size(10.0),
-                                ));
+                        // Shaded click regions first — each is the same
+                        // 5%-of-range ellipse `spot_at` hit-tests, so the
+                        // visible region IS the clickable one (Stage 22B:
+                        // the map reads as a design map, not dots+text).
+                        for (si, s) in plane.spots.iter().enumerate() {
+                            if let Some((c, r)) = spot_ellipse(plane, s) {
+                                let col = crate::plot::watch_color(si);
+                                let pts: Vec<[f64; 2]> = (0..32)
+                                    .map(|k| {
+                                        let a = k as f64 / 32.0 * std::f64::consts::TAU;
+                                        [c[0] + r[0] * a.cos(), c[1] + r[1] * a.sin()]
+                                    })
+                                    .collect();
+                                ui.polygon(
+                                    egui_plot::Polygon::new("", PlotPoints::from(pts))
+                                        .fill_color(col.gamma_multiply(0.18))
+                                        .stroke(egui::Stroke::new(1.0_f32, col)),
+                                );
                             }
                         }
-                        if let (Some(&cx), Some(&cy)) = (eff.get(plane.x), eff.get(plane.y)) {
+                        // Labels — clustered, fanned, collision-free
+                        // (map_labels); each tinted its region's colour.
+                        for l in &labels {
+                            let s = &plane.spots[l.spot];
+                            ui.text(
+                                egui_plot::Text::new(
+                                    "",
+                                    egui_plot::PlotPoint::new(l.pos[0], l.pos[1]),
+                                    egui::RichText::new(&s.label)
+                                        .strong()
+                                        .size(10.0)
+                                        .color(crate::plot::watch_color(l.spot)),
+                                )
+                                .anchor(l.align),
+                            );
+                        }
+                        // The current-params marker last — always on top.
+                        if let Some(m) = marker {
                             ui.points(
-                                egui_plot::Points::new("", vec![[cx as f64, cy as f64]])
+                                egui_plot::Points::new("", vec![m])
                                     .shape(egui_plot::MarkerShape::Cross)
                                     .radius(6.0_f32)
                                     .color(egui::Color32::WHITE),
@@ -524,8 +786,10 @@ impl EditorApp {
                         }
                     }
                 }
+                // Stage 22B: this row read as a stray widget — make it
+                // an explicit action.
                 if ui
-                    .small_button("raster/phase → Plots")
+                    .button("Open in Plots window")
                     .on_hover_text("open the Plots window on this neuron's traces")
                     .clicked()
                 {
@@ -655,12 +919,16 @@ mod tests {
 
     /// The inspector is a real dock: it carves a bounded strip off the
     /// right edge (beside the left dock and above the console) at both
-    /// required sizes, and the scene keeps a usable centre.
+    /// required sizes, and the scene keeps a usable centre. Stage 22B:
+    /// at narrow widths (< NARROW_W) with nothing selected it is only
+    /// the slim rail; with a selection it opens as a bounded dock.
     /// Sabotage: an `egui::Window` instead of the SidePanel leaves
     /// `available_rect` untouched → `right_taken` = 0 → fails.
     #[test]
     fn inspector_dock_carves_right_space() {
         for (w, h) in [(800.0_f32, 700.0_f32), (1440.0, 900.0)] {
+            // Nothing selected: wide stays a dock, narrow falls to the
+            // rail (exact narrow rule — see NOTES Stage 22B).
             let ctx = egui::Context::default();
             let mut a = app(&ctx);
             a.win.inspector = true;
@@ -684,17 +952,56 @@ mod tests {
                 );
             }
             let right_taken = w - avail.max.x;
+            if narrow_mode(&ctx) {
+                assert!(
+                    (28.0..=60.0).contains(&right_taken),
+                    "no selection at {w}: inspector should be a rail, took {right_taken:.0}px"
+                );
+            } else {
+                assert!(
+                    (220.0..=520.0).contains(&right_taken),
+                    "inspector dock took {right_taken:.0}px at {w}x{h} — docked?"
+                );
+            }
+            // Selection: the dock opens at BOTH sizes, bounded, and the
+            // narrow scene keeps ≥45% of the width.
+            let ctx = egui::Context::default();
+            let mut a = app(&ctx);
+            a.win.inspector = true;
+            a.win.console = true;
+            a.selection.insert(0);
+            let mut avail = egui::Rect::ZERO;
+            for _ in 0..3 {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::pos2(0.0, 0.0),
+                            egui::vec2(w, h),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        a.left_panel(ctx);
+                        a.inspector(ctx);
+                        a.console(ctx);
+                        avail = ctx.available_rect();
+                    },
+                );
+            }
+            let right_taken = w - avail.max.x;
+            let (lo, hi) = if narrow_mode(&ctx) {
+                (180.0, 360.0)
+            } else {
+                (220.0, 520.0)
+            };
             assert!(
-                (220.0..=520.0).contains(&right_taken),
-                "inspector dock took {right_taken:.0}px at {w}x{h} — docked?"
+                (lo..=hi).contains(&right_taken),
+                "selected at {w}: inspector took {right_taken:.0}px, want {lo}..={hi}"
             );
             assert!(
-                avail.min.x >= 150.0 && avail.max.y <= h - 60.0,
-                "docks crossed: {avail:?} at {w}x{h}"
-            );
-            assert!(
-                avail.width() >= 200.0 && avail.height() >= 300.0,
-                "docks ate the scene: {avail:?} at {w}x{h}"
+                avail.width() >= w * 0.45,
+                "docks ate the scene at {w}x{h}: {:.0}px of {w}",
+                avail.width()
             );
         }
     }
@@ -703,7 +1010,8 @@ mod tests {
     /// structural: floating windows clamp to `usable_rect`, which is the
     /// space left after the docks are shown. Assert that rect at both
     /// required sizes can't touch either dock's strip — any window in it
-    /// is provably clear.
+    /// is provably clear. (A selection is held so the narrow inspector
+    /// is a dock, not the rail — the stricter case.)
     /// Sabotage: show the inspector after `plots()` (or as a window) →
     /// `avail` reaches the right edge → fails.
     #[test]
@@ -713,6 +1021,7 @@ mod tests {
             let mut a = app(&ctx);
             a.win.inspector = true;
             a.win.console = true;
+            a.selection.insert(0);
             let mut u = egui::Rect::ZERO;
             for _ in 0..3 {
                 let _ = ctx.run(
@@ -731,9 +1040,143 @@ mod tests {
                     },
                 );
             }
-            assert!(u.min.x >= 150.0, "usable reaches under the left dock");
-            assert!(u.max.x <= w - 220.0, "usable reaches under the inspector");
+            let (left_min, insp_min) = if narrow_mode(&ctx) {
+                (28.0, 180.0) // tools rail, inspector dock min
+            } else {
+                (150.0, 220.0)
+            };
+            assert!(
+                u.min.x >= left_min,
+                "usable reaches under the left dock/rail"
+            );
+            assert!(
+                u.max.x <= w - insp_min,
+                "usable reaches under the inspector"
+            );
             assert!(u.max.y <= h - 60.0, "usable reaches under the console");
+        }
+    }
+
+    /// izh fixture with the real a–b spot coordinates (stage-20 map).
+    fn izh_ab_plane() -> proto::MapPlaneDesc {
+        let mk = |label: &str, a: f32, b: f32| proto::MapSpot {
+            label: label.into(),
+            name: label.into(),
+            params: vec![a, b, -65.0, 8.0],
+        };
+        proto::MapPlaneDesc {
+            x: 0,
+            y: 1,
+            x_range: (0.0, 0.2),
+            y_range: (0.0, 0.3),
+            spots: vec![
+                mk("RS", 0.02, 0.2),
+                mk("IB", 0.02, 0.2),
+                mk("CH", 0.02, 0.2),
+                mk("FS", 0.1, 0.2),
+                mk("TH", 0.02, 0.25),
+                mk("LTS", 0.02, 0.25),
+            ],
+        }
+    }
+
+    /// Stage 22B defect: a–b labels sat on top of each other — three
+    /// coincident spots (RS/IB/CH), a second coincident pair (TH/LTS)
+    /// and a marker on the shared pile all drew at the same point.
+    /// Every label rect must be pairwise disjoint and none may cover
+    /// the marker.
+    /// Sabotage: `map_labels` returning `pos = spot centre` for all →
+    /// the coincident RS/IB rects overlap → fails.
+    #[test]
+    fn map_labels_never_overlap() {
+        for plane in [izh_ab_plane(), {
+            let mut p = izh_ab_plane();
+            p.x = 2;
+            p.y = 3;
+            p.x_range = (-100.0, -30.0);
+            p.y_range = (0.0, 10.0);
+            p.spots = vec![
+                proto::MapSpot {
+                    label: "RS".into(),
+                    name: "RS".into(),
+                    params: vec![0.02, 0.2, -65.0, 8.0],
+                },
+                proto::MapSpot {
+                    label: "IB".into(),
+                    name: "IB".into(),
+                    params: vec![0.02, 0.2, -55.0, 4.0],
+                },
+                proto::MapSpot {
+                    label: "CH".into(),
+                    name: "CH".into(),
+                    params: vec![0.02, 0.2, -50.0, 2.0],
+                },
+                proto::MapSpot {
+                    label: "FS".into(),
+                    name: "FS".into(),
+                    params: vec![0.1, 0.2, -65.0, 2.0],
+                },
+                proto::MapSpot {
+                    label: "LTS".into(),
+                    name: "LTS".into(),
+                    params: vec![0.02, 0.25, -65.0, 2.0],
+                },
+                proto::MapSpot {
+                    label: "RZ".into(),
+                    name: "RZ".into(),
+                    params: vec![0.1, 0.16, -65.0, 2.0],
+                },
+                proto::MapSpot {
+                    label: "TC".into(),
+                    name: "TC".into(),
+                    params: vec![0.02, 0.25, -80.0, 4.0],
+                },
+            ];
+            p
+        }] {
+            // Marker parked ON a spot — the worst case.
+            let mrow = plane.spots[0].params.clone();
+            let marker = [mrow[plane.x] as f64, mrow[plane.y] as f64];
+            let labels = map_labels(&plane, Some(marker));
+            assert_eq!(labels.len(), plane.spots.len());
+            for (i, a) in labels.iter().enumerate() {
+                for b in &labels[i + 1..] {
+                    let ox = a.rect[1].min(b.rect[1]) - a.rect[0].max(b.rect[0]);
+                    let oy = a.rect[3].min(b.rect[3]) - a.rect[2].max(b.rect[2]);
+                    assert!(
+                        ox <= 0.0 || oy <= 0.0,
+                        "labels {:?} and {:?} overlap",
+                        a.rect,
+                        b.rect
+                    );
+                }
+                assert!(
+                    marker[0] < a.rect[0]
+                        || marker[0] > a.rect[1]
+                        || marker[1] < a.rect[2]
+                        || marker[1] > a.rect[3],
+                    "label {:?} covers marker {marker:?}",
+                    a.rect
+                );
+            }
+        }
+    }
+
+    /// Every spot owns a visible ellipse centred on its params, exactly
+    /// `spot_at`'s hit region — the map's "what you see is what you
+    /// click" invariant.
+    /// Sabotage: centre the ellipse at (0,0) → the centre assert fails.
+    #[test]
+    fn map_ellipses_match_hit_regions() {
+        let plane = izh_ab_plane();
+        let xr = (plane.x_range.1 - plane.x_range.0) as f64;
+        for s in &plane.spots {
+            let (c, r) = spot_ellipse(&plane, s).unwrap();
+            assert_eq!(c[0] as f32, s.params[0]);
+            assert_eq!(c[1] as f32, s.params[1]);
+            assert!((r[0] - xr * MAP_REGION_FRAC).abs() < 1e-6);
+            // And the ellipse centre must hit-test to this region.
+            assert!(spot_at(&plane, c).is_some());
         }
     }
 }

@@ -18,7 +18,7 @@ use super::{gate, gate_ui, Act, EditorApp, Mode};
 pub(super) const PANEL_CONTROL_H: f32 = 28.0;
 
 /// Width of the collapsed tool rail.
-const RAIL_W: f32 = 34.0;
+pub(super) const RAIL_W: f32 = 34.0;
 
 /// The four edit modes + their icons/labels, in panel order.
 fn modes(ic: &Icons) -> [(Mode, &egui::TextureHandle, &str); 4] {
@@ -37,10 +37,18 @@ impl EditorApp {
     /// full working height.
     pub(super) fn left_panel(&mut self, ctx: &egui::Context) {
         let Some(ic) = self.icons.clone() else { return };
-        if self.win.left_panel {
+        let narrow = super::layout::narrow_mode(ctx);
+        // Stage 22B: at narrow widths the dock starts as the rail —
+        // egui grows a resizable SidePanel to its content min-width
+        // (~232 px of tool rows), which with an open inspector leaves
+        // <45 % scene at 800 px. The rail keeps every tool icon
+        // reachable; "»" reopens the dock (defaulted slimmer, 170 px,
+        // still user-draggable to 400 px).
+        if self.win.left_panel && (!narrow || self.win.left_narrow_open) {
+            let def_w = if narrow { 170.0 } else { 216.0 };
             egui::SidePanel::left("tools_panel")
                 .resizable(true)
-                .default_width(216.0)
+                .default_width(def_w)
                 .width_range(150.0..=400.0)
                 .show(ctx, |ui| {
                     ui.spacing_mut().interact_size.y = PANEL_CONTROL_H;
@@ -54,7 +62,11 @@ impl EditorApp {
                         ui.heading("Tools");
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("«").on_hover_text("collapse panel").clicked() {
-                                self.win.left_panel = false;
+                                if narrow {
+                                    self.win.left_narrow_open = false;
+                                } else {
+                                    self.win.left_panel = false;
+                                }
                             }
                         });
                     });
@@ -78,6 +90,7 @@ impl EditorApp {
                     ui.spacing_mut().interact_size.y = PANEL_CONTROL_H;
                     if ui.button("»").on_hover_text("expand panel").clicked() {
                         self.win.left_panel = true;
+                        self.win.left_narrow_open = true;
                     }
                     ui.separator();
                     let mut shown = self.eff_mode();
@@ -440,13 +453,18 @@ mod tests {
     /// The dock carves a bounded strip off the left edge at both required
     /// window sizes — the scene keeps almost the whole window. Two-sided
     /// assert: too narrow = the dock never showed, too wide = it ate the
-    /// viewport.
+    /// viewport. Stage 22B: at narrow widths the DEFAULT is the rail
+    /// (~44 px, icons still reachable); the user-opened dock is bounded
+    /// as before.
     /// Sabotage: `default_width(700.0)` or `width_range(150.0..=1200.0)`
     /// shrinks the scene below the bound; an empty `left_panel` fails the
-    /// lower bound.
+    /// lower bound. Narrow sabotage (verified): drop the
+    /// `!narrow || left_narrow_open` condition → 800 px takes ~232 px of
+    /// dock and the rail bound fails.
     #[test]
     fn left_panel_leaves_viewport_room() {
         for (w, h) in [(800.0_f32, 700.0_f32), (1440.0, 900.0)] {
+            // Default state first: wide → dock, narrow → rail.
             let ctx = egui::Context::default();
             let mut a = app(&ctx);
             let mut avail = egui::Rect::ZERO;
@@ -457,13 +475,36 @@ mod tests {
                 });
             }
             let taken = w - avail.width();
-            assert!(
-                (150.0..=400.0).contains(&taken),
-                "left dock took {taken:.0}px at {w}x{h}"
-            );
+            if crate::app::layout::narrow_mode(&ctx) {
+                assert!(
+                    taken <= 60.0,
+                    "narrow default should be the rail, took {taken:.0}px at {w}x{h}"
+                );
+            } else {
+                assert!(
+                    (150.0..=400.0).contains(&taken),
+                    "left dock took {taken:.0}px at {w}x{h}"
+                );
+            }
             assert!(
                 avail.height() >= h - 1.0,
                 "left dock stole vertical space: {avail:?} at {w}x{h}"
+            );
+            // User-opened at narrow → bounded dock.
+            let ctx = egui::Context::default();
+            let mut a = app(&ctx);
+            a.win.left_narrow_open = true;
+            let mut avail = egui::Rect::ZERO;
+            for _ in 0..3 {
+                let _ = ctx.run(input(w, h), |ctx| {
+                    a.left_panel(ctx);
+                    avail = ctx.available_rect();
+                });
+            }
+            let taken = w - avail.width();
+            assert!(
+                (150.0..=400.0).contains(&taken),
+                "opened left dock took {taken:.0}px at {w}x{h}"
             );
         }
     }
