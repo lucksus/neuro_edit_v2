@@ -187,12 +187,14 @@ impl EditorApp {
                         egui::Popup::default_response_id(&edit_menu.response),
                     );
                 }
-                ui.menu_button("Insert", |ui| {
+                let insert_menu = ui.menu_button("Insert", |ui| {
                     if gate(ui, why_edit, egui::Button::new("Neuron (I)")).clicked() {
                         self.mode = Mode::Insert;
                         ui.close();
                     }
-                    if gate(ui, why_edit, egui::Button::new("2D grid…")).clicked() {
+                    let grid2d = gate(ui, why_edit, egui::Button::new("2D grid…"));
+                    super::hl(ui, "menu_grid2d_item", grid2d.rect);
+                    if grid2d.clicked() {
                         self.dlg = Some(Dialog::Grid2d {
                             group: "grid".into(),
                             w: 20,
@@ -211,7 +213,9 @@ impl EditorApp {
                         });
                         ui.close();
                     }
-                    if gate(ui, why_edit, egui::Button::new("Input…")).clicked() {
+                    let input_item = gate(ui, why_edit, egui::Button::new("Input…"));
+                    super::hl(ui, "menu_input_item", input_item.rect);
+                    if input_item.clicked() {
                         self.dlg = Some(Dialog::NewInput {
                             name: "input".into(),
                             weight: 20.0,
@@ -309,7 +313,27 @@ impl EditorApp {
                         ui.close();
                     }
                 });
+                // Stage 25: the Insert menu is a tutorial target.
+                super::hl(ui, "menu_insert", insert_menu.response.rect);
                 ui.menu_button("Help", |ui| {
+                    if ui.button("Tutorial").clicked() {
+                        // Same rule as first open: an empty net begins
+                        // straight away, a live one asks before clearing.
+                        let empty = self
+                            .ctl
+                            .shared
+                            .read()
+                            .unwrap()
+                            .geo
+                            .as_ref()
+                            .is_none_or(|g| g.pos.is_empty() && g.inputs.is_empty());
+                        if empty {
+                            self.tutorial_begin();
+                        } else {
+                            self.dlg = Some(Dialog::TutorialClear);
+                        }
+                        ui.close();
+                    }
                     if ui.button("Manual  (?)").clicked() {
                         self.win.manual = true;
                         ui.close();

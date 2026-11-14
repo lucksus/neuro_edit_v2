@@ -77,9 +77,20 @@ impl EditorApp {
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
                             ui.spacing_mut().interact_size.y = PANEL_CONTROL_H;
-                            self.tools_section(ui, &ic);
-                            self.run_section(ui, &ic);
-                            self.view_section(ui, &ic);
+                            if self.tut_active() {
+                                // Stage 25: fewer, bigger controls — only
+                                // the sections the current step needs.
+                                if matches!(self.tut.step, 0 | 1 | 2 | 4 | 5) {
+                                    self.tools_section(ui, &ic);
+                                }
+                                if self.tut.step >= 3 {
+                                    self.run_section(ui, &ic);
+                                }
+                            } else {
+                                self.tools_section(ui, &ic);
+                                self.run_section(ui, &ic);
+                                self.view_section(ui, &ic);
+                            }
                         });
                 });
         } else {
@@ -98,6 +109,15 @@ impl EditorApp {
                     for (m, t, name) in modes(&ic) {
                         let why = if m == Mode::Navigate { None } else { why_edit };
                         let mut r = gate(ui, why, icons::selectable(shown == m, t, ""));
+                        super::hl(
+                            ui,
+                            match m {
+                                Mode::Insert => "tool_insert",
+                                Mode::Connect => "tool_connect",
+                                _ => "tool_other",
+                            },
+                            r.rect,
+                        );
                         if r.clicked() && shown != m {
                             shown = m;
                             r.mark_changed();
@@ -112,7 +132,9 @@ impl EditorApp {
                     // reachable even from the rail.
                     let live = self.sim.running || self.sim.busy;
                     let t = if live { &ic.stop } else { &ic.run };
-                    if gate(ui, None, icons::icon_button(t))
+                    let rb = gate(ui, None, icons::icon_button(t));
+                    super::hl(ui, "run_btn", rb.rect);
+                    if rb
                         .on_hover_text(if live { "Stop" } else { "Run" })
                         .clicked()
                     {
@@ -145,6 +167,15 @@ impl EditorApp {
                         ui,
                         why,
                         icons::selectable(shown == m, t, name).min_size(egui::vec2(w, 32.0)),
+                    );
+                    super::hl(
+                        ui,
+                        match m {
+                            Mode::Insert => "tool_insert",
+                            Mode::Connect => "tool_connect",
+                            _ => "tool_other",
+                        },
+                        r.rect,
                     );
                     if r.clicked() && shown != m {
                         shown = m;
@@ -224,10 +255,9 @@ impl EditorApp {
             (&ic.run, "RUN")
         };
         let w = ui.available_width();
-        if ui
-            .add(icons::button(t, label).min_size(egui::vec2(w, 36.0)))
-            .clicked()
-        {
+        let rb = ui.add(icons::button(t, label).min_size(egui::vec2(w, 36.0)));
+        super::hl(ui, "run_btn", rb.rect);
+        if rb.clicked() {
             if live {
                 self.ctl.abort_now();
                 self.send(ClientMsg::AutoRun(false));

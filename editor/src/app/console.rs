@@ -76,6 +76,7 @@ impl EditorApp {
                         .font(egui::TextStyle::Monospace)
                         .layouter(&mut lay);
                     let r = ui.add(te);
+                    super::hl(ui, "console_input", r.rect);
                     // history
                     if r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
                         let idx = self
@@ -102,6 +103,7 @@ impl EditorApp {
                     }
                     let why = self.why(Act::Eval);
                     let run = gate(ui, why, egui::Button::new("Run"));
+                    super::hl(ui, "console_run", run.rect);
                     let enter = why.is_none()
                         && r.has_focus()
                         && ui.input(|i| {

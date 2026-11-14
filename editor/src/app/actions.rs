@@ -90,8 +90,10 @@ impl EditorApp {
     }
 
     /// Selection → watched neurons for v plots (8 lowest selected ids —
-    /// a HashSet's iteration order is effectively random, U8).
-    pub(super) fn update_watch(&mut self) {
+    /// a HashSet's iteration order is effectively random, U8). `pub`
+    /// like the other driver-surface methods — the tutorial test calls
+    /// it the way update() does each frame.
+    pub fn update_watch(&mut self) {
         let mut ids: Vec<u32> = self
             .selection
             .iter()

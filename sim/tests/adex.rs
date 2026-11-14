@@ -267,10 +267,7 @@ fn vpeak_cut(backend: BackendKind) {
     let counts = sim.spike_counts(usize::MAX).unwrap();
     assert!(counts[0] >= 2, "{backend:?}: cell must fire: {counts:?}");
     let states = sim.drain_watch().unwrap();
-    let vmax = states[0]
-        .iter()
-        .flatten()
-        .fold(f32::MIN, |a, &v| a.max(v));
+    let vmax = states[0].iter().flatten().fold(f32::MIN, |a, &v| a.max(v));
     assert!(
         vmax <= adex::TONIC[9],
         "{backend:?}: v must be cut at Vpeak={} — got {vmax}",

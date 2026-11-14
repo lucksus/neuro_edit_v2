@@ -275,6 +275,9 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
         .show(ctx, |ui| {
             let (rect, resp) =
                 ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            // Stage 25: the tutorial's "click a neuron" step outlines
+            // the scene itself.
+            crate::app::hl(ui, "scene", rect);
             let (w, h) = (rect.width(), rect.height());
             if w < 8.0 || h < 8.0 {
                 return;

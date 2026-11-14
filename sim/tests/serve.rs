@@ -1070,9 +1070,8 @@ fn examples_reset_sim_settings_on_clear() {
                 include_str!("../../examples/first_spikes.rhai")
             ),
         });
-        let evs = rig.until(|m| {
-            matches!(m, ServerMsg::Console(l) if l.contains(&format!("SPK {tag}")))
-        });
+        let evs =
+            rig.until(|m| matches!(m, ServerMsg::Console(l) if l.contains(&format!("SPK {tag}"))));
         evs.iter()
             .find_map(|e| match &e.msg {
                 ServerMsg::Console(l) => l
@@ -1119,10 +1118,12 @@ fn new_net_resets_sim_settings() {
         kick: 8.0,
     });
     rig.send(ClientMsg::SetDtMs(0.5));
-    rig.until(|m| matches!(
-        m,
-        ServerMsg::Status { cfg, .. } if cfg.noise_rate_hz == 60.0 && cfg.dt_ms == 0.5
-    ));
+    rig.until(|m| {
+        matches!(
+            m,
+            ServerMsg::Status { cfg, .. } if cfg.noise_rate_hz == 60.0 && cfg.dt_ms == 0.5
+        )
+    });
     rig.send(ClientMsg::NewNet);
     rig.until(|m| {
         matches!(m, ServerMsg::Status { cfg, .. } if {

@@ -30,6 +30,10 @@ mod script;
 mod state;
 mod sync;
 mod toolbar;
+mod tutorial;
+
+pub(crate) use tutorial::hl;
+pub use tutorial::{TutUi, N_STEPS, P_DONE, P_SKIPPED, P_UNSEEN};
 
 #[cfg(not(target_arch = "wasm32"))]
 use files::local_files_root;
@@ -142,8 +146,9 @@ pub struct EditorApp {
     plane_geo: u64,
     plane_cfgs_last: Vec<crate::plane::PlaneCfg>,
 
-    /// Console input/history + server-error unread state.
-    console: ConsoleUi,
+    /// Console input/history + server-error unread state. `pub` so the
+    /// tutorial driver/test can read the prefilled snippet it evals.
+    pub console: ConsoleUi,
     /// Which floating windows are open (+ manual page) — view.rs's
     /// number-key shortcuts toggle these directly.
     pub win: Windows,
@@ -155,6 +160,11 @@ pub struct EditorApp {
     script: ScriptUi,
     /// Server jobs (list + live progress rows + last opened detail).
     jobs: JobsUi,
+
+    /// Stage 25 first-open tutorial — card, step machine, persisted byte.
+    pub tut: TutUi,
+    /// A `--script` launch isn't a first-open — never auto-start.
+    pub tut_never: bool,
 
     /// Run-controls state (speed/backend/busy/dt/noise) — toolbar run
     /// cluster, fed by `Shared` snapshots.
@@ -296,6 +306,9 @@ pub enum Dialog {
         path: String,
     },
     About,
+    /// Stage 25: the tutorial asked to clear a non-empty net before
+    /// starting (the clear itself is a NewNet — undoable).
+    TutorialClear,
 }
 
 /// Files-window state: a listing of the user's space (remote per-user
@@ -575,6 +588,10 @@ pub struct Persisted {
     /// `remember me`: (server base-url, session token).
     #[serde(default)]
     pub token: Option<(String, String)>,
+    /// Stage 25 tutorial: 0 unseen / 1 done / 2 skipped — auto-starts
+    /// only on 0.
+    #[serde(default)]
+    pub tutorial: u8,
 }
 
 /// Which floating windows are open.
@@ -615,6 +632,7 @@ impl EditorApp {
         let persisted = storage.and_then(|s| eframe::get_value::<Persisted>(s, "state"));
         let wins = persisted.as_ref().map(|p| p.windows).unwrap_or_default();
         let persisted_token = persisted.as_ref().and_then(|p| p.token.clone());
+        let persisted_tutorial = persisted.as_ref().map(|p| p.tutorial).unwrap_or(0);
         let recent: VecDeque<String> = persisted
             .map(|p| p.recent.into_iter().collect())
             .unwrap_or_default();
@@ -693,6 +711,11 @@ impl EditorApp {
             },
             script: ScriptUi::default(),
             jobs: JobsUi::default(),
+            tut: TutUi {
+                persist: persisted_tutorial,
+                ..Default::default()
+            },
+            tut_never: false,
             show_grid: true,
             show_synapses: true,
             insert_inh: false,
@@ -763,6 +786,7 @@ impl eframe::App for EditorApp {
                 left_panel: self.win.left_panel,
             },
             token: self.login.saved_token.clone(),
+            tutorial: self.tut.persist,
         };
         eframe::set_value(storage, "state", &p);
         secure_storage_file();
@@ -798,6 +822,10 @@ impl eframe::App for EditorApp {
         }
         crate::view::with_gpu(rs, |gpu| self.sync_shared(gpu));
         self.update_watch();
+        // Stage 25: once the first Geo has landed, decide the tutorial's
+        // start (empty → begin, non-empty → ask, done/skip → never).
+        self.tutorial_boot();
+        self.tutorial_tick();
         // Stage 23 review drivers — applied once the scripted Geo provides
         // what they name (same late-arrival pattern as --watch).
         for spec in &self.shot_group_modes {
@@ -889,6 +917,9 @@ impl eframe::App for EditorApp {
         self.status_bar(ctx);
         self.hints_bar(ctx);
         self.disconnect_banner(ctx);
+        // Stage 25: the tutorial bar docks here — above the hints line,
+        // spanning the full width so it can never cover the scene.
+        self.tutorial_panel(ctx);
         // The fixed docks carve their space off the usable rect before
         // any floating window is laid out, so windows can never slide
         // under a dock — Plots can't cover the inspector, nothing covers
@@ -906,6 +937,9 @@ impl eframe::App for EditorApp {
         self.keys_window(ctx);
         self.manual_window(ctx);
         self.dialog(ctx);
+        // Stage 25: pulsing outlines on whatever the step points at —
+        // foreground, after every panel/window has registered its rect.
+        self.tutorial_overlay(ctx);
 
         crate::view::viewport(self, ctx, rs);
         // Stage 14 E: repaint on demand, not unconditionally — a quiet app

@@ -79,6 +79,9 @@ impl EditorApp {
             Dialog::About => {
                 self.dlg_about(ctx, &mut open, &mut keep);
             }
+            Dialog::TutorialClear => {
+                self.dlg_tutorial_clear(ctx, &mut open, &mut keep);
+            }
         }
         if open && keep {
             self.dlg = Some(d);
@@ -135,7 +138,9 @@ impl EditorApp {
             // U8: show the size before Create — a stray
             // 1000×1000 used to go straight to the wire.
             ui.label(format!("= {} neurons", (*w).max(0) * (*h).max(0)));
-            if gate(ui, self.why(Act::Edit), egui::Button::new("Create")).clicked() {
+            let create = gate(ui, self.why(Act::Edit), egui::Button::new("Create"));
+            super::hl(ui, "dlg_primary", create.rect);
+            if create.clicked() {
                 let (g, w2, h2, d2) = (group.clone(), *w, *h, *dist);
                 self.edit_net(NetEdit::CreateGrid2d {
                     group: g,
@@ -337,9 +342,9 @@ impl EditorApp {
                     })
                     .collect();
                 ui.label(format!("{} targets (from selection)", targets.len()));
-                if gate(ui, self.why(Act::Edit), egui::Button::new("Create")).clicked()
-                    && !targets.is_empty()
-                {
+                let create = gate(ui, self.why(Act::Edit), egui::Button::new("Create"));
+                super::hl(ui, "dlg_primary", create.rect);
+                if create.clicked() && !targets.is_empty() {
                     let n2 = name.clone();
                     let wt = *weight;
                     let tw: Vec<(u32, f32)> = targets.iter().map(|&t| (t, wt)).collect();
@@ -510,6 +515,44 @@ impl EditorApp {
                     self.send(ClientMsg::ListFiles { path: p });
                 }
             }
+        });
+    }
+
+    /// Stage 25: the tutorial needs an empty net — when one is already
+    /// open (first-open boot or Help > Tutorial), ask before clearing.
+    /// The clear is a plain `NewNet`, so Undo restores the old net.
+    fn dlg_tutorial_clear(&mut self, ctx: &egui::Context, open: &mut bool, keep: &mut bool) {
+        app_win(ctx, "Tutorial").open(open).show(ctx, |ui| {
+            ui.label(
+                "The tutorial starts from an empty net.\n\
+                     A network is already open — replace it?\n\
+                     (Undo brings it back — the clear is one undo step.)",
+            );
+            ui.add_space(4.0);
+            if gate(
+                ui,
+                self.why(Act::NewLoad),
+                egui::Button::new("Start tutorial"),
+            )
+            .clicked()
+            {
+                self.send(ClientMsg::NewNet);
+                self.net_path = None;
+                self.net_label = None;
+                self.tutorial_begin();
+                *keep = false;
+            }
+            ui.horizontal(|ui| {
+                if ui.button("Skip tutorial").clicked() {
+                    self.tutorial_end(super::tutorial::P_SKIPPED);
+                    *keep = false;
+                }
+                if ui.button("Not now").clicked() {
+                    // Session-level decline — the byte stays Unseen,
+                    // so the next launch offers it again.
+                    *keep = false;
+                }
+            });
         });
     }
 

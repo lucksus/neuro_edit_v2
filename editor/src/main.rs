@@ -102,6 +102,10 @@ struct Cli {
     /// review screenshots.
     #[arg(long)]
     window_size: Option<String>,
+    /// Stage 25 review driver: force the tutorial to step N (0-6 card,
+    /// 7 = done card) for screenshots — skips the boot/persist path.
+    #[arg(long)]
+    tutorial_step: Option<usize>,
 }
 
 #[cfg(feature = "native")]
@@ -215,6 +219,10 @@ fn main() -> anyhow::Result<()> {
         .and_then(|(w, h)| w.parse::<f32>().ok().zip(h.parse::<f32>().ok()))
         .unwrap_or((1440.0, 900.0));
     let net_path = cli.net.clone();
+    // A scripted launch isn't a first-open — except when a --tutorial-step
+    // driver is forcing the tutorial for a screenshot anyway.
+    let tut_never = cli.script.is_some() && cli.tutorial_step.is_none();
+    let tut_step = cli.tutorial_step;
 
     let icon_img = image::load_from_memory(include_bytes!("../assets/icon_256.png"))
         .expect("icon")
@@ -269,6 +277,8 @@ fn main() -> anyhow::Result<()> {
             app.shot_sel = shot_sel.clone();
             app.open_menu = open_menu.clone();
             app.shot_move = shot_move;
+            app.tut_never = tut_never;
+            app.tut.force_step = tut_step;
             // dark theme — set_theme, not set_visuals: eframe applies the
             // system light scheme AFTER the app creator, which would undo
             // a bare set_visuals(dark) on light desktops/browser OS themes
