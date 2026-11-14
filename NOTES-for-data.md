@@ -278,7 +278,7 @@ speed slider 20×, plane selectors, synapses/grid/script checkboxes, WASD
 pan, dbl-click focus, Shift-add select, Recent files.
 
 Docs added: `docs/features.md` (full feature inventory + architecture),
-`docs/scripting.md` (complete Rhai API reference), `docs/tutorial.md`
+`docs/scripting.md` (complete Rhai API reference), `docs/tutorial-lsm-hidden.md`
 (LSM walkthrough), README screenshot (`docs/screenshots/editor_lsm.png`,
 tracked via targeted .gitignore exception; `liquid_97k.png` now tracked
 too).
@@ -3338,3 +3338,217 @@ after ≥30 s of Run (see each shot's status bar).
 - `editor/web/build.sh` — OK. `cargo fmt --check` — clean.
 - Spike regression vs c063b03: only AdEx nets change (documented bug);
   every izh net is bit-identical (gain = 1.0f).
+
+## Stage 25 — first-open tutorial, doc-settings reset, post-Dale reruns
+
+### First-open tutorial (Nico's "the UI should grow with the user's steps")
+
+A docked bottom bar (`editor/src/app/tutorial.rs`) walks a new user
+through seven real gestures — add a neuron, add an input, wire
+input→neuron, press Run and see a spike, grow to ≥5 neurons, select
+one for live v(t), run a prefilled console snippet — and advances only
+on worker-published state (`Shared` geo, snapshot rate/spikes, the
+snippet's marker line in the console log). There is no Next button; a
+pulsing gold outline marks the control each step means via per-frame
+temp rects registered by the widgets themselves (a closed menu or
+dialog simply has nothing to stroke). Skip on every card.
+
+- **Persistence**: one byte in `Persisted.tutorial` (eframe storage —
+  native config dir, web localStorage): 0 unseen → auto-start on the
+  first hydrated empty net; 1 done; 2 skipped — never re-asks. `Not
+  now` on the clear dialog leaves it unseen so the next launch offers
+  again. Help ▸ Tutorial reopens it any time.
+- **Non-empty net**: first-open boot and Help ▸ Tutorial both route
+  through `Dialog::TutorialClear`; the clear is a plain `NewNet`, so
+  Undo restores the previous net.
+- **Reduced chrome**: while a card is up the left dock keeps only the
+  sections the step needs (tools for steps 0–2/4/5, run cluster from
+  step 3) and floating panels stay closed until their step asks —
+  inspector opens at "inspect", console opens prefilled at "script".
+  Done/skip restores the saved window flags. Stage 22 gating is
+  untouched: `gate()`/`Act` still decide what's clickable, the
+  tutorial only decides what's *drawn*.
+- **`--tutorial-step N`** drives it for screenshots (0–6 cards, 7 done
+  card); a `--script` launch is not a first-open (`tut_never`) unless
+  the driver explicitly forces a step.
+- **Tests** (`editor/tests/tutorial.rs`): drives all seven transitions
+  through real `NetEdit`/`AutoRun`/`Eval`/selection→watch actions on a
+  live worker — no button presses. Sabotage check done: gating step
+  2's detector to false hangs the test (verified fail, then restored).
+  Skip persists + restores chrome; the persisted byte round-trips
+  through a mock `eframe::Storage` and suppresses re-boot.
+- **Docs**: the old `docs/tutorial.md` (the LSM walkthrough) is now
+  `docs/tutorial-lsm-hidden.md` (links fixed); `docs/getting-started.md`
+  matches the in-app steps.
+
+### Examples/New net reset document sim settings (81818e1)
+
+Data's live check: after an LSM example (`sim.set_noise(60, …)`),
+`first_spikes` produced 247 spikes instead of 265 — document-level
+`SimConfig` survived `net.clear()`/New net/example loads.
+
+`reset_doc_cfg` now runs on every document-replacement path —
+`net.clear()`, `net.load()`, `ClientMsg::NewNet`, `ClientMsg::LoadNet`,
+and the examples' own rebuild — and restores every *document* field to
+its `SimConfig::default()`: **dt_ms, synapse_tau_ms, readout_tau_ms,
+noise_rate_hz, noise_kick_mv, seed, int_weights**. Worker-only
+publish flags are deliberately kept (`record_spikes`,
+`spike_record_steps` — they're how the editor asked for its data, not
+document state). The stashed `DriveState` is dropped on the same
+paths, so a fresh document can't silently inherit the old one's
+in-flight input program. Undo snapshots now carry the sim config, so
+undoing a New net restores the old document's settings too.
+
+**Console scripts are NOT reset**: an `Eval` that doesn't call
+`sim.set_*` keeps the session's settings — silently clearing a user's
+mid-session knobs would be worse. Examples are documents, so they
+start clean. Tests (`sim/tests/serve.rs`): lsm_readout → first_spikes
+reproduces the fresh 265 (sabotage — skipping the reset — reproduced
+the exact 247, verified then restored); settings survive a plain eval;
+undo restores them.
+
+### Post-Dale reruns (all at HEAD, CUDA, int-weights)
+
+Old numbers predate `38000d0` (M1 Dale's law: inhibitory sources emit
+−|w|). Logs in `review/stage25_runs/`; per-metric old vs new:
+
+**`lsm_hidden.rhai`** — 8 sources/4 pairs, 512-neuron izh liquid,
+12 seeds × 500 perms (old: pre-Dale header run ~`35e0ef6`, CPU;
+Stage-17 A5 reran it post-Dale at `0c80b56` — the new numbers match
+that rerun exactly, deterministic):
+
+| metric | old pre-Dale | old post-Dale (A5) | new (this run) |
+|---|---|---|---|
+| main ridge_auc | 0.874 ± 0.032 | 0.878 ± 0.039 | 0.878 ± 0.039 |
+| main delta_auc | 0.880 ± 0.030 | 0.895 ± 0.040 | 0.895 ± 0.040 |
+| main (val) ridge | 0.860 ± 0.028 | 0.874 ± 0.041 | 0.874 ± 0.041 |
+| signal off ridge | 0.484 ± 0.035 | 0.495 ± 0.046 | 0.495 ± 0.046 |
+| raw baseline ridge | 0.482 ± 0.046 | 0.482 ± 0.046 | 0.482 ± 0.046 |
+| cooc (28-d) ridge | 1.000 | 1.000 | 1.000 |
+| perm null mean/sd | 0.502 / 0.189 | 0.501 / 0.142 | 0.501 / 0.142 |
+| mean per-seed p | 0.003 | 0.002 | 0.002 |
+| sweep s=0 (seed 11) | liq 0.445 / cooc 0.533 | — | liq 0.529 / cooc 0.533 |
+| sweep s=0.5 | liq 0.793 / cooc 1.0 | — | liq 0.827 / cooc 1.0 |
+| sweep s=0.8 | liq 0.894 / cooc 1.0 | — | liq 0.877 / cooc 1.0 |
+| sweep s=1.0 | liq 0.937 / cooc 1.0 | — | liq 0.962 / cooc 1.0 |
+
+**Conclusion holds**: hidden-correlation detection is real (per-seed
+p≈0.002, signal-off/raw at chance), and the trivial coincidence
+baseline still wins the task outright. Dale's law barely moved this
+one — the liquid's job here is rate shaping, not E/I sign.
+
+**`detector.rhai`** — `det_corr`, 8 ch × 45 s, 3 seeds, readout at
+delay (old: Stage-6 `10d7803` merged + Stage-7 `124e8a1` slow-inh
+delay sweep, CPU):
+
+| setting / delay | old | new |
+|---|---|---|
+| merged, d=0: liquid | 0.739 ± 0.014 | 0.769 ± 0.028 |
+| merged, d=0: val | 0.666 ± 0.051 | 0.649 ± 0.038 |
+| merged, d=0: raw / cooc | 0.710 / 0.819 | 0.710 / 0.819 |
+| merged, d=0: pooled p | 0.114 | 0.111 |
+| slow-inh, d=0: liquid | 0.668 ± 0.018 | **0.802 ± 0.034** |
+| slow-inh, d=0: pooled p | 0.049 | 0.039 |
+| slow-inh, d=100: liquid | 0.634 ± 0.047 | **0.500 ± 0.075** |
+| slow-inh, d=100: raw / cooc | 0.489 / 0.614 | 0.489 / 0.614 |
+| slow-inh, d=100: pooled p | 0.038 | 0.522 |
+
+**Conclusion changed — the Stage-7 memory claim dies under Dale's
+law.** At delay 0 the slow-inhibition liquid now reads *better* than
+the old number (0.802 vs 0.668 — pre-Dale, sources emitting +|w|
+through "inhibitory" edges were corrupting the slow-inh structure it
+was supposed to test; cooc at 0.819 still edges it, unchanged). But at
++100 ms the old 0.634 ± 0.047 collapses to chance — 0.500 ± 0.075,
+pooled p 0.52, no seed above its own null. What Stage 7 read as
+"the liquid retains what the stream has lost" was partly the
+inhibition-can-excite bug inflating the delayed window. The honest
+detector story is now: real detection at delay 0 (still beaten by the
+28-d coincidence baseline), and *no demonstrated liquid readout
+advantage at +100 ms* on this task.
+
+**`memory_window.rhai` v2** — `mem_corr2`, 5 seeds, 20 ms window at
+delay after onset (old: Stage-7 `124e8a1`, CPU):
+
+| setting | +0 | +5 | +10 | +20 | +50 | +100 | +200 | horizon |
+|---|---|---|---|---|---|---|---|---|
+| merged (τ=2ms) old | .741 | .719 | .637 | .618 | .574 | .518 | .517 | 50 |
+| merged new | .739±.006 | .717±.006 | .625±.005 | .604±.015 | .560±.012 | .527±.015 | .518±.012 | 50 |
+| rec τ=20ms old | .724 | .717 | .707 | .707 | .645 | .570 | .526 | 100 |
+| rec τ=20ms new | .746±.004 | .752±.010 | .744±.009 | .733±.010 | .652±.017 | .552±.018 | .519±.018 | 50 |
+| slow-inh (20/50) old | .715 | .699 | .697 | .701 | .638 | .608 | .531 | 100 |
+| slow-inh (20/50) new | .745±.008 | .749±.012 | .741±.007 | .729±.011 | .633±.018 | .562±.015 | .514±.022 | 100 |
+| raw counts old | .747 | .666 | .551 | .516 | .513 | .527 | .481 | ~10 |
+| raw counts new | .747 | .666 | .551 | .516 | .513 | .527 | .481 | ~10 |
+
+The rest of the sweep (old → new):
+
+| setting | +0 | +5 | +10 | +20 | +50 | +100 | +200 | horizon |
+|---|---|---|---|---|---|---|---|---|
+| rec τ=5ms old | .741 | .737 | .707 | .679 | .584 | .517 | .512 | 50 |
+| rec τ=5ms new | .737±.004 | .726±.006 | .686±.016 | .644±.011 | .578±.023 | .528±.010 | .515±.004 | 50 |
+| rec τ=50ms old | .656 | .622 | .622 | .595 | .551 | .519 | .521 | 50 |
+| rec τ=50ms new | .751±.013 | .754±.012 | .753±.014 | .746±.015 | .682±.005 | .643±.021 | .588±.035 | **200** |
+| rec τ=100ms old | .622 | .593 | .591 | .557 | .535 | .529 | .514 | 20 |
+| rec τ=100ms new | .743±.016 | .730±.021 | .721±.020 | .716±.019 | .654±.015 | .625±.023 | .579±.045 | **200** |
+| rec50 w_rec×2 old | .600 | .572 | .529 | .502 | .502 | .492 | .499 | 5 |
+| rec50 w_rec×2 new | .558±.043 | .553±.026 | .532±.024 | .525±.017 | .512±.019 | .500±.024 | .515±.030 | 5 |
+
+(Per-delay null: 0.499 ± 0.025–0.026 on every run — deterministic;
+raw counts are byte-identical, the dataset is.)
+
+**Conclusion changed — the tau sweep inverts under Dale's law.** The
+Stage-7 claim "per-synapse tau ~20 ms doubles the readable horizon
+(50 → 100 ms)" was measured on a net whose inhibitory edges could
+excite. Post-Dale the picture reshuffles: τ=20 ms loses its edge
+(horizon 100 → 50, the +100 ms cell .570 → .552 slips under
+null+2sd), while the *longer* taus — the ones that looked worst —
+now hold significance to the measured edge: τ=50 and τ=100 both reach
+horizon 200 (still clearing the null at +200 ms: .588/.579 vs
+~.55 pass line). Physically consistent: pre-Dale, a long-tau
+"inhibitory" trace injected more wrong-sign drive and smeared the
+event; now long excitatory traces genuinely sustain and inhibitory
+traces genuinely subtract, so the reservoir keeps event structure
+readable for at least 200 ms. Slow-inh still posts horizon 100 but
+its +100 cell weakened (.608 → .562) — coherent with the detector
+task's +100 ms cell dying outright (0.634 → 0.500): on the sparse
+`det_corr` bursts there is no demonstrated liquid readout advantage
+past ~50 ms even though `mem_corr2`'s denser stream keeps slow-inh at
+horizon 100. The new honest claim is stronger and different: *long
+per-synapse taus (τ≥50 ms) extend the readable horizon to at least
+the +200 ms edge of this dataset* — τ=20 is no longer special, and
+the open question "what pushes the horizon past 200 ms" replaces
+"past 100 ms". Run notes: the serial run completed `merged` before
+the sweep was split one-process-per-setting onto the same GPU
+(identical seeds/delays/dataset/nulls — pure partition); logs:
+`memory_window.log` + `memory_window_<setting>.log`.
+
+### Leftovers from Data's Stage-24 look
+
+- **Plots clipped at 800×700** (d723ba8): the single `ui.horizontal`
+  tab row needed ~560 px inside a ~460 px usable strip between docks,
+  so egui clipped it at the inspector boundary. `horizontal_wrapped`
+  lets the tabs reflow — `stage25_plots_800700.png`.
+- **AdEx v(t) ~400–500 mV peaks** (4e5f43e): real sim state, not a
+  plot artifact. The AdEx Euler step crosses threshold, evaluates the
+  exponential term (clamped at exp(10) ≈ 22026), and stores ~490 mV
+  for one step before the next-step reset. Brette–Gerstner cuts the
+  trace at the peak: stored `v` is now clamped to `Vpeak` *after* the
+  `w` update, so `w` dynamics and spike counts are byte-identical —
+  only the published trace is cut. Same clamp in the generated CUDA.
+  `sim/tests/adex.rs` asserts watched v ≤ Vpeak with ≥2 spikes on CPU
+  and CUDA — `stage25_adex_v_1440900.png`.
+
+### Open questions
+
+- memory_window answered the detector's doubt in the other direction:
+  the curve didn't flatten, it inverted — τ=50/100 now reach +200 ms
+  (the dataset's edge). What pushes the readable horizon past 200 ms,
+  and does a longer dataset move it further or show the real limit?
+- The det_corr task still shows no liquid advantage past ~50 ms on its
+  sparse bursts — is that a task property (bursts too short for the
+  reservoir state to outlive them) or a parameter property?
+- `lsm_readout`'s Dale-retuned coincidence mechanism (W_IN 2.8) still
+  stands — the lsm_hidden rerun is deterministic-identical to A5.
+- `examples/lsm.ne2` stays the 216-neuron/855-synapse fixture (the
+  experiment's 512-neuron save was reverted — fixtures don't move with
+  experiment runs).
