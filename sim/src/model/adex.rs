@@ -153,7 +153,12 @@ impl NeuronModel for AdEx {
 
     /// Same order as the izh step and the CUDA text below: reset for a
     /// previous crossing, integrate v (clamped exponential), integrate
-    /// w with the NEW v, then the spike check.
+    /// w with the NEW v, then the spike check. Stage 25: the stored v
+    /// is cut at Vpeak after the w update — the Euler step ending above
+    /// Vpeak can overshoot to ~500 mV, but that value is only the
+    /// trace state (the reset on the next step's entry is driven by
+    /// `x[0] >= p[9]`, which stays true at the cut), so dynamics are
+    /// unchanged — Brette & Gerstner's "cut the spike at Vpeak".
     #[inline(always)]
     fn step(&self, p: &[f32], x: &mut [f32], input: f32, dt: f32) -> bool {
         if x[0] >= p[9] {
@@ -163,7 +168,11 @@ impl NeuronModel for AdEx {
         let ex = ((x[0] - p[3]) / p[4]).min(10.0).exp();
         x[0] += dt * (-p[1] * (x[0] - p[2]) + p[1] * p[4] * ex - x[1] + input) / p[0];
         x[1] += dt * (p[5] * (x[0] - p[2]) - x[1]) / p[6];
-        x[0] >= p[9]
+        let spiked = x[0] >= p[9];
+        if x[0] > p[9] {
+            x[0] = p[9];
+        }
+        spiked
     }
 
     fn cuda_step(&self) -> &'static str {
@@ -171,7 +180,8 @@ impl NeuronModel for AdEx {
          float ex = expf(fminf((x[0] - p[3]) / p[4], 10.f));\n\
          x[0] += dt * (-p[1]*(x[0] - p[2]) + p[1]*p[4]*ex - x[1] + I) / p[0];\n\
          x[1] += dt * (p[5]*(x[0] - p[2]) - x[1]) / p[6];\n\
-         spiked = x[0] >= p[9];"
+         spiked = x[0] >= p[9];\n\
+         if(x[0] > p[9]){ x[0] = p[9]; }"
     }
 
     /// AdEx input divides by C: a one-step pulse of `kick/dt` pA moves v

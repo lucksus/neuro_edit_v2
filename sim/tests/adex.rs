@@ -242,6 +242,57 @@ fn adex_noise_drives_lone_neuron_cuda() {
     assert_noise_drives_adex(BackendKind::Cuda);
 }
 
+/// Stage 25 (Data's 4b): the AdEx Euler step ends ~400–500 mV above
+/// Vpeak on the crossing step; the stored v must be cut at Vpeak
+/// (Brette & Gerstner) so watched traces show the peak, not the
+/// runaway. A driven AdEx cell must spike ≥ 2 times and every watched
+/// sample must stay ≤ Vpeak — on both backends. Sabotage: remove the
+/// `x[0] > p[9]` cut in adex.rs → vmax lands in the hundreds.
+fn vpeak_cut(backend: BackendKind) {
+    let net = lone_adex_net();
+    let mut sim = Sim::with_params(
+        &net,
+        SimConfig {
+            record_spikes: true,
+            noise_rate_hz: 0.0,
+            ..Default::default()
+        },
+        backend,
+        sim::state::NeuronParams::from_network(&net).unwrap(),
+    )
+    .unwrap();
+    sim.set_external(0, 1000.0);
+    sim.set_v_watch(&[0]);
+    sim.run_steps(3000).unwrap();
+    let counts = sim.spike_counts(usize::MAX).unwrap();
+    assert!(counts[0] >= 2, "{backend:?}: cell must fire: {counts:?}");
+    let states = sim.drain_watch().unwrap();
+    let vmax = states[0]
+        .iter()
+        .flatten()
+        .fold(f32::MIN, |a, &v| a.max(v));
+    assert!(
+        vmax <= adex::TONIC[9],
+        "{backend:?}: v must be cut at Vpeak={} — got {vmax}",
+        adex::TONIC[9]
+    );
+}
+
+#[test]
+fn adex_v_cut_at_vpeak_cpu() {
+    vpeak_cut(BackendKind::Cpu);
+}
+
+#[test]
+#[cfg(feature = "cuda")]
+fn adex_v_cut_at_vpeak_cuda() {
+    if !sim::cuda_available() {
+        eprintln!("no GPU, skipping");
+        return;
+    }
+    vpeak_cut(BackendKind::Cuda);
+}
+
 /// Same mixed net on CPU alone: the registered model must reach the
 /// sim through `from_network` and every adex neuron must fire and
 /// reset (counts ≥ 2) — keeps the acceptance green on GPU-less hosts.
