@@ -67,13 +67,17 @@ struct UndoEntry {
 }
 
 /// Everything a restore puts back: the net itself, the builder rng (so a
-/// redone `create_connections` doesn't re-roll), and the net generation —
+/// redone `create_connections` doesn't re-roll), the net generation —
 /// restores that cross a generation bump `net_gen` again so clients drop
-/// id-keyed state, same-generation restores keep it.
+/// id-keyed state, same-generation restores keep it — and the sim
+/// settings (Stage 25: `net.clear()`/New net/load also move `cfg`, so a
+/// restore has to put them back too or an undo would leave a dead
+/// document's noise/dt live).
 struct UndoSnap {
     net: Network,
     rng: net_format::Rng,
     gen: u64,
+    cfg: SimConfig,
 }
 
 /// History bounds — steps OR approximate bytes, whichever hits first.
@@ -157,6 +161,7 @@ fn undo_snap(env: &Env) -> UndoSnap {
         net: env.net.borrow().clone(),
         rng: env.rng.borrow().clone(),
         gen: env.net_gen.get(),
+        cfg: env.cfg.borrow().clone(),
     }
 }
 
@@ -170,6 +175,7 @@ fn undo_restore(env: &Env, s: UndoSnap) {
     env.invalidate_sim();
     *env.net.borrow_mut() = s.net;
     *env.rng.borrow_mut() = s.rng;
+    *env.cfg.borrow_mut() = s.cfg;
     if env.net_gen.get() != s.gen {
         env.net_gen.set(env.net_gen.get() + 1);
     }
@@ -656,6 +662,10 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                                 env.invalidate_sim();
                                 *env.net.borrow_mut() = n;
                                 env.net_gen.set(env.net_gen.get() + 1);
+                                // A loaded document brings no drive
+                                // program — drop the stash so its
+                                // same-named inputs start undriven.
+                                *env.drive.borrow_mut() = None;
                                 bump(&env);
                                 push_step(
                                     &mut undo,
@@ -720,6 +730,12 @@ pub fn run(net: Network, opts: ServeOpts, rx: mpsc::Receiver<(u64, ClientMsg)>, 
                         env.invalidate_sim();
                         *env.net.borrow_mut() = Network::new();
                         env.net_gen.set(env.net_gen.get() + 1);
+                        // New document = fresh sim settings — same reset
+                        // `net.clear()` does, so New net and an example's
+                        // first line can't inherit the old run's noise —
+                        // and no stashed drive program.
+                        crate::script::reset_doc_cfg(&env.cfg);
+                        *env.drive.borrow_mut() = None;
                         bump(&env);
                         push_step(
                             &mut undo,
@@ -2560,6 +2576,7 @@ mod tests {
             net,
             rng: net_format::Rng::new(tag as u64),
             gen: tag as u64,
+            cfg: SimConfig::default(),
         }
     }
 

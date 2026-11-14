@@ -1050,6 +1050,93 @@ fn sim_settings_persist_across_sessions() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Stage 25: a fresh document gets fresh sim settings. Every bundled
+/// example opens with `net.clear()`; before this fix the previous run's
+/// `sim.set_noise`/`set_dt`/drive survived into it (Data's live check:
+/// first_spikes gave 247 spikes after an LSM example instead of the
+/// fresh 265). `net.clear()`/`ClientMsg::NewNet` now reset the
+/// document-level cfg to defaults and drop the drive stash.
+/// Sabotage: delete the `reset_doc_cfg` call in `net.clear()` → the
+/// second first_spikes run keeps the leaked 60 Hz noise → counts differ
+/// → this fails.
+#[test]
+fn examples_reset_sim_settings_on_clear() {
+    std::env::set_var("NEURO_QUICK", "1");
+    let rig = start(Network::new(), None);
+    let spikes_of = |tag: &str| -> u64 {
+        rig.send(ClientMsg::Eval {
+            code: format!(
+                "{}\nprint(\"SPK {tag} \" + sim.spikes());",
+                include_str!("../../examples/first_spikes.rhai")
+            ),
+        });
+        let evs = rig.until(|m| {
+            matches!(m, ServerMsg::Console(l) if l.contains(&format!("SPK {tag}")))
+        });
+        evs.iter()
+            .find_map(|e| match &e.msg {
+                ServerMsg::Console(l) => l
+                    .split(&format!("SPK {tag} "))
+                    .nth(1)
+                    .and_then(|t| t.trim().parse::<u64>().ok()),
+                _ => None,
+            })
+            .expect("SPK marker line")
+    };
+    // first_spikes alone on a fresh worker — the baseline count.
+    let fresh = spikes_of("fresh");
+    // lsm_readout leaves 60 Hz × 8 mV background noise live as its
+    // stay-alive tail — the exact leak the fix removes.
+    rig.send(ClientMsg::Eval {
+        code: format!(
+            "{}\nprint(\"LSM_DONE\");",
+            include_str!("../../examples/lsm_readout.rhai")
+        ),
+    });
+    rig.until(|m| matches!(m, ServerMsg::Console(l) if l.contains("LSM_DONE")));
+    let after = spikes_of("after");
+    assert_eq!(
+        fresh, after,
+        "first_spikes after a noisy example must equal the fresh run"
+    );
+    assert!(fresh > 0, "first_spikes produced no spikes at all");
+    rig.stop();
+}
+
+/// The same reset through the UI's New net: Status.cfg — which the
+/// toolbar's noise/dt fields mirror — must read defaults after one.
+/// Sabotage: delete the `reset_doc_cfg` in the NewNet arm → the Status
+/// keeps noise_rate_hz=60 → fails.
+#[test]
+fn new_net_resets_sim_settings() {
+    let mut net = Network::new();
+    net.add_neuron([0.0; 3], net_format::NeuronKind::Excitatory);
+    let rig = start(net, None);
+    rig.send(ClientMsg::Subscribe);
+    rig.until_ev(|e| matches!(e.msg, ServerMsg::Status { .. }) && e.to == Some(CLIENT));
+    rig.send(ClientMsg::SetNoise {
+        hz: 60.0,
+        kick: 8.0,
+    });
+    rig.send(ClientMsg::SetDtMs(0.5));
+    rig.until(|m| matches!(
+        m,
+        ServerMsg::Status { cfg, .. } if cfg.noise_rate_hz == 60.0 && cfg.dt_ms == 0.5
+    ));
+    rig.send(ClientMsg::NewNet);
+    rig.until(|m| {
+        matches!(m, ServerMsg::Status { cfg, .. } if {
+            cfg.noise_rate_hz == 0.0
+                && cfg.noise_kick_mv == 20.0
+                && cfg.dt_ms == net_format::DEFAULT_DT_MS
+                && cfg.synapse_tau_ms == net_format::DEFAULT_SYNAPSE_TAU_MS
+                && cfg.readout_tau_ms == net_format::DEFAULT_READOUT_TAU_MS
+                && !cfg.int_weights
+        })
+    });
+    rig.stop();
+}
+
 /// Q4: AddInput/AddReadout with dangling neuron ids are refused — and
 /// the refusal doesn't wedge the edit stream (a valid edit after still
 /// applies, Q5's server half).

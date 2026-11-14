@@ -517,6 +517,25 @@ fn invalidate(s: &SimSlot, n: &NetHandle, d: &DriveSlot, ver: &Rc<std::cell::Cel
     ver.set(ver.get() + 1);
 }
 
+/// Fresh-document sim settings: the fields `Meta` round-trips (dt,
+/// taus, noise, seed) plus `int_weights` go back to their defaults.
+/// `record_spikes`/`spike_record_steps` stay — they are the worker's
+/// publish infrastructure, not document settings a script can set.
+/// Called by `net.clear()` and `ClientMsg::NewNet`: a replaced document
+/// must not silently inherit the previous run's `sim.set_noise`/`set_dt`
+/// (Data's Stage-24 check: first_spikes ran at 247 spikes instead of
+/// 265 after an LSM example left 60 Hz noise live).
+pub fn reset_doc_cfg(cfg: &CfgHandle) {
+    let mut c = cfg.borrow_mut();
+    let rs = c.record_spikes;
+    let steps = c.spike_record_steps;
+    *c = SimConfig {
+        record_spikes: rs,
+        spike_record_steps: steps,
+        ..SimConfig::default()
+    };
+}
+
 /// Net changed in a way the sim does not see (readout weights, samples,
 /// script list): bump the version only, so the editor republishes geometry.
 fn bump(ver: &Rc<std::cell::Cell<u64>>) {
@@ -746,16 +765,23 @@ pub fn register_api(
         );
     }
     {
-        let (s, v, g, dr) = (
+        let (s, v, g, c, dr) = (
             sim.clone(),
             net_version.clone(),
             net_gen.clone(),
+            cfg.clone(),
             drive.clone(),
         );
         engine.register_fn("clear", move |n: &mut NetHandle| {
             *n.borrow_mut() = Network::new();
             g.set(g.get() + 1);
             invalidate(&s, n, &dr, &v);
+            // Clearing the document also clears its sim settings — the
+            // new net's meta is `Network::new().meta`, all defaults —
+            // and drops the stashed drive program so a same-named input
+            // can't silently inherit the old run's drive.
+            reset_doc_cfg(&c);
+            *dr.borrow_mut() = None;
         });
     }
     engine.register_fn("neuron_count", |n: &mut NetHandle| -> rhai::INT {
@@ -1651,6 +1677,10 @@ pub fn register_api(
                 *n.borrow_mut() = loaded;
                 g.set(g.get() + 1);
                 invalidate(&s, n, &dr, &v);
+                // A loaded document brings no drive program — like
+                // `net.clear()`, the stash from the previous document
+                // must not re-apply to same-named inputs.
+                *dr.borrow_mut() = None;
                 Ok(())
             },
         );
