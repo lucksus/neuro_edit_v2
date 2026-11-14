@@ -163,11 +163,12 @@ the same code path.
 
 ## Documentation
 
+- `docs/getting-started.md` — the first-open tutorial's steps in print form.
 - `docs/features.md` — full feature documentation (editor UI, headless `sim`,
   file format).
 - `docs/scripting.md` — Rhai scripting reference: every `net`/`sim`/readout/
   rng function, with examples.
-- `docs/tutorial.md` — step-by-step walkthrough of the LSM example.
+- `docs/tutorial-lsm-hidden.md` — step-by-step walkthrough of the LSM example.
 - `FEATURE-PARITY.md` — original-editor parity checklist (only items actually
   exercised are ticked).
 - `NOTES-for-data.md` — benchmark numbers, experiment results and open items.

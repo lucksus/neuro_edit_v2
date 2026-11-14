@@ -15,16 +15,16 @@ a `mean ± sd` summary:
 
 ```
 seed 1: liquid 512 neurons, 2256 synapses
-seed 1  main auc=0.877 (val=0.85)  p=0.003  off=0.527  raw=0.501  cooc=1.0
-        null=0.515±0.19
+seed 1  main auc=0.868 (val=0.84)  p=0.003  off=0.527  raw=0.501  cooc=1.0
+        null=0.509±0.151
 …
 === mean ± sd over 12 seeds ===
 main         delta_auc = …   ridge_auc ≈ 0.88 ± 0.03
-main (val)   ridge_auc ≈ 0.86
+main (val)   ridge_auc ≈ 0.87
 signal off   … ≈ 0.5
 raw baseline … ≈ 0.5
 cooc (28-d)  … = 1.000
-permutation null: mean ≈ 0.5 sd ≈ 0.19  pooled p < 0.001
+permutation null: mean ≈ 0.5 sd ≈ 0.14  pooled p < 0.001
 ```
 
 Exact numbers are in `NOTES-for-data.md`. Two honest takeaways: the main
@@ -135,9 +135,9 @@ permutation: NPERM=500 shuffles of the main labels; the ridge is refit per
 **Why a permutation test, not one shuffle?** A single permutation is not a
 valid null here: with 200 training windows in ~500 dimensions the fitted
 noise direction has a large random projection onto the true class axis, so
-one draw can sit anywhere in [0,1] (measured sd ≈ 0.19; seeds 7 and 42 once
+one draw can sit anywhere in [0,1] (measured sd ≈ 0.14; seeds 7 and 42 once
 reported ~0.3 — that was the reviewer complaint). 500 draws per seed give a
-real null distribution — mean ≈ 0.5, sd ≈ 0.19 — and a p-value with ~0.002
+real null distribution — mean ≈ 0.5, sd ≈ 0.14 — and a p-value with ~0.002
 resolution. (An earlier version paired each permutation with its complement
 to force the mean to exactly 0.5 by symmetry; the honest version just uses
 more draws.)

@@ -205,7 +205,7 @@ Bit-stream generator for correlation experiments
 `window(steps, event, pairs, strength)` returns a `steps × n_src` matrix;
 when `event` is true, each `[i,j]` pair shares a common Bernoulli bit with
 probability `strength` per step — pairwise correlation with unchanged
-marginals. See `docs/tutorial.md` for the full experiment.
+marginals. See `docs/tutorial-lsm-hidden.md` for the full experiment.
 
 ```rhai
 let gen = rng_stream(11, 8, 0.5);
