@@ -36,7 +36,10 @@ impl EditorApp {
             .default_size(dr.size())
             .default_pos(dr.min)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
+                // Wrapped so the tab bar reflows instead of clipping
+                // when the strip between the docks is narrower than
+                // the row (~460px at 800px wide) — Stage 25.
+                ui.horizontal_wrapped(|ui| {
                     if let Some(ic) = &self.icons {
                         // One tab per state slot of the plot model —
                         // labels and ranges ride the descriptors, so a
