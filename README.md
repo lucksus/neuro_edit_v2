@@ -68,6 +68,16 @@ AUC 1.0 — plainly better than the liquid's ~0.88 — while the permutation
 test shows the liquid's detection is real (p ≈ 0.001–0.003 per seed).
 Seeded and reproducible; results in `NOTES-for-data.md`.
 
+## Deep readout example
+
+`examples/lsm_deep.rhai` — a 20³ = 8000-neuron izh liquid with local
+(distance-dependent) random wiring and Dale's law; in each window one of
+four stream pairs secretly shares its bits, and readouts must say which.
+It prints held-out accuracy for a deep MLP (default hidden [128, 64], or
+the readout's own layers), a 1-hidden MLP, ridge, two no-liquid
+baselines and a hand-built side channel. ~35 s on CUDA. In the editor,
+select the readout, set its layers in the inspector, Apply, Train.
+
 ## Editor
 
 ```sh

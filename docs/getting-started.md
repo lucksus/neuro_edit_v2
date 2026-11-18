@@ -35,3 +35,13 @@ Everything the mouse can do, the console can do with the Rhai API —
 readouts, watches, and more. `docs/scripting.md` has the complete
 reference and `examples/` holds ready-made scripts; the in-app Help >
 Examples menu runs them in place.
+
+## Deep readouts
+
+`examples/lsm_deep.rhai` (Examples → *Deep readout*) builds an
+8000-neuron liquid with local random wiring and trains a non-spiking
+multi-layer perceptron readout by backprop on a 4-way task, next to a
+1-hidden MLP, ridge and two no-liquid baselines. Click the readout's
+stack in the scene to edit its hidden layers in the inspector, Apply,
+then **Train** — the example re-runs with your layers (in-app manual:
+Help → Manual → Readouts; API in `docs/scripting.md`).

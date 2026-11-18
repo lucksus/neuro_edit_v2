@@ -7,7 +7,8 @@ The Plots window (Ctrl+2) has tabs:
   neurons; the newest point is marked.
 - **raster** — spike dots; watched neurons get labelled rows,
   otherwise the whole id space is sampled.
-- **readouts** — trained weights of the selected readout.
+- **readouts** — trained linear weights of the selected readout (the
+  MLP's layers are in the inspector — see Readouts).
 - **samples** — traces recorded by scripts (`net.samples_*`).
 - **jobs** — server-side background jobs.
 

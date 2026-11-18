@@ -39,6 +39,10 @@ pub const PAGES: &[Page] = &[
         title: "Plots",
         md: include_str!("../../docs/manual/plots.md"),
     },
+    Page {
+        title: "Readouts",
+        md: include_str!("../../docs/manual/readouts.md"),
+    },
 ];
 
 /// One rendered block — the reflowed unit `render` emits (U4).

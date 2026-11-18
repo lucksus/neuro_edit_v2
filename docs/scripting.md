@@ -192,6 +192,57 @@ accuracy(scores, labels)                // 0/1 labels, threshold 0.5
 auc(scores, labels)
 ```
 
+Multi-class ridge (one-vs-rest, solved in the T×T dual — fine at 8000
+features):
+
+```rhai
+let ws = fit_ridge_multi(X_flat, n_rows, n_feat, labels, K, lambda);
+ridge_predict(ws, x)                    // -> class index 0..K-1
+class_accuracy(preds, labels)           // fraction equal
+```
+
+### MLP readout (non-spiking, trained by backprop)
+
+```rhai
+let m = fit_mlp(X_flat, n_rows, n_feat, y, #{
+    layers: [128, 64],      // hidden sizes, any depth; [] = no hidden layer
+                            // (hidden: 24 still works as layers: [24])
+    classes: 4,             // softmax + cross-entropy, y = labels 0..3;
+                            // omit for one score output (binary, squared error)
+    act: "tanh",            // or "relu" (init follows: Glorot / He)
+    opt: "adam",            // default "sgd"; adam lr defaults to 1e-3
+    batch: 32, epochs: 150, lr: 0.001, wd: 0.0001,
+    val_frac: 0.2, patience: 20, seed: 1
+});
+mlp_scores(m, x)        // [score] or K class probabilities
+mlp_predict(m, x)       // class index (score head: score >= 0.5)
+mlp_output(m, x)        // score (softmax head: P(class 1))
+mlp_sizes(m)            // [n_feat, 128, 64, 4]
+mlp_act(m)  mlp_classes(m)
+```
+
+Features are standardized inside the fit; the tail `val_frac` of the rows
+is held out for early stopping (best-validation weights are kept).
+Deterministic for `seed`. Defaults keep the pre-Stage-26 trainer: with
+`hidden: N` and no new options a script prints exactly the numbers it
+printed before.
+
+**Layers live on the readout.** A readout can carry the hidden layers
+its MLP should have; the editor's inspector edits them:
+
+```rhai
+net.set_readout_layers("ro", [128, 64, 32]);   // undoable; [] clears
+net.readout_layers("ro")                       // -> [..] or () if unset/no readout
+net.set_readout_mlp("ro", m);  net.readout_mlp("ro")
+// one call: layers from the readout (opts may override), train, attach
+let m = net.train_readout_mlp("ro", X_flat, n_rows, n_feat, y, #{classes: 4, opt: "adam"});
+```
+
+A script that rebuilds the net must read `net.readout_layers("ro")`
+*before* `net.clear()` — every bundled MLP example does, and re-stores the
+config on the rebuilt readout. That is what the inspector's **Train**
+button relies on: it re-runs the script that built the net.
+
 ## Random numbers
 
 ```rhai
