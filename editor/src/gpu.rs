@@ -585,7 +585,17 @@ impl Gpu {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_blit"),
+                // The scene texture is sRGB, so sampling it yields LINEAR
+                // colour. An sRGB target re-encodes on write; egui's
+                // surface is usually plain Unorm (native and web), which
+                // stored linear values as-is — the GUI drew the scene
+                // gamma-darkened (Stage 26: bg 8/255 vs 48/255 headless,
+                // minor floor-grid lines all but gone).
+                entry_point: Some(if surface_format.is_srgb() {
+                    "fs_blit"
+                } else {
+                    "fs_blit_encode"
+                }),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,

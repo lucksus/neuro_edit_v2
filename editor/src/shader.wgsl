@@ -284,6 +284,16 @@ fn fs_blit(o: BlitOut) -> @location(0) vec4f {
     return textureSample(scene_t, scene_s, o.uv);
 }
 
+// Same blit into a non-sRGB (Unorm) target: apply the sRGB OETF by hand
+// so the bytes match what an sRGB target would store.
+@fragment
+fn fs_blit_encode(o: BlitOut) -> @location(0) vec4f {
+    let c = textureSample(scene_t, scene_s, o.uv);
+    let lo = c.rgb * 12.92;
+    let hi = 1.055 * pow(max(c.rgb, vec3f(0.0)), vec3f(1.0 / 2.4)) - 0.055;
+    return vec4f(select(hi, lo, c.rgb <= vec3f(0.0031308)), c.a);
+}
+
 // ---------- anti-aliased floor grid ----------
 //
 // One camera-following quad at y = cam.lod.w; the fragment shader draws
