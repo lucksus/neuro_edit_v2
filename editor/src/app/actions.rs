@@ -81,6 +81,7 @@ impl EditorApp {
     /// named as it was.
     pub fn load_net(&mut self, path: String) {
         self.send(ClientMsg::LoadNet { path });
+        self.last_build = None;
     }
 
     pub fn push_recent(&mut self, path: String) {
@@ -214,6 +215,7 @@ impl EditorApp {
                 self.send(ClientMsg::NewNet);
                 self.net_path = None;
                 self.net_label = None;
+                self.last_build = None;
             }
             PendingAction::Load(p) => self.load_net(p),
             PendingAction::Quit => {

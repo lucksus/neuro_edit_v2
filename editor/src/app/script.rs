@@ -38,7 +38,7 @@ impl EditorApp {
     /// covers the ids — sync_shared applies it via the selection.
     pub(super) fn run_script(&mut self) {
         let code = self.script.text.clone();
-        self.send(ClientMsg::Eval { code });
+        self.send(ClientMsg::Eval { code: code.clone() });
         // The eval rebuilds the net — the top bar names what produced
         // it (the example's name for a bundled pick, the .rhai stem for
         // a user script) instead of leaving "(new net)" (Stage 24d).
@@ -46,6 +46,8 @@ impl EditorApp {
         if !name.is_empty() {
             self.net_label = Some(name.to_string());
         }
+        let label = if name.is_empty() { "script" } else { name };
+        self.last_build = Some((label.to_string(), code));
         // Auto-watch arms on Run: only a Geo newer than this version is
         // the eval's result — the pre-run net may already cover the ids.
         if self.script.example_watch.is_some() {

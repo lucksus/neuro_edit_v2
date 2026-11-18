@@ -184,8 +184,10 @@ fn main() -> anyhow::Result<()> {
             )
         }
     };
+    let mut startup_code = None;
     if let Some(s) = &cli.script {
         let code = std::fs::read_to_string(s)?;
+        startup_code = Some(code.clone());
         ctl.send(proto::ClientMsg::Eval { code });
     }
     if cli.autorun {
@@ -265,6 +267,10 @@ fn main() -> anyhow::Result<()> {
                     .as_deref()
                     .and_then(|s| std::path::Path::new(s).file_stem())
                     .map(|s| s.to_string_lossy().into_owned());
+            }
+            // …and the readout inspector's Train re-runs it (Stage 26).
+            if let (None, Some(label), Some(code)) = (&net_path, &app.net_label, &startup_code) {
+                app.last_build = Some((label.clone(), code.clone()));
             }
             if let Some(p) = &net_path {
                 app.push_recent(p.clone());

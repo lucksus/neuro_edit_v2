@@ -26,6 +26,7 @@ mod layout;
 mod login;
 mod panel;
 mod plots;
+mod readout_ui;
 mod script;
 mod state;
 mod sync;
@@ -39,6 +40,7 @@ pub use tutorial::{TutUi, N_STEPS, P_DONE, P_SKIPPED, P_UNSEEN};
 use files::local_files_root;
 pub(crate) use groups::GroupMode;
 use layout::*;
+pub(crate) use readout_ui::layer_labels as readout_layer_labels;
 pub(crate) use state::{gate, gate_ui, Act, EditorState};
 
 #[allow(dead_code)]
@@ -174,6 +176,12 @@ pub struct EditorApp {
     /// script name shown in the top bar instead of "(new net)"
     /// (Stage 24d). Set on script Run / `--script`, cleared on New.
     pub net_label: Option<String>,
+    /// (label, code) of the script that built the current net — the
+    /// readout inspector's Train button re-runs it (Stage 26). Set on
+    /// script Run / `--script`; cleared on New / Load.
+    pub last_build: Option<(String, String)>,
+    /// Readout inspector's editable layer draft.
+    ro_draft: Option<readout_ui::RoDraft>,
 
     dlg: Option<Dialog>,
     /// Last net-replacement generation seen — a change means New/load/
@@ -732,6 +740,8 @@ impl EditorApp {
             sim: SimControls::default(),
             net_path: None,
             net_label: None,
+            last_build: None,
+            ro_draft: None,
             dlg: None,
             last_net_gen: 0,
             saved_version: 0,

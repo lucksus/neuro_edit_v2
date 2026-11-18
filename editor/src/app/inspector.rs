@@ -867,16 +867,7 @@ impl EditorApp {
                     });
                 }
             }
-            Some(Entity::Readout(k)) => {
-                let (name, units, w) = &g.readouts[k as usize];
-                ui.label(format!("readout: {name}"));
-                ui.label(format!("{} units", units.len()));
-                if w.is_empty() {
-                    ui.label("weights: —");
-                } else {
-                    ui.label(format!("weights: {} (plot in Plots)", w.len()));
-                }
-            }
+            Some(Entity::Readout(k)) => self.inspect_readout(ui, k as usize),
             None => {
                 ui.label("?");
             }

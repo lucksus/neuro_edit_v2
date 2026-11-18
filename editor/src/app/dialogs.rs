@@ -539,6 +539,7 @@ impl EditorApp {
                 self.send(ClientMsg::NewNet);
                 self.net_path = None;
                 self.net_label = None;
+                self.last_build = None;
                 self.tutorial_begin();
                 *keep = false;
             }

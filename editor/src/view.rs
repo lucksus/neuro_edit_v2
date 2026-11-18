@@ -1253,6 +1253,9 @@ fn overlay_2d(app: &EditorApp, ui: &mut egui::Ui, rect: egui::Rect, aspect: f32)
             );
         }
     }
+    if let Some(g) = &app.geo {
+        draw_mlp_stacks(app, g, painter, rect, aspect);
+    }
     // Empty scene: a centered hint so a first launch isn't a blank void.
     let empty = app.geo.as_ref().map_or(true, |g| g.pos.is_empty());
     if empty {
@@ -1262,6 +1265,162 @@ fn overlay_2d(app: &EditorApp, ui: &mut egui::Ui, rect: egui::Rect, aspect: f32)
             "empty network\n\nFile > Load a .ne2, or build one in the console below:\nnet.create_2d_grid(\"g\", 100, 100, 5)",
             egui::FontId::monospace(14.0),
             egui::Color32::from_gray(150),
+        );
+    }
+}
+
+/// Bar height (px at zoom 1) for an MLP layer of `size` units — grows
+/// with log2 so 4096 inputs and a 4-way head share one readable stack.
+pub(crate) fn mlp_bar_h(size: u32) -> f32 {
+    10.0 + 8.0 * ((size as f32) + 1.0).log2()
+}
+
+/// Screen rect of one readout's MLP stack: the panel sits just above the
+/// readout marker's projected position `c`. Returns (panel, column
+/// centres, bar heights, zoom).
+pub(crate) fn mlp_stack_layout(
+    c: egui::Pos2,
+    sizes: &[u32],
+    zoom: f32,
+) -> (egui::Rect, Vec<f32>, Vec<f32>) {
+    let n = sizes.len().max(1);
+    let dx = 54.0 * zoom;
+    let hs: Vec<f32> = sizes.iter().map(|&s| mlp_bar_h(s) * zoom).collect();
+    let h_max = hs.iter().cloned().fold(0.0, f32::max);
+    let w = dx * (n as f32 - 1.0) + 50.0 * zoom;
+    let label_h = 26.0 * zoom;
+    let title_h = 16.0 * zoom;
+    let bottom = c.y - 12.0 * zoom;
+    let panel = egui::Rect::from_min_max(
+        egui::pos2(
+            c.x - w * 0.5,
+            bottom - (h_max + label_h + title_h + 10.0 * zoom),
+        ),
+        egui::pos2(c.x + w * 0.5, bottom),
+    );
+    let x0 = c.x - dx * (n as f32 - 1.0) * 0.5;
+    let xs = (0..n).map(|i| x0 + dx * i as f32).collect();
+    (panel, xs, hs)
+}
+
+/// Stage 26: a readout with a trained MLP draws as a small layered stack
+/// — one bar per layer (height ∝ log size) labelled "128 tanh", thin
+/// fan lines between consecutive layers, the readout's name on top (and
+/// "needs retraining" when its layer config moved on). Screen-space
+/// egui painting, so native and web draw the same thing; the 3D marker
+/// cube below it stays the pick handle. A readout without an MLP is
+/// left exactly as before.
+fn draw_mlp_stacks(
+    app: &EditorApp,
+    g: &GeoSnap,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    aspect: f32,
+) {
+    use egui::{Color32, FontId, Stroke};
+    let base = g.pos.len() + g.inputs.len();
+    for (k, m) in g.readout_mlps.iter().enumerate() {
+        if m.sizes.len() < 2 {
+            continue;
+        }
+        let Some(p) = inst_pos(g, (base + k) as u32) else {
+            continue;
+        };
+        let Some(nd) = project(&app.camera, aspect, p) else {
+            continue;
+        };
+        let c = egui::pos2(
+            rect.min.x + nd.x * rect.width(),
+            rect.min.y + nd.y * rect.height(),
+        );
+        // Zoom with the camera, inside a readable band: the marker's
+        // projected size against its size at the default framing.
+        let px = screen_box_rect(&app.camera, aspect, rect, p, 40.0).map_or(80.0, |r| r.height());
+        let zoom = (px / 80.0).clamp(0.75, 1.5);
+        let (panel, xs, hs) = mlp_stack_layout(c, &m.sizes, zoom);
+        if !panel.intersects(rect) {
+            continue;
+        }
+        let sel = app.selection.contains(&((base + k) as u32));
+        let edge = if sel {
+            Color32::from_rgb(255, 120, 40)
+        } else {
+            Color32::from_rgb(150, 170, 200)
+        };
+        painter.rect_filled(panel, 5.0, Color32::from_rgba_unmultiplied(22, 26, 36, 215));
+        painter.rect_stroke(
+            panel,
+            5.0,
+            Stroke::new(if sel { 1.8 } else { 1.0_f32 }, edge),
+            egui::StrokeKind::Inside,
+        );
+        let fs = (10.5 * zoom).clamp(9.0, 14.0);
+        let name = &g.readouts.get(k).map_or("", |r| r.0.as_str());
+        let stale = m.stale();
+        painter.text(
+            egui::pos2(panel.center().x, panel.min.y + 3.0 * zoom),
+            egui::Align2::CENTER_TOP,
+            if stale {
+                format!("{name} — needs retraining")
+            } else {
+                format!("{name} — MLP")
+            },
+            FontId::proportional(fs),
+            if stale {
+                Color32::from_rgb(240, 170, 60)
+            } else {
+                Color32::from_rgb(210, 220, 235)
+            },
+        );
+        // Bars share a baseline above the labels.
+        let label_h = 26.0 * zoom;
+        let base_y = panel.max.y - label_h - 4.0 * zoom;
+        let bw = 12.0 * zoom;
+        let labels = crate::app::readout_layer_labels(m);
+        let bars: Vec<egui::Rect> = xs
+            .iter()
+            .zip(&hs)
+            .map(|(&x, &h)| {
+                egui::Rect::from_min_max(
+                    egui::pos2(x - bw * 0.5, base_y - h),
+                    egui::pos2(x + bw * 0.5, base_y),
+                )
+            })
+            .collect();
+        // Thin fan lines between consecutive layers (3×3 per gap).
+        let wire = Stroke::new(0.7, Color32::from_rgba_unmultiplied(160, 180, 210, 90));
+        for w in bars.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            for i in 0..3 {
+                let ya = a.min.y + a.height() * (0.2 + 0.3 * i as f32);
+                for j in 0..3 {
+                    let yb = b.min.y + b.height() * (0.2 + 0.3 * j as f32);
+                    painter.line_segment([egui::pos2(a.max.x, ya), egui::pos2(b.min.x, yb)], wire);
+                }
+            }
+        }
+        let n = bars.len();
+        for (i, (r, (size, tag))) in bars.iter().zip(&labels).enumerate() {
+            let col = if i == 0 {
+                Color32::from_rgb(120, 150, 190) // features in
+            } else if i + 1 == n {
+                Color32::from_rgb(235, 185, 90) // output head
+            } else {
+                Color32::from_rgb(110, 200, 170) // hidden
+            };
+            painter.rect_filled(*r, 2.0, col);
+            painter.text(
+                egui::pos2(r.center().x, base_y + 3.0 * zoom),
+                egui::Align2::CENTER_TOP,
+                format!("{size}\n{tag}"),
+                FontId::proportional(fs * 0.95),
+                Color32::from_rgb(220, 225, 235),
+            );
+        }
+        // Tie the stack to its marker cube below.
+        painter.line_segment(
+            [egui::pos2(c.x, panel.max.y), c],
+            Stroke::new(1.0, edge.gamma_multiply(0.7)),
         );
     }
 }
