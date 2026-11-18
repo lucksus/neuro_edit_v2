@@ -1360,7 +1360,7 @@ pub(crate) fn mlp_stack_layout(
 }
 
 /// Stage 26: a readout with a trained MLP draws as a small layered stack
-/// — one bar per layer (height ∝ log size) labelled "128 tanh", thin
+/// — one bar per layer (height ~ log size) labelled "128 tanh", thin
 /// fan lines between consecutive layers, the readout's name on top (and
 /// "needs retraining" when its layer config moved on). Screen-space
 /// egui painting, so native and web draw the same thing; the 3D marker
