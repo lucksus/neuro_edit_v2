@@ -1343,8 +1343,8 @@ pub(crate) fn mlp_stack_layout(
     let dx = 54.0 * zoom;
     let hs: Vec<f32> = sizes.iter().map(|&s| mlp_bar_h(s) * zoom).collect();
     let h_max = hs.iter().cloned().fold(0.0, f32::max);
-    let w = dx * (n as f32 - 1.0) + 50.0 * zoom;
-    let label_h = 26.0 * zoom;
+    let w = dx * (n as f32 - 1.0) + 64.0 * zoom;
+    let label_h = 31.0 * zoom;
     let title_h = 16.0 * zoom;
     let bottom = c.y - 12.0 * zoom;
     let panel = egui::Rect::from_min_max(
@@ -1392,7 +1392,7 @@ fn draw_mlp_stacks(
         // Zoom with the camera, inside a readable band: the marker's
         // projected size against its size at the default framing.
         let px = screen_box_rect(&app.camera, aspect, rect, p, 40.0).map_or(80.0, |r| r.height());
-        let zoom = (px / 80.0).clamp(0.75, 1.5);
+        let zoom = (px / 80.0).clamp(0.9, 1.6);
         let (panel, xs, hs) = mlp_stack_layout(c, &m.sizes, zoom);
         if !panel.intersects(rect) {
             continue;
@@ -1443,7 +1443,7 @@ fn draw_mlp_stacks(
             },
         );
         // Bars share a baseline above the labels.
-        let label_h = 26.0 * zoom;
+        let label_h = 31.0 * zoom;
         let base_y = panel.max.y - label_h - 4.0 * zoom;
         let bw = 12.0 * zoom;
         let labels = crate::app::readout_layer_labels(m);
