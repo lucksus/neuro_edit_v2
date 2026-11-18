@@ -311,10 +311,17 @@ const GRID_QUAD: array<vec2f, 6> = array<vec2f, 6>(
     vec2f(-1.0, -1.0), vec2f(1.0, 1.0), vec2f(-1.0, 1.0),
 );
 
+// The quad (and its fade) grows with the eye's height above the floor:
+// a fixed 3000 left a zoomed-out net floating over black once the eye
+// was more than ~1650 units from it (Stage 26 shots).
+fn grid_ext() -> f32 {
+    return max(GRID_EXT, 8.0 * abs(cam.cam_pos.y - cam.lod.w));
+}
+
 @vertex
 fn vs_grid(@builtin(vertex_index) vi: u32) -> GridOut {
     var o: GridOut;
-    let c = GRID_QUAD[vi] * GRID_EXT;
+    let c = GRID_QUAD[vi] * grid_ext();
     // The quad follows the camera in x/z (lines come from world coords,
     // so the pattern doesn't swim).
     let wp = vec3f(cam.cam_pos.x + c.x, cam.lod.w, cam.cam_pos.z + c.y);
@@ -335,7 +342,8 @@ fn fs_grid(o: GridOut) -> @location(0) vec4f {
     let minor = grid_line(o.wp.xz / 20.0);
     let major = grid_line(o.wp.xz / 200.0);
     let dist = distance(o.wp.xz, cam.cam_pos.xz);
-    let fade = 1.0 - smoothstep(GRID_EXT * 0.55, GRID_EXT * 0.95, dist);
+    let ext = grid_ext();
+    let fade = 1.0 - smoothstep(ext * 0.55, ext * 0.95, dist);
     let col = mix(vec3f(0.24, 0.27, 0.32), vec3f(0.42, 0.46, 0.55), major);
     let alpha = (minor * 0.45 + major * 0.4) * fade;
     if alpha < 0.004 {
@@ -418,7 +426,8 @@ fn fs_plane(o: PlaneOut) -> @location(0) vec4f {
     let col = cmap(sqrt(clamp(v, 0.0, 1.0)));
     // Dim the quiet end instead of going fully black so the lattice still
     // reads as a surface; active texels pop.
-    return vec4f(col * (0.35 + 0.65 * clamp(v, 0.0, 1.0)), 0.92);
+    // opaque: at 0.92 floor lines showed through the plane
+    return vec4f(col * (0.35 + 0.65 * clamp(v, 0.0, 1.0)), 1.0);
 }
 
 @fragment
