@@ -284,6 +284,9 @@ fn main() -> anyhow::Result<()> {
             app.shot_group_modes = shot_group_modes.clone();
             app.shot_group_sel = shot_group_sel.clone();
             app.shot_sel = shot_sel.clone();
+            if cli.window_size.is_some() {
+                app.force_size = Some([win_w, win_h]);
+            }
             app.open_menu = open_menu.clone();
             app.shot_move = shot_move;
             app.tut_never = tut_never;

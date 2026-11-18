@@ -115,6 +115,9 @@ pub struct EditorApp {
     pub shot_group_modes: Vec<String>,
     pub shot_group_sel: Option<String>,
     pub shot_sel: Option<Vec<u32>>,
+    /// `--window-size` WxH: applied once on the first frame — eframe
+    /// restores a saved window size over the builder's inner size.
+    pub force_size: Option<[f32; 2]>,
     /// Menu name held open for a screenshot (toolbar reads it).
     pub open_menu: Option<String>,
     /// When a `--group-sel`/`--sel` lands, send this move delta too —
@@ -683,6 +686,7 @@ impl EditorApp {
             shot_group_modes: Vec::new(),
             shot_group_sel: None,
             shot_sel: None,
+            force_size: None,
             open_menu: None,
             shot_move: None,
             inst_half: Vec::new(),
@@ -804,6 +808,9 @@ impl eframe::App for EditorApp {
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         crate::icons::Icons::ensure(&mut self.icons, ctx);
+        if let Some([w, h]) = self.force_size.take() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+        }
         self.insert_inh = ctx.input(|i| i.modifiers.alt);
         // GPU lives in egui-wgpu callback resources; we need it here for
         // scene updates + picking. Get it via render_state.
