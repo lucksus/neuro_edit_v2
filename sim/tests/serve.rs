@@ -2493,6 +2493,13 @@ fn undo_redo_round_trip_all_edit_kinds() {
             },
         ),
         (
+            "layers",
+            NetEdit::SetReadoutLayers {
+                name: "ro".into(),
+                layers: vec![128, 64, 32],
+            },
+        ),
+        (
             "movein",
             NetEdit::MoveInputs {
                 items: vec![(0, [5.0, 9.0, 0.0])],

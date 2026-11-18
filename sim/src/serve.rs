@@ -211,6 +211,7 @@ fn edit_label(e: &NetEdit) -> String {
         AddInput { name, .. } => format!("input \"{name}\""),
         AddSamples { name } => format!("samples \"{name}\""),
         AddReadout { name, .. } => format!("readout \"{name}\""),
+        SetReadoutLayers { name, layers } => format!("layers of \"{name}\" {layers:?}"),
         MoveInputs { items } => format!("move {} input{}", items.len(), plural(items.len())),
         AddToGroup { name, ids } => {
             format!("add {} to \"{name}\"", ids.len())
@@ -1964,6 +1965,7 @@ pub fn geo_from_net(net: &Network, dt: f32) -> Geo {
             .iter()
             .map(|r| (r.name.clone(), r.units.clone(), r.weights.clone()))
             .collect(),
+        readout_mlps: readout_mlps(net),
         samples: net
             .samples
             .iter()
@@ -1974,6 +1976,11 @@ pub fn geo_from_net(net: &Network, dt: f32) -> Geo {
         non_grid: non_grid(net),
         dt_ms: dt,
     }
+}
+
+/// Per-readout MLP config + trained shape, parallel to `Geo.readouts`.
+fn readout_mlps(net: &Network) -> Vec<proto::ReadoutMlp> {
+    net.readouts.iter().map(proto::ReadoutMlp::of).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2407,6 +2414,11 @@ fn apply_edit(
                     .map(|r| (r.name.clone(), r.units.clone(), r.weights.clone()))
                     .collect(),
             );
+            d.readout_mlps = Some(readout_mlps(net));
+        }
+        NetEdit::SetReadoutLayers { name, layers } => {
+            net.set_readout_layers(name, layers.clone())?;
+            d.readout_mlps = Some(readout_mlps(net));
         }
         NetEdit::AddToGroup { name, ids } => {
             check_ids(net, ids)?;

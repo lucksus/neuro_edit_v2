@@ -38,6 +38,8 @@ pub struct GeoSnap {
     /// (name, units, weights) — weights may be empty until a script pushes
     /// them via `net.set_readout_weights`.
     pub readouts: Vec<(String, Vec<u32>, Vec<f32>)>,
+    /// MLP layer config + trained shape per readout (parallel).
+    pub readout_mlps: Vec<proto::ReadoutMlp>,
     /// (name, times, values) — plotted in the samples tab.
     pub samples: Vec<(String, Vec<f32>, Vec<f32>)>,
     /// (name, code) — script list saved in the file.
@@ -632,6 +634,7 @@ pub fn geo_snap_from(g: &proto::Geo) -> GeoSnap {
             })
             .collect(),
         readouts: g.readouts.clone(),
+        readout_mlps: g.readout_mlps.clone(),
         samples: g.samples.clone(),
         scripts: g.scripts.clone(),
         grids: g
@@ -760,6 +763,9 @@ fn apply_delta(
     }
     if let Some(v) = d.readouts {
         g.readouts = v;
+    }
+    if let Some(v) = d.readout_mlps {
+        g.readout_mlps = v;
     }
     if let Some(v) = d.samples {
         g.samples = v;

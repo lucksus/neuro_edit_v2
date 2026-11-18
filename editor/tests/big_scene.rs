@@ -48,6 +48,7 @@ fn big_geo(n_neurons: u32, n_syns: usize) -> GeoSnap {
         groups: Vec::new(),
         inputs: Vec::new(),
         readouts: Vec::new(),
+        readout_mlps: Vec::new(),
         samples: Vec::new(),
         scripts: Vec::new(),
         grids: Vec::new(),

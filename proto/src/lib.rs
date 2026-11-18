@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// 4: `ClientMsg` gains `Undo`/`Redo`; `Status` gains the `undo`/`redo`
 /// action labels (Stage 23).
-pub const PROTO_VERSION: u32 = 4;
+pub const PROTO_VERSION: u32 = 5;
 
 // ---------------------------------------------------------------------------
 // shared wire copies of host types (proto must not depend on `sim`)
@@ -245,6 +245,9 @@ pub struct Geo {
     pub inputs: Vec<Input>,
     /// (name, units, weights).
     pub readouts: Vec<(String, Vec<u32>, Vec<f32>)>,
+    /// MLP config + trained shape per readout, parallel to `readouts`
+    /// (proto v5).
+    pub readout_mlps: Vec<ReadoutMlp>,
     /// (name, times, values).
     pub samples: Vec<(String, Vec<f32>, Vec<f32>)>,
     /// (name, code) — scripts saved in the file.
@@ -255,6 +258,53 @@ pub struct Geo {
     /// `Activity::non_grid_spiked` is coded against.
     pub non_grid: Vec<u32>,
     pub dt_ms: f32,
+}
+
+/// A readout's MLP as the editor draws and edits it: the wanted hidden
+/// layers (readout config) and the shape of the trained net, if any.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReadoutMlp {
+    /// Wanted hidden layers (`net.set_readout_layers`); empty = the
+    /// training script's own default.
+    pub layers: Vec<u32>,
+    /// Trained net's sizes `[in, hidden…, out]`; empty = none attached.
+    pub sizes: Vec<u32>,
+    /// Hidden activation of the trained net ("tanh" | "relu").
+    pub act: String,
+    /// Trained output head is a K-class softmax (else one score).
+    pub softmax: bool,
+}
+
+impl ReadoutMlp {
+    pub fn of(r: &net_format::Readout) -> Self {
+        ReadoutMlp {
+            layers: r.mlp_layers.clone(),
+            sizes: r.mlp.as_ref().map(|m| m.sizes.clone()).unwrap_or_default(),
+            act: r
+                .mlp
+                .as_ref()
+                .map(|m| m.act.name().to_string())
+                .unwrap_or_default(),
+            softmax: r
+                .mlp
+                .as_ref()
+                .is_some_and(|m| m.head == net_format::MlpHead::Softmax),
+        }
+    }
+
+    /// Trained hidden layers (between input and output).
+    pub fn trained_hidden(&self) -> &[u32] {
+        if self.sizes.len() < 2 {
+            return &[];
+        }
+        &self.sizes[1..self.sizes.len() - 1]
+    }
+
+    /// A trained net is attached but its hidden layers differ from the
+    /// wanted config — the inspector says "needs retraining".
+    pub fn stale(&self) -> bool {
+        !self.sizes.is_empty() && !self.layers.is_empty() && self.trained_hidden() != self.layers
+    }
 }
 
 /// A changed neuron row (id stays stable; pos/kind/ty/params/name may
@@ -311,6 +361,8 @@ pub struct GeoDelta {
     /// Full replacement when changed (small collections).
     pub inputs: Option<Vec<Input>>,
     pub readouts: Option<Vec<(String, Vec<u32>, Vec<f32>)>>,
+    /// Replaced together with `readouts` (and alone on a layer edit).
+    pub readout_mlps: Option<Vec<ReadoutMlp>>,
     pub samples: Option<Vec<(String, Vec<f32>, Vec<f32>)>>,
     pub scripts: Option<Vec<(String, String)>>,
     /// Replacement non-grid index set (recomputed when geometry shifts).
@@ -403,6 +455,13 @@ pub enum NetEdit {
     AddReadout {
         name: String,
         units: Vec<u32>,
+    },
+    /// `net.set_readout_layers(name, layers)` — the readout's wanted MLP
+    /// hidden layers (empty = script default). The inspector's layer
+    /// editor; a later Re-run trains with them.
+    SetReadoutLayers {
+        name: String,
+        layers: Vec<u32>,
     },
     /// Set absolute positions for inputs (post-drag). pos [0,0,0] means
     /// "auto-place above the targets" — a drop stores wherever it
@@ -1075,6 +1134,10 @@ mod tests {
                 name: "r".into(),
                 units: vec![1, 2, 3],
             },
+            NetEdit::SetReadoutLayers {
+                name: "r".into(),
+                layers: vec![128, 64, 32],
+            },
             NetEdit::AddToGroup {
                 name: "g".into(),
                 ids: vec![7, 8],
@@ -1129,6 +1192,12 @@ mod tests {
                 targets: vec![0],
             }],
             readouts: vec![("r".into(), vec![0], vec![1.0])],
+            readout_mlps: vec![ReadoutMlp {
+                layers: vec![64],
+                sizes: vec![1, 32, 4],
+                act: "relu".into(),
+                softmax: true,
+            }],
             samples: vec![("s".into(), vec![0.0], vec![0.5])],
             scripts: vec![("main".into(), "sim.run(1)".into())],
             grids: vec![Grid {
