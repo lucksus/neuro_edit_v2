@@ -25,13 +25,13 @@ pub(crate) struct RoDraft {
 /// Default hidden width for a newly added layer row.
 const NEW_LAYER: u32 = 64;
 
-/// "4096 → 128 → 64 → 4" — compact shape text.
+/// "4096 · 128 · 64 · 4" — compact shape text (the UI font has no →).
 pub(crate) fn shape_text(sizes: &[u32]) -> String {
     sizes
         .iter()
         .map(|s| s.to_string())
         .collect::<Vec<_>>()
-        .join(" → ")
+        .join(" · ")
 }
 
 /// One line per MLP layer as the scene stack labels them:
@@ -187,7 +187,14 @@ impl EditorApp {
         } else {
             ui.weak(format!("config: {:?}", m.layers));
         }
-        let pending = draft.layers != m.layers;
+        // What Train would use today: the stored config, else whatever
+        // the script trained (its default).
+        let effective = if m.layers.is_empty() {
+            m.trained_hidden().to_vec()
+        } else {
+            m.layers.clone()
+        };
+        let pending = draft.layers != effective;
         self.ro_draft = Some(draft);
 
         // Trained-state line.
@@ -264,6 +271,6 @@ mod tests {
             ..m.clone()
         };
         assert!(s.stale());
-        assert_eq!(shape_text(&m.sizes), "4096 → 128 → 64 → 4");
+        assert_eq!(shape_text(&m.sizes), "4096 · 128 · 64 · 4");
     }
 }
