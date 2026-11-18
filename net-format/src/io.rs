@@ -9,7 +9,7 @@ use std::path::Path;
 use crate::Network;
 
 const MAGIC: &[u8; 4] = b"NE2\0";
-const FORMAT_VERSION: u32 = 6;
+const FORMAT_VERSION: u32 = 7;
 
 /// `Readout` as serialized through format v5 — before the `mlp` field
 /// existed. Every older loader (v1–v5) decodes this shape and lifts to
@@ -36,6 +36,53 @@ fn lift_readouts(v5: Vec<ReadoutV5>) -> Vec<crate::Readout> {
             tau_ms: r.tau_ms,
             pos: r.pos,
             mlp: None,
+            mlp_layers: Vec::new(),
+        })
+        .collect()
+}
+
+/// `MlpDef` as serialized in format v6 — before `act`/`head`: always
+/// tanh hidden layers and a single score output.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MlpDefV6 {
+    sizes: Vec<u32>,
+    w: Vec<Vec<f32>>,
+    mu: Vec<f32>,
+    sd: Vec<f32>,
+}
+
+/// `Readout` as serialized in format v6 — v6 `mlp`, no `mlp_layers`.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReadoutV6 {
+    name: String,
+    units: Vec<u32>,
+    weights: Vec<f32>,
+    bias: f32,
+    bias_weight: f32,
+    tau_ms: f32,
+    pos: [f32; 3],
+    mlp: Option<MlpDefV6>,
+}
+
+fn lift_readouts_v6(v6: Vec<ReadoutV6>) -> Vec<crate::Readout> {
+    v6.into_iter()
+        .map(|r| crate::Readout {
+            name: r.name,
+            units: r.units,
+            weights: r.weights,
+            bias: r.bias,
+            bias_weight: r.bias_weight,
+            tau_ms: r.tau_ms,
+            pos: r.pos,
+            mlp: r.mlp.map(|m| crate::MlpDef {
+                sizes: m.sizes,
+                w: m.w,
+                mu: m.mu,
+                sd: m.sd,
+                act: crate::MlpAct::Tanh,
+                head: crate::MlpHead::Score,
+            }),
+            mlp_layers: Vec::new(),
         })
         .collect()
 }
@@ -315,6 +362,39 @@ fn load_v5(r: &mut impl Read) -> Result<Network, LoadError> {
     })
 }
 
+/// The v6 `Network` layout — today's field order with `ReadoutV6` rows
+/// (v6 `MlpDef`, no `mlp_layers`).
+#[derive(serde::Deserialize)]
+struct NetworkV6 {
+    types: Vec<crate::NeuronType>,
+    neurons: Vec<crate::Neuron>,
+    synapses: Vec<crate::Synapse>,
+    groups: Vec<crate::Group>,
+    inputs: Vec<crate::Input>,
+    samples: Vec<crate::Samples>,
+    readouts: Vec<ReadoutV6>,
+    scripts: Vec<(String, String)>,
+    meta: crate::Meta,
+}
+
+/// Decode a v6 stream — identical layout to v7 except `readouts`, whose
+/// trained MLPs lift to tanh + score and whose layer config is empty.
+fn load_v6(r: &mut impl Read) -> Result<Network, LoadError> {
+    let n: NetworkV6 =
+        bincode::deserialize_from(r).map_err(|e| LoadError::Decode(e.to_string()))?;
+    Ok(Network {
+        types: n.types,
+        neurons: n.neurons,
+        synapses: n.synapses,
+        groups: n.groups,
+        inputs: n.inputs,
+        samples: n.samples,
+        readouts: lift_readouts_v6(n.readouts),
+        scripts: n.scripts,
+        meta: n.meta,
+    })
+}
+
 #[derive(Debug)]
 pub enum LoadError {
     Io(io::Error),
@@ -374,6 +454,7 @@ pub fn load(path: impl AsRef<Path>) -> Result<Network, LoadError> {
         3 => load_v3(&mut r)?,
         4 => load_v4(&mut r)?,
         5 => load_v5(&mut r)?,
+        6 => load_v6(&mut r)?,
         FORMAT_VERSION => {
             bincode::deserialize_from(&mut r).map_err(|e| LoadError::Decode(e.to_string()))?
         }
@@ -788,6 +869,8 @@ mod tests {
                 w: vec![(0..8 * 5).map(|i| i as f32 * 0.01).collect(), vec![0.5; 9]],
                 mu: vec![1.0, 2.0, 3.0, 4.0],
                 sd: vec![0.5, 0.5, 0.5, 0.5],
+                act: crate::MlpAct::Tanh,
+                head: crate::MlpHead::Score,
             }),
         )
         .unwrap();
@@ -849,6 +932,121 @@ mod tests {
         assert_eq!(back.readouts[0].weights, vec![0.1, 0.2, 0.3]);
         assert!(back.readouts[0].mlp.is_none());
         std::fs::remove_file(&path).ok();
+    }
+
+    /// A format-v6 file (trained MLP, no act/head, no layer config)
+    /// loads with the MLP intact as tanh + score and an empty config.
+    #[test]
+    fn v6_mlp_lifts_to_tanh_score() {
+        let mut net = Network::new();
+        for i in 0..3 {
+            net.add_neuron([i as f32 * 10.0, 0.0, 0.0], crate::NeuronKind::Excitatory);
+        }
+        net.add_readout("ro", vec![0, 1, 2]);
+        let v6 = vec![ReadoutV6 {
+            name: "ro".into(),
+            units: vec![0, 1, 2],
+            weights: vec![],
+            bias: 1.0,
+            bias_weight: 1.0,
+            tau_ms: 2.0,
+            pos: [0.0; 3],
+            mlp: Some(MlpDefV6 {
+                sizes: vec![3, 2, 1],
+                w: vec![vec![0.25; 2 * 4], vec![0.5; 3]],
+                mu: vec![0.0; 3],
+                sd: vec![1.0; 3],
+            }),
+        }];
+        let path = tempdir().join("v6.ne2");
+        let mut w = Vec::new();
+        w.extend_from_slice(b"NE2\0");
+        w.extend_from_slice(&6u32.to_le_bytes());
+        bincode::serialize_into(&mut w, &net.types).unwrap();
+        bincode::serialize_into(&mut w, &net.neurons).unwrap();
+        bincode::serialize_into(&mut w, &net.synapses).unwrap();
+        bincode::serialize_into(&mut w, &net.groups).unwrap();
+        bincode::serialize_into(&mut w, &net.inputs).unwrap();
+        bincode::serialize_into(&mut w, &net.samples).unwrap();
+        bincode::serialize_into(&mut w, &v6).unwrap();
+        bincode::serialize_into(&mut w, &net.scripts).unwrap();
+        bincode::serialize_into(&mut w, &net.meta).unwrap();
+        std::fs::write(&path, &w).unwrap();
+
+        let back = load(&path).unwrap();
+        let m = back.readout_mlp("ro").expect("v6 mlp must survive");
+        assert_eq!(m.sizes, vec![3, 2, 1]);
+        assert_eq!(m.w[1], vec![0.5; 3]);
+        assert_eq!(m.act, crate::MlpAct::Tanh);
+        assert_eq!(m.head, crate::MlpHead::Score);
+        assert!(back.readouts[0].mlp_layers.is_empty());
+        assert!(back.readout_layers("ro").is_none());
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// v7 carries the softmax head, relu activation and the readout's
+    /// layer config; old JSON (no such keys) still loads via serde
+    /// defaults.
+    #[test]
+    fn v7_softmax_relu_layers_round_trip() {
+        let mut net = Network::new();
+        for i in 0..2 {
+            net.add_neuron([i as f32 * 10.0, 0.0, 0.0], crate::NeuronKind::Excitatory);
+        }
+        net.add_readout("ro", vec![0, 1]);
+        net.set_readout_layers("ro", vec![128, 64, 32]).unwrap();
+        net.set_readout_mlp(
+            "ro",
+            Some(crate::MlpDef {
+                sizes: vec![2, 3, 4],
+                w: vec![vec![0.1; 3 * 3], vec![0.2; 4 * 4]],
+                mu: vec![0.0; 2],
+                sd: vec![1.0; 2],
+                act: crate::MlpAct::Relu,
+                head: crate::MlpHead::Softmax,
+            }),
+        )
+        .unwrap();
+        let path = tempdir().join("v7.ne2");
+        save(&net, &path).unwrap();
+        let back = load(&path).unwrap();
+        assert_eq!(back.readout_layers("ro"), Some(&[128u32, 64, 32][..]));
+        let m = back.readout_mlp("ro").unwrap();
+        assert_eq!(
+            (m.act, m.head),
+            (crate::MlpAct::Relu, crate::MlpHead::Softmax)
+        );
+        assert_eq!(m.sizes, vec![2, 3, 4]);
+        std::fs::remove_file(&path).ok();
+
+        // Old JSON: strip the v7 keys, it must load as tanh/score/empty.
+        let mut v: serde_json::Value = serde_json::from_str(&to_json(&net).unwrap()).unwrap();
+        let ro = &mut v["readouts"][0];
+        ro.as_object_mut().unwrap().remove("mlp_layers");
+        let mo = ro["mlp"].as_object_mut().unwrap();
+        mo.remove("act");
+        mo.remove("head");
+        mo.insert("sizes".into(), serde_json::json!([2, 3, 1]));
+        mo.insert("w".into(), serde_json::json!([vec![0.1; 9], vec![0.2; 4]]));
+        let old = from_json(&v.to_string()).unwrap();
+        let m = old.readout_mlp("ro").unwrap();
+        assert_eq!(
+            (m.act, m.head),
+            (crate::MlpAct::Tanh, crate::MlpHead::Score)
+        );
+        assert!(old.readouts[0].mlp_layers.is_empty());
+
+        // A softmax head with one output and a zero-size layer config
+        // must both fail validation.
+        let mut bad = net.clone();
+        bad.readouts[0].mlp.as_mut().unwrap().sizes = vec![2, 3, 1];
+        bad.readouts[0].mlp.as_mut().unwrap().w[1] = vec![0.2; 4];
+        assert!(bad.validate().is_err());
+        let mut bad = net.clone();
+        bad.readouts[0].mlp_layers = vec![8, 0];
+        assert!(bad.validate().is_err());
+        assert!(net.clone().set_readout_layers("ro", vec![0]).is_err());
+        assert!(net.clone().set_readout_layers("nope", vec![4]).is_err());
     }
 
     #[test]

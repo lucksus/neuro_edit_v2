@@ -386,8 +386,13 @@ fn help_text(topic: &str) -> String {
             "readout: add_readout(name,units)  set_readout_weights(name,w)  readout_weights(name)\n  \
              delta_new(n)  r.learn(trace,target,rate)  r.output(trace)\n  \
              fit_ridge(x_flat,T,F,y,lambda)  ridge_output(w,x)  accuracy(s,y)  auc(s,y)\n  \
-             fit_mlp(x_flat,T,F,y[,#{hidden,epochs,lr,wd,seed,val_frac,patience}])\n  \
-             mlp_output(m,x)  mlp_sizes(m)  net.set_readout_mlp(name,m)  net.readout_mlp(name)",
+             fit_mlp(x_flat,T,F,y[,#{layers:[128,64]|hidden,classes,act:\"tanh\"|\"relu\",\n    \
+             opt:\"sgd\"|\"adam\",batch,epochs,lr,wd,seed,val_frac,patience}])\n  \
+             mlp_output(m,x)  mlp_scores(m,x)  mlp_predict(m,x)  mlp_sizes(m)  mlp_act(m)\n  \
+             mlp_classes(m)  class_accuracy(pred,labels)\n  \
+             net.set_readout_mlp(name,m)  net.readout_mlp(name)\n  \
+             net.set_readout_layers(name,[..])  net.readout_layers(name)\n  \
+             net.train_readout_mlp(name,x_flat,T,F,y,opts) — layers from the readout",
         ),
         (
             "io",
@@ -405,7 +410,7 @@ fn help_text(topic: &str) -> String {
         (
             "examples",
             "examples: first_spikes.rhai  grid_wave.rhai  lsm_readout.rhai  lsm_big.rhai\n  \
-             lsm_adex.rhai  lsm_hidden.rhai  detector.rhai  memory_window.rhai —\n  \
+             lsm_deep.rhai  lsm_adex.rhai  lsm_hidden.rhai  detector.rhai  memory_window.rhai —\n  \
              runnable from the console's examples picker",
         ),
     ];
@@ -2097,11 +2102,47 @@ pub fn register_api(
     // back (or `()` when the readout has no mlp).
     fn mlp_params(opts: &rhai::Map) -> Result<crate::mlp::MlpParams, Box<rhai::EvalAltResult>> {
         let mut p = crate::mlp::MlpParams::default();
+        if opts.contains_key("hidden") && opts.contains_key("layers") {
+            return Err(s_err(
+                "fit_mlp: give `hidden: N` or `layers: [..]`, not both".to_string(),
+            ));
+        }
         for (k, v) in opts {
             match k.as_str() {
-                "hidden" => p.hidden = d_i64(v).max(1) as usize,
+                "hidden" => p.layers = vec![d_i64(v).max(1) as usize],
+                "layers" => p.layers = mlp_layers_arg(v, "fit_mlp")?,
+                "classes" => {
+                    let k = d_i64(v);
+                    if !(2..=1024).contains(&k) {
+                        return Err(s_err(format!("fit_mlp: classes must be 2..1024, got {k}")));
+                    }
+                    p.classes = k as usize;
+                }
+                "act" => {
+                    p.act = match v.to_string().as_str() {
+                        "tanh" => net_format::MlpAct::Tanh,
+                        "relu" => net_format::MlpAct::Relu,
+                        o => {
+                            return Err(s_err(format!(
+                                "fit_mlp: act {o:?} — use \"tanh\" or \"relu\""
+                            )))
+                        }
+                    }
+                }
+                "opt" => {
+                    p.opt = match v.to_string().as_str() {
+                        "sgd" => crate::mlp::Opt::Sgd,
+                        "adam" => crate::mlp::Opt::Adam,
+                        o => {
+                            return Err(s_err(format!(
+                                "fit_mlp: opt {o:?} — use \"sgd\" or \"adam\""
+                            )))
+                        }
+                    }
+                }
+                "batch" => p.batch = d_i64(v).max(1) as usize,
                 "epochs" => p.epochs = d_i64(v).max(1) as usize,
-                "lr" => p.lr = d_f64(v) as f32,
+                "lr" => p.lr = Some(d_f64(v) as f32),
                 "wd" => p.wd = d_f64(v) as f32,
                 "seed" => p.seed = d_i64(v) as u64,
                 "val_frac" => p.val_frac = (d_f64(v) as f32).clamp(0.05, 0.9),
@@ -2110,6 +2151,33 @@ pub fn register_api(
             }
         }
         Ok(p)
+    }
+    /// `[128, 64]` → hidden sizes, each 1..=MAX_MLP_LAYER.
+    fn mlp_layers_arg(v: &Dynamic, who: &str) -> Result<Vec<usize>, Box<rhai::EvalAltResult>> {
+        let Some(a) = v.clone().try_cast::<rhai::Array>() else {
+            return Err(s_err(format!(
+                "{who}: layers must be an array like [128, 64]"
+            )));
+        };
+        if a.len() > net_format::MAX_MLP_DEPTH {
+            return Err(s_err(format!(
+                "{who}: at most {} hidden layers",
+                net_format::MAX_MLP_DEPTH
+            )));
+        }
+        a.iter()
+            .map(|d| {
+                let n = d_i64(d);
+                if (1..=net_format::MAX_MLP_LAYER as i64).contains(&n) {
+                    Ok(n as usize)
+                } else {
+                    Err(s_err(format!(
+                        "{who}: layer size {n} out of range 1..={}",
+                        net_format::MAX_MLP_LAYER
+                    )))
+                }
+            })
+            .collect()
     }
     fn fit_mlp_impl(
         x: rhai::Array,
@@ -2127,8 +2195,24 @@ pub fn register_api(
                 y.len()
             )));
         }
+        if t < 4 || f == 0 {
+            return Err(s_err(format!(
+                "fit_mlp: need T ≥ 4 rows and F ≥ 1 (got T={t}, F={f})"
+            )));
+        }
         let xf: Vec<f32> = x.iter().take(t * f).map(|d| d_f64(d) as f32).collect();
         let yf: Vec<f32> = y.iter().take(t).map(|d| d_f64(d) as f32).collect();
+        if p.classes >= 2 {
+            if let Some(bad) = yf
+                .iter()
+                .find(|&&v| !(v >= 0.0 && v.fract() == 0.0 && (v as usize) < p.classes))
+            {
+                return Err(s_err(format!(
+                    "fit_mlp: label {bad} is not a class index 0..{}",
+                    p.classes - 1
+                )));
+            }
+        }
         Ok(crate::mlp::fit_mlp(&xf, t, f, &yf, p))
     }
     engine.register_fn(
@@ -2152,16 +2236,76 @@ pub fn register_api(
             fit_mlp_impl(x, t, f, y, &mlp_params(&opts)?)
         },
     );
+    fn mlp_row(
+        m: &net_format::MlpDef,
+        x: &rhai::Array,
+        who: &str,
+    ) -> Result<Vec<f32>, Box<rhai::EvalAltResult>> {
+        if x.len() != m.sizes[0] as usize {
+            return Err(s_err(format!(
+                "{who}: row has {} features, the mlp wants {}",
+                x.len(),
+                m.sizes[0]
+            )));
+        }
+        Ok(x.iter().map(|d| d_f64(d) as f32).collect())
+    }
+    // Score head: the score. Softmax head: P(class 1) — use
+    // mlp_scores/mlp_predict for multi-class.
     engine.register_fn(
         "mlp_output",
-        |m: &mut net_format::MlpDef, x: rhai::Array| -> f64 {
-            let xf: Vec<f32> = x.iter().map(|d| d_f64(d) as f32).collect();
-            crate::mlp::mlp_output(m, &xf) as f64
+        |m: &mut net_format::MlpDef, x: rhai::Array| -> Result<f64, Box<rhai::EvalAltResult>> {
+            Ok(crate::mlp::mlp_output(m, &mlp_row(m, &x, "mlp_output")?) as f64)
+        },
+    );
+    engine.register_fn(
+        "mlp_scores",
+        |m: &mut net_format::MlpDef,
+         x: rhai::Array|
+         -> Result<rhai::Array, Box<rhai::EvalAltResult>> {
+            let s = crate::mlp::mlp_scores(m, &mlp_row(m, &x, "mlp_scores")?);
+            Ok(s.iter().map(|&v| dyn_f64(v as f64)).collect())
+        },
+    );
+    engine.register_fn(
+        "mlp_predict",
+        |m: &mut net_format::MlpDef,
+         x: rhai::Array|
+         -> Result<rhai::INT, Box<rhai::EvalAltResult>> {
+            Ok(crate::mlp::mlp_predict(m, &mlp_row(m, &x, "mlp_predict")?) as rhai::INT)
         },
     );
     engine.register_fn("mlp_sizes", |m: &mut net_format::MlpDef| -> rhai::Array {
-        m.sizes.iter().map(|&s| dyn_f64(s as f64)).collect()
+        m.sizes
+            .iter()
+            .map(|&s| Dynamic::from(s as rhai::INT))
+            .collect()
     });
+    engine.register_fn("mlp_act", |m: &mut net_format::MlpDef| -> String {
+        m.act.name().to_string()
+    });
+    // 1 for a score head, K for softmax.
+    engine.register_fn("mlp_classes", |m: &mut net_format::MlpDef| -> rhai::INT {
+        match m.head {
+            net_format::MlpHead::Score => 1,
+            net_format::MlpHead::Softmax => *m.sizes.last().unwrap() as rhai::INT,
+        }
+    });
+    // `accuracy` for class predictions: fraction of preds == labels.
+    engine.register_fn(
+        "class_accuracy",
+        |pred: rhai::Array, labels: rhai::Array| -> f64 {
+            if labels.is_empty() {
+                return 0.0;
+            }
+            let hit = pred
+                .iter()
+                .zip(&labels)
+                .filter(|(a, b)| d_i64(a) == d_i64(b))
+                .count();
+            hit as f64 / labels.len() as f64
+        },
+    );
     {
         let v = net_version.clone();
         engine.register_fn(
@@ -2181,6 +2325,74 @@ pub fn register_api(
             None => Dynamic::UNIT,
         }
     });
+    // Layer config on the readout — what the inspector edits and the
+    // examples read before `net.clear()`. `()` = no readout / no config.
+    {
+        let v = net_version.clone();
+        engine.register_fn(
+            "set_readout_layers",
+            move |n: &mut NetHandle,
+                  name: &str,
+                  layers: rhai::Array|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                let l = mlp_layers_arg(&Dynamic::from(layers), "set_readout_layers")?;
+                bump(&v);
+                n.borrow_mut()
+                    .set_readout_layers(name, l.iter().map(|&s| s as u32).collect())
+                    .map_err(s_err)
+            },
+        );
+    }
+    engine.register_fn(
+        "readout_layers",
+        |n: &mut NetHandle, name: &str| -> Dynamic {
+            match n.borrow().readout_layers(name) {
+                Some(l) => Dynamic::from(
+                    l.iter()
+                        .map(|&s| Dynamic::from(s as rhai::INT))
+                        .collect::<rhai::Array>(),
+                ),
+                None => Dynamic::UNIT,
+            }
+        },
+    );
+    // One-call training: `net.train_readout_mlp(name, X, T, F, y, opts)`
+    // — hidden layers from the readout's config unless `opts` names
+    // `layers`/`hidden`; trains, attaches, returns the trained net.
+    {
+        let v = net_version.clone();
+        engine.register_fn(
+            "train_readout_mlp",
+            move |n: &mut NetHandle,
+                  name: &str,
+                  x: rhai::Array,
+                  t: rhai::INT,
+                  f: rhai::INT,
+                  y: rhai::Array,
+                  opts: rhai::Map|
+                  -> Result<net_format::MlpDef, Box<rhai::EvalAltResult>> {
+                let cfg = {
+                    let b = n.borrow();
+                    let Some(r) = b.readouts.iter().find(|r| r.name == name) else {
+                        return Err(s_err(format!(
+                            "train_readout_mlp: no readout named {name:?}"
+                        )));
+                    };
+                    r.mlp_layers.clone()
+                };
+                let mut p = mlp_params(&opts)?;
+                if !opts.contains_key("layers") && !opts.contains_key("hidden") && !cfg.is_empty() {
+                    p.layers = cfg.iter().map(|&s| s as usize).collect();
+                }
+                let m = fit_mlp_impl(x, t, f, y, &p)?;
+                bump(&v);
+                n.borrow_mut()
+                    .set_readout_mlp(name, Some(m.clone()))
+                    .map_err(s_err)?;
+                Ok(m)
+            },
+        );
+    }
 
     // `sim.backend()` → "cpu" | "cuda" — examples report which engine ran.
     {

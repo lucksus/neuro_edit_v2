@@ -153,6 +153,11 @@ pub struct GridShape {
 /// request an absurd allocation and abort the worker.
 pub const MAX_GRID_TEXELS: u64 = 1 << 26; // ~67M neurons
 
+/// Largest hidden layer a readout config may ask for.
+pub const MAX_MLP_LAYER: u32 = 4096;
+/// Most hidden layers a readout config may ask for.
+pub const MAX_MLP_DEPTH: usize = 8;
+
 /// `Ok(total)` when all dims are non-negative (callers pass `i64` so a
 /// negative script arg is an error, not a giant `usize`) and their
 /// product fits `MAX_GRID_TEXELS`.
@@ -280,14 +285,42 @@ impl Samples {
     }
 }
 
+/// Hidden-layer activation of a trained MLP.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MlpAct {
+    #[default]
+    Tanh,
+    Relu,
+}
+
+impl MlpAct {
+    pub fn name(self) -> &'static str {
+        match self {
+            MlpAct::Tanh => "tanh",
+            MlpAct::Relu => "relu",
+        }
+    }
+}
+
+/// Output head of a trained MLP: `Score` is one linear output trained
+/// on squared error (the binary readout every pre-v7 file has);
+/// `Softmax` is K ≥ 2 class logits trained on cross-entropy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MlpHead {
+    #[default]
+    Score,
+    Softmax,
+}
+
 /// Trained MLP weights saved on a `Readout` — the multilayer readout's
 /// full state so a `net.save` keeps it deployable. Layout mirrors
-/// `sim::mlp::Mlp`: layer-major weight rows with the bias weight in the
+/// `sim::mlp`: layer-major weight rows with the bias weight in the
 /// last column of each row; `mu`/`sd` are the fit-time feature
 /// standardization (applied again at output time).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MlpDef {
-    /// Layer sizes including input and output: `[n_features, h1, …, 1]`.
+    /// Layer sizes including input and output: `[n_features, h1, …, out]`
+    /// — `out` is 1 for a `Score` head, K for a `Softmax` head.
     pub sizes: Vec<u32>,
     /// `w[l]` is a `sizes[l+1] × (sizes[l]+1)` row-major matrix; the last
     /// column of each row is that unit's bias weight.
@@ -295,6 +328,22 @@ pub struct MlpDef {
     /// Per-feature mean/stddev measured on the training subset.
     pub mu: Vec<f32>,
     pub sd: Vec<f32>,
+    /// Hidden activation (format v7; older files are tanh).
+    #[serde(default)]
+    pub act: MlpAct,
+    /// Output head (format v7; older files are a single score).
+    #[serde(default)]
+    pub head: MlpHead,
+}
+
+impl MlpDef {
+    /// Hidden layer sizes (everything between input and output).
+    pub fn hidden(&self) -> &[u32] {
+        if self.sizes.len() < 2 {
+            return &[];
+        }
+        &self.sizes[1..self.sizes.len() - 1]
+    }
 }
 
 /// LSM readout unit — the original's `LSMReadOutNeuron`. Its filtered-trace
@@ -316,6 +365,11 @@ pub struct Readout {
     /// for files saved before format v6 and for never-trained readouts.
     #[serde(default)]
     pub mlp: Option<MlpDef>,
+    /// Hidden-layer sizes the user wants for this readout's MLP
+    /// (`net.set_readout_layers`, the inspector). Empty = use the
+    /// training script's own default. Format v7.
+    #[serde(default)]
+    pub mlp_layers: Vec<u32>,
 }
 
 /// File-level metadata.
@@ -708,6 +762,7 @@ impl Network {
             tau_ms: crate::DEFAULT_READOUT_TAU_MS,
             pos: [0.0; 3],
             mlp: None,
+            mlp_layers: Vec::new(),
         });
         i
     }
@@ -720,6 +775,35 @@ impl Network {
         };
         r.mlp = mlp;
         Ok(())
+    }
+
+    /// Set a readout's wanted hidden layers (empty = script default).
+    pub fn set_readout_layers(&mut self, name: &str, layers: Vec<u32>) -> Result<(), String> {
+        if let Some(z) = layers.iter().find(|&&s| s == 0 || s > MAX_MLP_LAYER) {
+            return Err(format!(
+                "set_readout_layers: layer size {z} out of range 1..={MAX_MLP_LAYER}"
+            ));
+        }
+        if layers.len() > MAX_MLP_DEPTH {
+            return Err(format!(
+                "set_readout_layers: at most {MAX_MLP_DEPTH} hidden layers"
+            ));
+        }
+        let Some(r) = self.readouts.iter_mut().find(|r| r.name == name) else {
+            return Err(format!("set_readout_layers: no readout named {name:?}"));
+        };
+        r.mlp_layers = layers;
+        Ok(())
+    }
+
+    /// A readout's wanted hidden layers; `None` when the readout does
+    /// not exist or has no config.
+    pub fn readout_layers(&self, name: &str) -> Option<&[u32]> {
+        self.readouts
+            .iter()
+            .find(|r| r.name == name)
+            .map(|r| r.mlp_layers.as_slice())
+            .filter(|l| !l.is_empty())
     }
 
     /// A readout's attached MLP, if any.
@@ -1089,10 +1173,22 @@ impl Network {
                     r.name, r.tau_ms
                 ));
             }
+            if r.mlp_layers.len() > MAX_MLP_DEPTH
+                || r.mlp_layers.iter().any(|&s| s == 0 || s > MAX_MLP_LAYER)
+            {
+                return Err(format!(
+                    "readout '{}' has bad mlp layer config {:?}",
+                    r.name, r.mlp_layers
+                ));
+            }
             if let Some(m) = &r.mlp {
                 // [n_feat, ≥1 hidden…, 1] — and every layer matrix +
                 // the feature standardization must agree with it.
-                if m.sizes.len() < 2 || *m.sizes.last().unwrap() != 1 || m.sizes[0] == 0 {
+                let out_ok = match m.head {
+                    MlpHead::Score => m.sizes.last() == Some(&1),
+                    MlpHead::Softmax => m.sizes.last().is_some_and(|&k| k >= 2),
+                };
+                if m.sizes.len() < 2 || !out_ok || m.sizes.contains(&0) {
                     return Err(format!(
                         "readout '{}' has malformed mlp sizes {:?}",
                         r.name, m.sizes
@@ -1375,6 +1471,7 @@ mod tests {
             tau_ms: 2.0,
             pos: [0.0; 3],
             mlp: None,
+            mlp_layers: Vec::new(),
         });
         assert!(net.validate().is_ok());
         let mut bad = net.clone();
