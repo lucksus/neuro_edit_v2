@@ -41,10 +41,27 @@ fn run_example(name: &str, src: &str) -> (SimCtl, Vec<String>) {
         let s = ctl.shared.read().ok()?;
         (s.console
             .iter()
-            .any(|l| l.contains(&format!("AUDIT_DONE {name}"))))
+            // the printed line, not the console's echo of the code
+            .any(|l| l.trim() == format!("AUDIT_DONE {name}")))
         .then(|| s.console.iter().cloned().collect::<Vec<String>>())
     });
     (ctl, out)
+}
+
+/// Wait until published sim time is ≥ `min_t` and unchanged for 300 ms;
+/// returns (time, spikes_total) at rest.
+fn settled(ctl: &SimCtl, min_t: f64) -> (f64, u64) {
+    let mut last = (f64::NAN, 0u64);
+    let mut since = Instant::now();
+    wait_for(Duration::from_secs(60), || {
+        let s = ctl.shared.read().ok()?;
+        let now = (s.snap.time_ms, s.snap.spikes_total);
+        if now.0 != last.0 {
+            last = now;
+            since = Instant::now();
+        }
+        (now.0 >= min_t && since.elapsed() > Duration::from_millis(300)).then_some(now)
+    })
 }
 
 /// The activity claim every example makes: after the script's eval, the
@@ -59,16 +76,19 @@ fn assert_activity(ctl: &SimCtl, name: &str) {
     let t0 = ctl.shared.read().unwrap().snap.time_ms;
     // A few seconds of Run, the way a user watches it go.
     ctl.send(Cmd::RunMs(4000.0));
-    let spikes_at_4s = wait_for(Duration::from_secs(60), || {
-        let s = ctl.shared.read().ok()?;
-        (s.snap.time_ms >= t0 + 3900.0).then(|| s.snap.spikes_total)
-    });
+    // The post-eval snapshot reads t = 0 although the script itself ran
+    // the sim (first_spikes: 2 s), so the first publish after RunMs can
+    // already sit past t0 + 3900 — and the "last second" wait below was
+    // satisfied by that same publish (Stage 26 found the audit failing
+    // on main this way). Wait for the run to land AND settle, then
+    // measure the last second from the settled time.
+    let (t1, spikes_at_4s) = settled(ctl, t0 + 3900.0);
     // The last second is the real audit window — a liquid that died
     // inside the run republishes the same total.
     ctl.send(Cmd::RunMs(1000.0));
     let end = wait_for(Duration::from_secs(60), || {
         let s = ctl.shared.read().ok()?;
-        (s.snap.time_ms >= t0 + 4900.0).then(|| s.snap.clone())
+        (s.snap.time_ms >= t1 + 900.0).then(|| s.snap.clone())
     });
     assert!(
         end.rate_hz > 0.0,
@@ -231,7 +251,7 @@ fn readout_layers_set_then_rerun_trains_them() {
         let s = ctl.shared.read().ok()?;
         s.console
             .iter()
-            .any(|l| l.contains("AUDIT_DONE rerun"))
+            .any(|l| l.trim() == "AUDIT_DONE rerun")
             .then_some(())
     });
     let m2 = wait_for(Duration::from_secs(30), || {
