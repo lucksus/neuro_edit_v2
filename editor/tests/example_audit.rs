@@ -110,6 +110,11 @@ fn every_example_shows_activity_through_the_worker() {
             "test mlp",
         ),
         (
+            "lsm_deep",
+            include_str!("../../examples/lsm_deep.rhai"),
+            "test deep",
+        ),
+        (
             "lsm_adex",
             include_str!("../../examples/lsm_adex.rhai"),
             "test mlp",
@@ -150,6 +155,25 @@ fn every_example_shows_activity_through_the_worker() {
                 let a = auc("auc=").unwrap_or(0.0);
                 assert!(a > 0.6, "{name}: worker-run mlp auc at chance: {a}");
             }
+            "lsm_deep" => {
+                // 4-way task: liquid readouts above chance (0.25) on
+                // held-out windows, no-liquid baselines near it.
+                let acc = |key: &str| -> f64 {
+                    out.iter()
+                        .find(|l| l.contains(key))
+                        .and_then(|l| l.split("acc=").nth(1))
+                        .and_then(|r| r.trim().split(' ').next()?.parse::<f64>().ok())
+                        .unwrap_or(f64::NAN)
+                };
+                for k in ["test deep", "test 1hid", "test ridge"] {
+                    let a = acc(k);
+                    assert!(a > 0.45, "{name}: {k} acc {a} not above chance");
+                }
+                for k in ["test raw", "test bits"] {
+                    let a = acc(k);
+                    assert!(a < 0.4, "{name}: no-liquid {k} acc {a} — task leaks");
+                }
+            }
             "lsm_big_off" => {
                 let a = auc("auc=").unwrap_or(1.0);
                 assert!(
@@ -161,4 +185,65 @@ fn every_example_shows_activity_through_the_worker() {
         }
         drop(ctl); // SimCtl::drop stops the worker thread
     }
+}
+
+/// Stage 26 — the inspector's Train flow through the real worker:
+/// lsm_big runs, the readout's layers are set by the same
+/// `NetEdit::SetReadoutLayers` the inspector sends, the same Eval the
+/// Train button re-sends rebuilds the net — and the published Geo shows
+/// the readout with the config kept and a trained MLP whose hidden
+/// layers match it (no "needs retraining").
+/// Sabotage: examples reading the layers after `net.clear()` (or the
+/// SetReadoutLayers delta dropping `readout_mlps`) → sizes stay [24].
+#[test]
+fn readout_layers_set_then_rerun_trains_them() {
+    let src = include_str!("../../examples/lsm_big.rhai");
+    let (ctl, _) = run_example("lsm_big", src);
+    let geo_mlp = |ctl: &SimCtl| -> Option<proto::ReadoutMlp> {
+        let s = ctl.shared.read().ok()?;
+        let g = s.geo.as_ref()?;
+        let k = g.readouts.iter().position(|r| r.0 == "ro")?;
+        g.readout_mlps.get(k).cloned()
+    };
+    let m0 = wait_for(Duration::from_secs(30), || {
+        geo_mlp(&ctl).filter(|m| !m.sizes.is_empty())
+    });
+    assert_eq!(m0.trained_hidden(), &[24], "default lsm_big layers");
+    assert!(m0.layers.is_empty() && !m0.stale());
+
+    let base = ctl.shared.read().unwrap().geo.as_ref().unwrap().version;
+    ctl.send(Cmd::Edit {
+        base,
+        edit: proto::NetEdit::SetReadoutLayers {
+            name: "ro".into(),
+            layers: vec![128, 64, 32],
+        },
+    });
+    let m1 = wait_for(Duration::from_secs(30), || {
+        geo_mlp(&ctl).filter(|m| !m.layers.is_empty())
+    });
+    assert!(m1.stale(), "config moved on, trained net is old: {m1:?}");
+
+    ctl.send(Cmd::Eval {
+        code: format!("{src}\nprint(\"AUDIT_DONE rerun\");"),
+    });
+    wait_for(Duration::from_secs(120), || {
+        let s = ctl.shared.read().ok()?;
+        s.console
+            .iter()
+            .any(|l| l.contains("AUDIT_DONE rerun"))
+            .then_some(())
+    });
+    let m2 = wait_for(Duration::from_secs(30), || {
+        geo_mlp(&ctl).filter(|m| m.trained_hidden() == [128, 64, 32])
+    });
+    assert_eq!(m2.layers, vec![128, 64, 32], "config survived the rebuild");
+    assert!(!m2.stale());
+    let console = ctl.shared.read().unwrap().console.clone();
+    assert!(
+        console
+            .iter()
+            .any(|l| l.contains("[128, 64, 32] (from the readout")),
+        "console names the layers used"
+    );
 }

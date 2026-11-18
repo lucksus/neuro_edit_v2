@@ -13,6 +13,13 @@
 //   sim --script examples/lsm_adex.rhai [--cuda|--cpu]
 
 // ---------- parameters ----------
+// Readout layers: if the readout "ro" carries a layer config (set in
+// the editor's inspector, or net.set_readout_layers) train THOSE hidden
+// layers (Adam); otherwise this example's own default. Read BEFORE
+// net.clear() — the rebuild below would drop it.
+let RO_LAYERS = net.readout_layers("ro");
+let HAS_LAYERS = type_of(RO_LAYERS) == "array";
+
 let SEED = 11;
 let Q = quick();
 let SIDE = if Q { 6 } else { 12 };    // 12^3 = 1728 AdEx neurons
@@ -36,8 +43,12 @@ let PRIV_PER_SRC = 24;
 let EI = 0.35;                        // variant: 35% inhibitory
 let RIDGE_L = 1.0;
 let EPOCHS = if Q { 60 } else { 100 };
-let MLP_OPTS = #{hidden: 24, epochs: EPOCHS,
-                 lr: 0.05, wd: 0.0001, seed: SEED};
+let MLP_OPTS = if HAS_LAYERS {
+    #{layers: RO_LAYERS, opt: "adam", epochs: EPOCHS, wd: 0.0001, seed: SEED}
+} else {
+    #{hidden: 24, epochs: EPOCHS,
+      lr: 0.05, wd: 0.0001, seed: SEED}
+};
 
 // ---------- build the AdEx liquid ----------
 net.clear();
@@ -54,6 +65,7 @@ for n in res {
 }
 net.create_connections("res", CONN_SCALING, CONN_LAMBDA, W_REC);
 net.add_readout("ro", res);
+if HAS_LAYERS { net.set_readout_layers("ro", RO_LAYERS); }
 
 for p in PAIRS {
     let pool = [];
@@ -153,6 +165,7 @@ print("=== lsm_adex: " + n_liq + " AdEx neurons, EI=" + EI +
 print("backend=" + sim.backend() + "  quick=" + Q +
       "  synapses=" + net.synapse_count() +
       "  train=" + TRAIN_N + " test=" + TEST_N + " win=" + WIN_MS + "ms");
+print("mlp hidden layers: " + (if HAS_LAYERS { "" + RO_LAYERS + " (from the readout, adam)" } else { "[24] (example default)" }));
 {
     let m = rng_stream(SEED + 5, N_SRC, P).window(WIN_MS, 1, PAIRS, STRENGTH);
     let f = play_window.call(m);

@@ -18,6 +18,13 @@
 //   sim --script examples/lsm_big_off.rhai [--cuda|--cpu]
 
 // ---------- parameters (identical to lsm_big except STRENGTH) ----------
+// Readout layers: if the readout "ro" carries a layer config (set in
+// the editor's inspector, or net.set_readout_layers) train THOSE hidden
+// layers (Adam); otherwise this example's own default. Read BEFORE
+// net.clear() — the rebuild below would drop it.
+let RO_LAYERS = net.readout_layers("ro");
+let HAS_LAYERS = type_of(RO_LAYERS) == "array";
+
 let SEED = 7;
 let Q = quick();
 let SIDE = if Q { 8 } else { 16 };
@@ -40,8 +47,12 @@ let SHARED_PER_PAIR = 48;
 let PRIV_PER_SRC = 24;
 let RIDGE_L = 1.0;
 let EPOCHS = if Q { 60 } else { 120 };
-let MLP_OPTS = #{hidden: 24, epochs: EPOCHS,
-                 lr: 0.05, wd: 0.0001, seed: SEED};
+let MLP_OPTS = if HAS_LAYERS {
+    #{layers: RO_LAYERS, opt: "adam", epochs: EPOCHS, wd: 0.0001, seed: SEED}
+} else {
+    #{hidden: 24, epochs: EPOCHS,
+      lr: 0.05, wd: 0.0001, seed: SEED}
+};
 
 // ---------- build (identical to lsm_big) ----------
 net.clear();
@@ -52,6 +63,7 @@ net.create_connections("res", CONN_SCALING, CONN_LAMBDA, W_REC);
 let res = net.neurons_of("res");
 let n_liq = res.len();
 net.add_readout("ro", res);
+if HAS_LAYERS { net.set_readout_layers("ro", RO_LAYERS); }
 for p in PAIRS {
     let pool = [];
     for k in 0..SHARED_PER_PAIR {
@@ -148,6 +160,7 @@ print("=== lsm_big_off: SIGNAL OFF control (strength=0) ===");
 print("backend=" + sim.backend() + "  quick=" + Q +
       "  synapses=" + net.synapse_count() +
       "  train=" + TRAIN_N + " test=" + TEST_N + " win=" + WIN_MS + "ms");
+print("mlp hidden layers: " + (if HAS_LAYERS { "" + RO_LAYERS + " (from the readout, adam)" } else { "[24] (example default)" }));
 {
     let m = rng_stream(SEED + 5, N_SRC, P).window(WIN_MS, 1, PAIRS, 0.0);
     let f = play_window.call(m);

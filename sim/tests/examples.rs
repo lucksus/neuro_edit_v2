@@ -35,6 +35,7 @@ const EXAMPLES: &[(&str, &str)] = &[
         "memory_window",
         include_str!("../../examples/memory_window.rhai"),
     ),
+    ("lsm_deep", include_str!("../../examples/lsm_deep.rhai")),
 ];
 
 /// Every backend the scripts must hold up on — CPU always, CUDA when a
@@ -433,6 +434,88 @@ fn job_examples_report() {
         assert!(
             out.iter().any(|l| l.contains(needle)),
             "{}: no {needle} line: {out:?}",
+            EXAMPLES[i].0
+        );
+    }
+}
+
+fn acc_of(out: &[String], key: &str) -> f64 {
+    metric(line_with(out, key), "acc")
+}
+
+/// lsm_deep (8000 → 512 under quick): the comment claims a live liquid,
+/// a 4-way task where the liquid readouts sit well above chance (0.25)
+/// on held-out windows while BOTH no-liquid baselines stay near it
+/// (balanced streams: rates carry nothing), and the deep readout is
+/// attached to "ro" with the default [128, 64] layers.
+/// Sabotage: `SWAPS = 20` (the copy decorrelates) → liquid accs fall to
+/// ~0.25; dropping the balanced shuffle (all streams equal) → raw stops
+/// being at chance; `W_IN = 0.0` → alive spikes 0.
+#[test]
+fn lsm_deep_liquid_beats_no_liquid() {
+    for b in backends() {
+        let run = eval_env(EXAMPLES[9].1, b, 2048);
+        assert!(
+            run.res.is_ok(),
+            "{b:?}: {} ({:?})",
+            run.res.err().unwrap_or_default(),
+            run.out.borrow()
+        );
+        let out = run.out.borrow();
+        let alive = metric(line_with(&out, "alive: spikes"), "spikes");
+        assert!(alive > 0.0, "{b:?}: dead liquid");
+        let (deep, one, ridge) = (
+            acc_of(&out, "test deep"),
+            acc_of(&out, "test 1hid"),
+            acc_of(&out, "test ridge"),
+        );
+        let (raw, bits) = (acc_of(&out, "test raw"), acc_of(&out, "test bits"));
+        for (k, a) in [("deep", deep), ("1hid", one), ("ridge", ridge)] {
+            assert!(a > 0.45, "{b:?}: liquid {k} acc {a} not above chance 0.25");
+        }
+        for (k, a) in [("raw", raw), ("bits", bits)] {
+            assert!(a < 0.4, "{b:?}: no-liquid {k} acc {a} — the task leaks");
+        }
+        let net = run.env.net.borrow();
+        let m = net.readout_mlp("ro").expect("deep MLP attached to ro");
+        assert_eq!(&m.sizes[1..], &[128, 64, 4], "{b:?}: default deep layers");
+        assert_eq!(m.head, net_format::MlpHead::Softmax);
+    }
+}
+
+/// The readout's layer config drives the rebuild: a net whose readout
+/// "ro" asks for [32, 16, 8] re-runs lsm_deep and lsm_big with those
+/// layers, the config survives `net.clear()`, and the attached MLP
+/// matches it (the inspector's "Train" flow, minus the UI).
+/// Sabotage: reading `net.readout_layers` AFTER `net.clear()` in an
+/// example → the default layers come back and this fails.
+#[test]
+fn examples_train_the_readouts_layers() {
+    for i in [3usize, 9] {
+        let out = Rc::new(RefCell::new(Vec::new()));
+        let o = out.clone();
+        let mut env = Env::with_print(
+            Network::new(),
+            BackendKind::Cpu,
+            1,
+            Rc::new(move |s: &str| o.borrow_mut().push(s.to_string())),
+        );
+        env.quick.set(true);
+        let _ = env
+            .eval_str(
+                "net.add_neuron(0, 0, 0); net.add_readout(\"ro\", [0]); \
+             net.set_readout_layers(\"ro\", [32, 16, 8]);",
+            )
+            .unwrap();
+        let r = env.eval_str(EXAMPLES[i].1);
+        assert!(r.is_ok(), "{}: {:?}", EXAMPLES[i].0, r.err());
+        let net = env.net.borrow();
+        assert_eq!(net.readout_layers("ro"), Some(&[32u32, 16, 8][..]));
+        let m = net.readout_mlp("ro").expect("trained mlp attached");
+        assert_eq!(m.hidden(), &[32, 16, 8], "{}", EXAMPLES[i].0);
+        assert!(
+            out.borrow().iter().any(|l| l.contains("from the readout")),
+            "{}: console must say the layers came from the readout",
             EXAMPLES[i].0
         );
     }

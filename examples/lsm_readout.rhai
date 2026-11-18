@@ -12,6 +12,13 @@
 //   After the script ends the liquid keeps firing on background noise,
 //   so pressing Run in the editor still shows activity.
 
+// Readout layers: if the readout "ro" carries a layer config (set in
+// the editor's inspector, or net.set_readout_layers) train THOSE hidden
+// layers (Adam); otherwise this example's own default. Read BEFORE
+// net.clear() — the rebuild below would drop it.
+let RO_LAYERS = net.readout_layers("ro");
+let HAS_LAYERS = type_of(RO_LAYERS) == "array";
+
 let SEED = 7;
 let SIDE = 6;                  // 6^3 = 216 reservoir neurons
 let N_SRC = 6;
@@ -38,6 +45,7 @@ net.create_connections("res", 1.0, 30.0, 1.0);
 let res = net.neurons_of("res");
 let n_res = res.len();
 net.add_readout("ro", res);
+if HAS_LAYERS { net.set_readout_layers("ro", RO_LAYERS); }
 
 // Each pair shares a big pool (the planted common bit hits the SAME
 // reservoir neurons).
@@ -121,8 +129,12 @@ for i in 0..TEST {
 }
 
 // --- train the non-spiking MLP on reservoir counts; ridge baseline ---
-let m_mlp = fit_mlp(X, TRAIN, n_res, Y,
-                    #{hidden: 16, epochs: 120, lr: 0.05, seed: SEED});
+let MLP_OPTS = if HAS_LAYERS {
+    #{layers: RO_LAYERS, opt: "adam", epochs: 120, seed: SEED}
+} else {
+    #{hidden: 16, epochs: 120, lr: 0.05, seed: SEED}
+};
+let m_mlp = fit_mlp(X, TRAIN, n_res, Y, MLP_OPTS);
 let wr = fit_ridge(X, TRAIN, n_res, Y, 1.0);
 net.set_readout_mlp("ro", m_mlp); // trained weights persist in the .ne2
 
@@ -133,6 +145,7 @@ for f in Xte {
     s_ridge.push(ridge_output(wr, f));
 }
 let f3 = |v| (v * 1000.0).to_int() / 1000.0;
+print("mlp hidden layers: " + (if HAS_LAYERS { "" + RO_LAYERS + " (from the readout, adam)" } else { "[16] (example default)" }));
 print("test ridge auc=" + f3.call(auc(s_ridge, labs)) +
       " acc=" + f3.call(accuracy(s_ridge, labs)));
 
