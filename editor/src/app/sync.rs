@@ -205,7 +205,8 @@ impl EditorApp {
                     .unwrap_or_default();
                 let was_empty = self.geo.as_ref().is_none_or(|old| old.pos.is_empty());
                 if !g.pos.is_empty() && (was_empty || self.frame_pending) {
-                    let (mn, mx) = gpu.scene.as_ref().unwrap().bounds;
+                    let (mn, mx) =
+                        crate::view::frame_bounds(&g).unwrap_or(gpu.scene.as_ref().unwrap().bounds);
                     self.camera.frame(mn, mx);
                 }
                 self.frame_pending = false;

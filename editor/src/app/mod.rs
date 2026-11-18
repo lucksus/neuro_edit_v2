@@ -864,7 +864,11 @@ impl eframe::App for EditorApp {
             let covered = self
                 .geo
                 .as_ref()
-                .is_some_and(|g| ids.iter().all(|&i| (i as usize) < g.pos.len()));
+                // any instance: neurons, inputs, readouts
+                .is_some_and(|g| {
+                    let n = g.pos.len() + g.inputs.len() + g.readouts.len();
+                    !g.pos.is_empty() && ids.iter().all(|&i| (i as usize) < n)
+                });
             if covered {
                 self.selection = ids.into_iter().collect();
             } else {

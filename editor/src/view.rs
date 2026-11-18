@@ -1167,19 +1167,54 @@ fn inst_pos(g: &GeoSnap, inst: u32) -> Option<Vec3> {
             }
             Some(Vec3::from(p))
         }
-        Some(Entity::Readout(k)) => {
-            let units = &g.readouts[k as usize].1;
-            if units.is_empty() {
-                return None;
-            }
-            let mut c = Vec3::ZERO;
-            for &u in units {
-                c += Vec3::from(g.pos[u as usize]);
-            }
-            Some(c / units.len() as f32 + Vec3::Y * 120.0)
-        }
+        Some(Entity::Readout(k)) => readout_anchor(g, k as usize).map(Vec3::from),
         None => None,
     }
+}
+
+/// Where a readout's marker sits: above the bounding box of its units
+/// (x/z at their centroid). The old centroid + 120 put "ro" inside any
+/// liquid taller than ~250 units — invisible in lsm_big (Stage 26).
+/// Shared by the GPU instance placement and picking/brackets.
+pub(crate) fn readout_anchor(g: &GeoSnap, k: usize) -> Option<[f32; 3]> {
+    let units = &g.readouts.get(k)?.1;
+    let (mut c, mut lo, mut hi, mut m) = (Vec3::ZERO, f32::MAX, f32::MIN, 0.0f32);
+    for &u in units {
+        if let Some(&p) = g.pos.get(u as usize) {
+            c += Vec3::from(p);
+            lo = lo.min(p[1]);
+            hi = hi.max(p[1]);
+            m += 1.0;
+        }
+    }
+    if m == 0.0 {
+        return None;
+    }
+    let c = c / m;
+    Some([c.x, hi + 0.15 * (hi - lo) + 60.0, c.z])
+}
+
+/// Camera-framing bounds: the neurons plus every readout marker, with
+/// headroom above a marker for the MLP stack painted over it — so
+/// "Frame network" and the first auto-frame show the readout too.
+pub(crate) fn frame_bounds(g: &GeoSnap) -> Option<(Vec3, Vec3)> {
+    let (mut mn, mut mx) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for p in &g.pos {
+        mn = mn.min((*p).into());
+        mx = mx.max((*p).into());
+    }
+    if mn.x > mx.x {
+        return None;
+    }
+    let h = (mx - mn).max_element().max(100.0);
+    for k in 0..g.readouts.len() {
+        if let Some(a) = readout_anchor(g, k) {
+            let a = Vec3::from(a);
+            mn = mn.min(a);
+            mx = mx.max(a + Vec3::Y * 0.3 * h);
+        }
+    }
+    Some((mn, mx))
 }
 
 /// Selection corner brackets + mode hint.
@@ -1225,6 +1260,20 @@ fn overlay_2d(app: &EditorApp, ui: &mut egui::Ui, rect: egui::Rect, aspect: f32)
             let Some(r) = aabb_screen_rect(&app.camera, aspect, rect, mn, mx) else {
                 continue;
             };
+            // Camera inside / right against the box: corners behind the
+            // eye drop out of the projection and the rect balloons over
+            // the viewport — a dim full-screen veil with the outline and
+            // label off-screen (Stage 26 shots). Outline only then, label
+            // kept on screen.
+            let behind = (0..8).any(|i| {
+                let p = Vec3::new(
+                    if i & 1 == 0 { mn.x } else { mx.x },
+                    if i & 2 == 0 { mn.y } else { mx.y },
+                    if i & 4 == 0 { mn.z } else { mx.z },
+                );
+                project(&app.camera, aspect, p).is_none()
+            });
+            let veil = behind || r.width() * r.height() > 0.8 * rect.width() * rect.height();
             let sel = app.group_fully_selected(members);
             let (fill, edge) = if sel {
                 (
@@ -1237,15 +1286,22 @@ fn overlay_2d(app: &EditorApp, ui: &mut egui::Ui, rect: egui::Rect, aspect: f32)
                     egui::Color32::from_rgb(205, 190, 100),
                 )
             };
-            painter.rect_filled(r, 6.0, fill);
+            if !veil {
+                painter.rect_filled(r, 6.0, fill);
+            }
             painter.rect_stroke(
                 r,
                 6.0,
                 egui::Stroke::new(if sel { 2.0 } else { 1.4_f32 }, edge),
                 egui::StrokeKind::Inside,
             );
+            let lr = r.intersect(rect.shrink(30.0));
             painter.text(
-                r.center(),
+                if lr.is_positive() {
+                    lr.center()
+                } else {
+                    rect.center()
+                },
                 egui::Align2::CENTER_CENTER,
                 format!("{name}\n{} neurons", members.len()),
                 egui::FontId::proportional(13.0),
@@ -1341,6 +1397,20 @@ fn draw_mlp_stacks(
         if !panel.intersects(rect) {
             continue;
         }
+        // Keep the whole stack on screen when its marker is near an edge
+        // (the tie line below still points at the marker).
+        let mut shift = egui::Vec2::ZERO;
+        let inner = rect.shrink(4.0);
+        if panel.min.y < inner.min.y {
+            shift.y = inner.min.y - panel.min.y;
+        }
+        if panel.min.x < inner.min.x {
+            shift.x = inner.min.x - panel.min.x;
+        } else if panel.max.x > inner.max.x {
+            shift.x = inner.max.x - panel.max.x;
+        }
+        let panel = panel.translate(shift);
+        let xs: Vec<f32> = xs.iter().map(|x| x + shift.x).collect();
         let sel = app.selection.contains(&((base + k) as u32));
         let edge = if sel {
             Color32::from_rgb(255, 120, 40)
@@ -1419,7 +1489,10 @@ fn draw_mlp_stacks(
         }
         // Tie the stack to its marker cube below.
         painter.line_segment(
-            [egui::pos2(c.x, panel.max.y), c],
+            [
+                egui::pos2(c.x.clamp(panel.min.x, panel.max.x), panel.max.y),
+                c,
+            ],
             Stroke::new(1.0, edge.gamma_multiply(0.7)),
         );
     }

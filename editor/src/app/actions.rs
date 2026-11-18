@@ -66,12 +66,7 @@ impl EditorApp {
     /// Fit the camera on the whole network.
     pub fn frame_all(&mut self) {
         let Some(g) = &self.geo else { return };
-        let (mut mn, mut mx) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
-        for p in &g.pos {
-            mn = mn.min((*p).into());
-            mx = mx.max((*p).into());
-        }
-        if mn.x <= mx.x {
+        if let Some((mn, mx)) = crate::view::frame_bounds(g) {
             self.camera.frame(mn, mx);
         }
     }

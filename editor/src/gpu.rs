@@ -797,25 +797,9 @@ impl Gpu {
             });
             entity_of_inst.push(Entity::Input(k as u32));
         }
-        for (k, (name, _, _)) in geo.readouts.iter().enumerate() {
-            let _ = name;
-            // readout marker at centroid + offset
-            let units = &geo.readouts[k].1;
-            let mut c = [0f32; 3];
-            if !units.is_empty() {
-                let mut m = 0f32;
-                for &u in units {
-                    if let Some(&tp) = geo.pos.get(u as usize) {
-                        c[0] += tp[0];
-                        c[1] += tp[1];
-                        c[2] += tp[2];
-                        m += 1.0;
-                    }
-                }
-                if m > 0.0 {
-                    c = [c[0] / m, c[1] / m + 120.0, c[2] / m];
-                }
-            }
+        for k in 0..geo.readouts.len() {
+            // marker above its units' bounding box (shared with picking)
+            let c = crate::view::readout_anchor(geo, k).unwrap_or([0.0; 3]);
             inst_half.push(7.0);
             inst.push(Inst {
                 pos_scale: [c[0], c[1], c[2], 7.0],

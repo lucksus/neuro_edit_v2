@@ -100,7 +100,10 @@ impl Camera {
         let c = (min + max) * 0.5;
         let r = (max - min).length().max(1.0);
         self.target = c;
-        self.dist = (r * 0.9).clamp(70.0, 10_000.0);
+        // r is the full diagonal: the bounding sphere (radius r/2) fits
+        // a 60° vertical FOV at r/2 / sin 30° = r; 1.1 leaves a margin
+        // (0.9 cropped every net's bottom edge — Stage 26 shots).
+        self.dist = (r * 1.1).clamp(70.0, 10_000.0);
         self.anim = None;
         self.clamp_above_floor();
     }

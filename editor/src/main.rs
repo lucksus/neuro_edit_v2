@@ -247,6 +247,9 @@ fn main() -> anyhow::Result<()> {
             desired_maximum_frame_latency: Some(1),
             ..Default::default()
         },
+        // An explicit --window-size must win over the size eframe saved
+        // last session (review shots came out at the old size).
+        persist_window: cli.window_size.is_none(),
         ..Default::default()
     };
     eframe::run_native(
