@@ -386,6 +386,7 @@ fn help_text(topic: &str) -> String {
             "readout: add_readout(name,units)  set_readout_weights(name,w)  readout_weights(name)\n  \
              delta_new(n)  r.learn(trace,target,rate)  r.output(trace)\n  \
              fit_ridge(x_flat,T,F,y,lambda)  ridge_output(w,x)  accuracy(s,y)  auc(s,y)\n  \
+             fit_ridge_multi(x_flat,T,F,labels,K,lambda)  ridge_predict(ws,x)\n  \
              fit_mlp(x_flat,T,F,y[,#{layers:[128,64]|hidden,classes,act:\"tanh\"|\"relu\",\n    \
              opt:\"sgd\"|\"adam\",batch,epochs,lr,wd,seed,val_frac,patience}])\n  \
              mlp_output(m,x)  mlp_scores(m,x)  mlp_predict(m,x)  mlp_sizes(m)  mlp_act(m)\n  \
@@ -2048,6 +2049,72 @@ pub fn register_api(
     engine.register_fn("weights", |ro: &mut DeltaReadout| -> rhai::Array {
         ro.weights.iter().map(|&w| dyn_f64(w as f64)).collect()
     });
+    // `fit_ridge_multi(x, T, F, labels, K, lambda)` → K ridge weight
+    // vectors (one-hot targets, dual solve — fine at 8000 features);
+    // `ridge_predict(ws, row)` → argmax class.
+    engine.register_fn(
+        "fit_ridge_multi",
+        |x: rhai::Array,
+         n_rows: rhai::INT,
+         n_feat: rhai::INT,
+         labels: rhai::Array,
+         k: rhai::INT,
+         lambda: Dynamic|
+         -> Result<rhai::Array, Box<rhai::EvalAltResult>> {
+            let (t, f, k) = (
+                n_rows.max(0) as usize,
+                n_feat.max(0) as usize,
+                k.max(0) as usize,
+            );
+            if x.len() < t.saturating_mul(f) || labels.len() < t || t < 2 || k < 2 {
+                return Err(s_err(format!(
+                    "fit_ridge_multi: need x ≥ T*F, labels ≥ T, T ≥ 2, K ≥ 2 (T={t} F={f} K={k})"
+                )));
+            }
+            let xf: Vec<f32> = x.iter().take(t * f).map(|d| d_f64(d) as f32).collect();
+            let mut lab = Vec::with_capacity(t);
+            for d in labels.iter().take(t) {
+                let l = d_i64(d);
+                if l < 0 || l as usize >= k {
+                    return Err(s_err(format!("fit_ridge_multi: label {l} outside 0..{k}")));
+                }
+                lab.push(l as usize);
+            }
+            let ws = crate::readout::fit_ridge_multi(&xf, t, f, &lab, k, d_f64(&lambda));
+            Ok(ws
+                .into_iter()
+                .map(|w| Dynamic::from(w.into_iter().map(dyn_f64).collect::<rhai::Array>()))
+                .collect())
+        },
+    );
+    engine.register_fn(
+        "ridge_predict",
+        |ws: rhai::Array, row: rhai::Array| -> Result<rhai::INT, Box<rhai::EvalAltResult>> {
+            let xf: Vec<f32> = row.iter().map(|d| d_f64(d) as f32).collect();
+            let mut best = (0usize, f64::NEG_INFINITY);
+            for (c, w) in ws.iter().enumerate() {
+                let w: Vec<f64> = w
+                    .clone()
+                    .try_cast::<rhai::Array>()
+                    .ok_or_else(|| s_err("ridge_predict: ws must be fit_ridge_multi's result"))?
+                    .iter()
+                    .map(d_f64)
+                    .collect();
+                if w.len() != xf.len() + 1 {
+                    return Err(s_err(format!(
+                        "ridge_predict: row has {} features, weights want {}",
+                        xf.len(),
+                        w.len() - 1
+                    )));
+                }
+                let s = ridge_output(&w, &xf);
+                if s > best.1 {
+                    best = (c, s);
+                }
+            }
+            Ok(best.0 as rhai::INT)
+        },
+    );
     engine.register_fn(
         "fit_ridge",
         |x: rhai::Array,

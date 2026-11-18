@@ -180,6 +180,76 @@ pub fn cholesky_solve(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
     Some(w)
 }
 
+/// Multi-class ridge (one-hot targets, argmax at inference) solved in the
+/// DUAL: with T rows ≪ F features the T×T Gram system replaces the F×F
+/// normal equations (`fit_ridge` on 8000 features is an 8000² Cholesky).
+/// Columns and targets are centred on their means so the bias stays
+/// unregularized — the same minimizer as primal ridge with a free bias.
+/// Returns K weight vectors, each `F + 1` long with the bias trailing
+/// (`ridge_output` applies one).
+pub fn fit_ridge_multi(
+    x: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    labels: &[usize],
+    k: usize,
+    lambda: f64,
+) -> Vec<Vec<f64>> {
+    let (t, f) = (n_rows, n_features);
+    let mut mu = vec![0.0f64; f];
+    for r in 0..t {
+        for (m, &v) in mu.iter_mut().zip(&x[r * f..(r + 1) * f]) {
+            *m += v as f64;
+        }
+    }
+    mu.iter_mut().for_each(|m| *m /= t as f64);
+    let xc: Vec<f64> = (0..t * f).map(|i| x[i] as f64 - mu[i % f]).collect();
+    let mut ybar = vec![0.0f64; k];
+    for &l in labels {
+        ybar[l] += 1.0 / t as f64;
+    }
+    // Gram G = Xc Xcᵀ + λI (4 accumulators per dot: vectorizes).
+    let mut g = vec![0.0f64; t * t];
+    for i in 0..t {
+        let ri = &xc[i * f..(i + 1) * f];
+        for j in 0..=i {
+            let rj = &xc[j * f..(j + 1) * f];
+            let mut acc = [0.0f64; 4];
+            let (ci, ti) = ri.as_chunks::<4>();
+            let (cj, tj) = rj.as_chunks::<4>();
+            for (a, b) in ci.iter().zip(cj) {
+                for q in 0..4 {
+                    acc[q] += a[q] * b[q];
+                }
+            }
+            let mut s: f64 = ti.iter().zip(tj).map(|(a, b)| a * b).sum();
+            s += acc.iter().sum::<f64>();
+            g[i * t + j] = s;
+            g[j * t + i] = s;
+        }
+        g[i * t + i] += lambda;
+    }
+    (0..k)
+        .map(|c| {
+            let yc: Vec<f64> = labels
+                .iter()
+                .map(|&l| (l == c) as u8 as f64 - ybar[c])
+                .collect();
+            let a = cholesky_solve(&g, &yc, t).unwrap_or_else(|| vec![0.0; t]);
+            let mut w = vec![0.0f64; f + 1];
+            for r in 0..t {
+                let ar = a[r];
+                for (wv, &xv) in w[..f].iter_mut().zip(&xc[r * f..(r + 1) * f]) {
+                    *wv += ar * xv;
+                }
+            }
+            let dot: f64 = w[..f].iter().zip(&mu).map(|(a, b)| a * b).sum();
+            w[f] = ybar[c] - dot;
+            w
+        })
+        .collect()
+}
+
 /// Apply a readout `w` (from `fit_ridge`) to one feature row; last weight is bias.
 pub fn ridge_output(w: &[f64], features: &[f32]) -> f64 {
     let n = features.len();
@@ -277,5 +347,28 @@ mod tests {
         }
         assert!(ro.output(&[1.0, 0.0]) > 0.5);
         assert!(ro.output(&[0.0, 1.0]) < 0.5);
+    }
+
+    /// Dual multi-class ridge = primal ridge per class (free bias):
+    /// one-vs-rest scores from `fit_ridge` and `fit_ridge_multi` agree.
+    #[test]
+    fn ridge_multi_dual_matches_primal() {
+        let mut rng = net_format::Rng::new(3);
+        let (t, f, k) = (40, 7, 3);
+        let x: Vec<f32> = (0..t * f).map(|_| rng.uniform(-1.0, 1.0) as f32).collect();
+        let labels: Vec<usize> = (0..t).map(|r| r % k).collect();
+        let ws = fit_ridge_multi(&x, t, f, &labels, k, 0.7);
+        for c in 0..k {
+            let y: Vec<f32> = labels.iter().map(|&l| (l == c) as u8 as f32).collect();
+            let wp = fit_ridge(&x, t, f, &y, 0.7);
+            for r in 0..t {
+                let row = &x[r * f..(r + 1) * f];
+                let (a, b) = (ridge_output(&wp, row), ridge_output(&ws[c], row));
+                assert!(
+                    (a - b).abs() < 1e-4,
+                    "class {c} row {r}: primal {a} dual {b}"
+                );
+            }
+        }
     }
 }
