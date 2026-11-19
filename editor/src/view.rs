@@ -317,7 +317,20 @@ pub fn viewport(app: &mut EditorApp, ctx: &egui::Context, rs: &egui_wgpu::Render
                 || (resp.drag_started_by(egui::PointerButton::Primary)
                     && app.eff_mode() == Mode::Move)
             {
-                if let Some(mv) = mouse_vp {
+                // A click on a drawn MLP stack selects its readout (the
+                // stack is screen-space, the GPU pick can't see it).
+                let stack_hit = mouse_vp.and_then(|mv| {
+                    let g = app.geo.as_ref()?;
+                    let pos = egui::pos2(
+                        rect.min.x + mv.x * rect.width(),
+                        rect.min.y + mv.y * rect.height(),
+                    );
+                    mlp_stack_at(&app.camera, g, rect, aspect, pos)
+                        .map(|k| (g.pos.len() + g.inputs.len() + k) as u32)
+                });
+                if let (Some(inst), true) = (stack_hit, resp.clicked()) {
+                    app.selection = std::iter::once(inst).collect();
+                } else if let Some(mv) = mouse_vp {
                     app.pick_click = Some((mv, app.wall_ms));
                     // A collapsed block is a CPU-only glyph — remember it
                     // so a pick miss still lands on the group. A real
@@ -948,12 +961,8 @@ fn mode_input(
                 if let (Some(g), Some(mv)) = (&app.geo, mouse_vp) {
                     let (ro, rd) = ray(&app.camera, aspect, mv.x, mv.y);
                     let hidden = app.block_members();
-                    match nearest_on_ray(g, ro, rd, 25.0, &hidden) {
-                        Some(inst) => {
-                            if let Some(p) = inst_pos(g, inst) {
-                                app.camera.focus(p);
-                            }
-                        }
+                    match focus_point(&app.camera, g, rect, aspect, mv, &hidden) {
+                        Some(p) => app.camera.focus(p),
                         None => {
                             // … or a collapsed block under the cursor —
                             // focus its centre.
@@ -1041,19 +1050,22 @@ fn nearest_on_ray(
 ) -> Option<u32> {
     let mut best = None;
     let mut best_d = max_t;
-    for (i, p) in g.pos.iter().enumerate() {
-        if skip.contains(&(i as u32)) {
+    // neurons, then inputs, then readout markers (instance order)
+    let n = g.pos.len() + g.inputs.len() + g.readouts.len();
+    for i in 0..n as u32 {
+        if skip.contains(&i) {
             continue;
         }
-        let c = Vec3::from(*p) - ro;
+        let Some(p) = inst_pos(g, i) else { continue };
+        let c = p - ro;
         let t = c.dot(rd);
-        if !(0.0..=4000.0).contains(&t) {
+        if t < 0.0 {
             continue;
         }
         let d = (c - rd * t).length();
         if d < best_d {
             best_d = d;
-            best = Some(i as u32);
+            best = Some(i);
         }
     }
     best
@@ -1359,6 +1371,100 @@ pub(crate) fn mlp_stack_layout(
     (panel, xs, hs)
 }
 
+/// Screen geometry of readout `k`'s MLP stack exactly as drawn — the
+/// painter and the double-click hit test share it (Stage 27: focusing
+/// the drawn stack used to miss it and glide to the floor).
+pub(crate) struct StackGeom {
+    pub panel: egui::Rect,
+    pub xs: Vec<f32>,
+    pub hs: Vec<f32>,
+    pub zoom: f32,
+    /// Projected readout marker.
+    pub c: egui::Pos2,
+}
+
+pub(crate) fn mlp_stack_geom(
+    cam: &Camera,
+    g: &GeoSnap,
+    k: usize,
+    rect: egui::Rect,
+    aspect: f32,
+) -> Option<StackGeom> {
+    let m = g.readout_mlps.get(k)?;
+    if m.sizes.len() < 2 {
+        return None;
+    }
+    let p = Vec3::from(readout_anchor(g, k)?);
+    let nd = project(cam, aspect, p)?;
+    let c = egui::pos2(
+        rect.min.x + nd.x * rect.width(),
+        rect.min.y + nd.y * rect.height(),
+    );
+    // Zoom with the camera, inside a readable band: the marker's
+    // projected size against its size at the default framing.
+    let px = screen_box_rect(cam, aspect, rect, p, 40.0).map_or(80.0, |r| r.height());
+    let zoom = (px / 80.0).clamp(0.9, 1.6);
+    let (panel, xs, hs) = mlp_stack_layout(c, &m.sizes, zoom);
+    if !panel.intersects(rect) {
+        return None;
+    }
+    // Keep the whole stack on screen when its marker is near an edge
+    // (the tie line still points at the marker).
+    let mut shift = egui::Vec2::ZERO;
+    let inner = rect.shrink(4.0);
+    if panel.min.y < inner.min.y {
+        shift.y = inner.min.y - panel.min.y;
+    }
+    if panel.min.x < inner.min.x {
+        shift.x = inner.min.x - panel.min.x;
+    } else if panel.max.x > inner.max.x {
+        shift.x = inner.max.x - panel.max.x;
+    }
+    Some(StackGeom {
+        panel: panel.translate(shift),
+        xs: xs.iter().map(|x| x + shift.x).collect(),
+        hs,
+        zoom,
+        c,
+    })
+}
+
+/// Readout whose drawn MLP stack contains screen point `pos`.
+pub(crate) fn mlp_stack_at(
+    cam: &Camera,
+    g: &GeoSnap,
+    rect: egui::Rect,
+    aspect: f32,
+    pos: egui::Pos2,
+) -> Option<usize> {
+    (0..g.readouts.len())
+        .find(|&k| mlp_stack_geom(cam, g, k, rect, aspect).is_some_and(|sg| sg.panel.contains(pos)))
+}
+
+/// Double-click focus target at viewport-normalized `mv`: a readout's
+/// drawn MLP stack → that readout's marker; else the nearest instance
+/// (neuron, input OR readout marker — readouts used to be skipped, so a
+/// click on one landed on whatever lay behind it). `None` = nothing
+/// object-like here; the caller falls back to block/plane.
+pub(crate) fn focus_point(
+    cam: &Camera,
+    g: &GeoSnap,
+    rect: egui::Rect,
+    aspect: f32,
+    mv: Vec2,
+    hidden: &std::collections::HashSet<u32>,
+) -> Option<Vec3> {
+    let pos = egui::pos2(
+        rect.min.x + mv.x * rect.width(),
+        rect.min.y + mv.y * rect.height(),
+    );
+    if let Some(k) = mlp_stack_at(cam, g, rect, aspect, pos) {
+        return readout_anchor(g, k).map(Vec3::from);
+    }
+    let (ro, rd) = ray(cam, aspect, mv.x, mv.y);
+    nearest_on_ray(g, ro, rd, 25.0, hidden).and_then(|i| inst_pos(g, i))
+}
+
 /// Stage 26: a readout with a trained MLP draws as a small layered stack
 /// — one bar per layer (height ~ log size) labelled "128 tanh", thin
 /// fan lines between consecutive layers, the readout's name on top (and
@@ -1376,41 +1482,16 @@ fn draw_mlp_stacks(
     use egui::{Color32, FontId, Stroke};
     let base = g.pos.len() + g.inputs.len();
     for (k, m) in g.readout_mlps.iter().enumerate() {
-        if m.sizes.len() < 2 {
-            continue;
-        }
-        let Some(p) = inst_pos(g, (base + k) as u32) else {
+        let Some(StackGeom {
+            panel,
+            xs,
+            hs,
+            zoom,
+            c,
+        }) = mlp_stack_geom(&app.camera, g, k, rect, aspect)
+        else {
             continue;
         };
-        let Some(nd) = project(&app.camera, aspect, p) else {
-            continue;
-        };
-        let c = egui::pos2(
-            rect.min.x + nd.x * rect.width(),
-            rect.min.y + nd.y * rect.height(),
-        );
-        // Zoom with the camera, inside a readable band: the marker's
-        // projected size against its size at the default framing.
-        let px = screen_box_rect(&app.camera, aspect, rect, p, 40.0).map_or(80.0, |r| r.height());
-        let zoom = (px / 80.0).clamp(0.9, 1.6);
-        let (panel, xs, hs) = mlp_stack_layout(c, &m.sizes, zoom);
-        if !panel.intersects(rect) {
-            continue;
-        }
-        // Keep the whole stack on screen when its marker is near an edge
-        // (the tie line below still points at the marker).
-        let mut shift = egui::Vec2::ZERO;
-        let inner = rect.shrink(4.0);
-        if panel.min.y < inner.min.y {
-            shift.y = inner.min.y - panel.min.y;
-        }
-        if panel.min.x < inner.min.x {
-            shift.x = inner.min.x - panel.min.x;
-        } else if panel.max.x > inner.max.x {
-            shift.x = inner.max.x - panel.max.x;
-        }
-        let panel = panel.translate(shift);
-        let xs: Vec<f32> = xs.iter().map(|x| x + shift.x).collect();
         let sel = app.selection.contains(&((base + k) as u32));
         let edge = if sel {
             Color32::from_rgb(255, 120, 40)
@@ -1544,6 +1625,63 @@ fn draw_bracket(painter: &egui::Painter, r: egui::Rect, col: egui::Color32) {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// Stage 27 bug: double-click "center on the readout" glided the
+    /// camera elsewhere — readouts weren't ray-tested and the drawn MLP
+    /// stack (screen-space) wasn't hit-tested, so focus fell through to
+    /// a floor-plane point. Both now resolve to the readout's marker.
+    /// Sabotage: dropping the stack branch in `focus_point` makes the
+    /// stack-centre case return a neuron/None and this fails.
+    #[test]
+    fn focus_on_readout_stack_and_marker_hits_the_readout() {
+        let mut g = crate::snap::GeoSnap::default();
+        // 4×4×4 lattice, 60 apart — a small liquid
+        for x in 0..4 {
+            for y in 0..4 {
+                for z in 0..4 {
+                    g.pos
+                        .push([x as f32 * 60.0, y as f32 * 60.0, z as f32 * 60.0]);
+                }
+            }
+        }
+        let units: Vec<u32> = (0..g.pos.len() as u32).collect();
+        g.readouts.push(("ro".into(), units, Vec::new()));
+        g.readout_mlps.push(proto::ReadoutMlp {
+            layers: vec![],
+            sizes: vec![64, 128, 64, 4],
+            act: "tanh".into(),
+            softmax: true,
+        });
+        let anchor = Vec3::from(readout_anchor(&g, 0).unwrap());
+        let mut cam = Camera::default();
+        let (mn, mx) = frame_bounds(&g).unwrap();
+        cam.frame(mn, mx);
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 800.0));
+        let aspect = 1.5;
+        let none = std::collections::HashSet::new();
+        let to_mv = |p: egui::Pos2| Vec2::new(p.x / rect.width(), p.y / rect.height());
+
+        // centre of the drawn stack → the readout marker
+        let sg = mlp_stack_geom(&cam, &g, 0, rect, aspect).expect("stack on screen");
+        let f = focus_point(&cam, &g, rect, aspect, to_mv(sg.panel.center()), &none).unwrap();
+        assert!(
+            (f - anchor).length() < 1e-3,
+            "stack focus {f} vs anchor {anchor}"
+        );
+        // the marker cube itself → the readout marker (not a neuron)
+        let f = focus_point(&cam, &g, rect, aspect, to_mv(sg.c), &none).unwrap();
+        assert!(
+            (f - anchor).length() < 1e-3,
+            "marker focus {f} vs anchor {anchor}"
+        );
+        // a neuron still focuses that neuron
+        let n0 = Vec3::from(g.pos[21]);
+        let nd = project(&cam, aspect, n0).unwrap();
+        let f = focus_point(&cam, &g, rect, aspect, nd, &none).unwrap();
+        assert!((f - n0).length() < 1e-3, "neuron focus {f}");
+        // the anchor sits above the liquid's top layer, over its centre
+        assert!(anchor.y > 180.0 && (anchor.x - 90.0).abs() < 1e-3);
+    }
 
     fn cam() -> Camera {
         let mut c = Camera::default();
