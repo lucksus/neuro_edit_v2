@@ -35,6 +35,9 @@ net.create_connections("res", 0.35, 90.0, W_REC);
 let res = net.neurons_of("res");
 let n_liq = res.len();
 net.add_readout("ro", res);
+// Planned readout layers (same default as lsm_deep): drawn as an
+// untrained stack above the marker; Deep readout trains exactly these.
+net.set_readout_layers("ro", [128, 64]);
 
 // Liquid bounds, measured (the grid is centred near the origin).
 let lo = [1.0e9, 1.0e9, 1.0e9];

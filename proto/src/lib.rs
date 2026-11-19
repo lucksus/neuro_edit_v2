@@ -300,6 +300,28 @@ impl ReadoutMlp {
         &self.sizes[1..self.sizes.len() - 1]
     }
 
+    /// No trained net yet, but layers are configured: the stack is drawn
+    /// from the plan (`shown_sizes`), greyed out.
+    pub fn planned(&self) -> bool {
+        self.sizes.len() < 2 && !self.layers.is_empty()
+    }
+
+    /// Sizes the scene stack shows: the trained net's, else the planned
+    /// `[n_in, layers…, 0]` (0 = head size not known before training),
+    /// else empty (no stack).
+    pub fn shown_sizes(&self, n_in: usize) -> Vec<u32> {
+        if self.sizes.len() >= 2 {
+            return self.sizes.clone();
+        }
+        if self.layers.is_empty() {
+            return Vec::new();
+        }
+        let mut s = vec![n_in as u32];
+        s.extend_from_slice(&self.layers);
+        s.push(0);
+        s
+    }
+
     /// A trained net is attached but its hidden layers differ from the
     /// wanted config — the inspector says "needs retraining".
     pub fn stale(&self) -> bool {
@@ -967,6 +989,18 @@ pub fn decode<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, bincode::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readout_mlp_shown_sizes_planned_then_trained() {
+        let mut m = ReadoutMlp::default();
+        assert!(m.shown_sizes(8000).is_empty() && !m.planned());
+        m.layers = vec![128, 64];
+        assert!(m.planned());
+        assert_eq!(m.shown_sizes(8000), vec![8000, 128, 64, 0]);
+        m.sizes = vec![8000, 32, 4];
+        assert!(!m.planned());
+        assert_eq!(m.shown_sizes(8000), vec![8000, 32, 4]);
+    }
 
     fn round_trip<T>(m: &T)
     where

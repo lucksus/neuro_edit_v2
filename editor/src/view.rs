@@ -1391,7 +1391,9 @@ pub(crate) fn mlp_stack_geom(
     aspect: f32,
 ) -> Option<StackGeom> {
     let m = g.readout_mlps.get(k)?;
-    if m.sizes.len() < 2 {
+    let n_in = g.readouts.get(k).map_or(0, |r| r.1.len());
+    let sizes = m.shown_sizes(n_in);
+    if sizes.len() < 2 {
         return None;
     }
     let p = Vec3::from(readout_anchor(g, k)?);
@@ -1404,7 +1406,7 @@ pub(crate) fn mlp_stack_geom(
     // projected size against its size at the default framing.
     let px = screen_box_rect(cam, aspect, rect, p, 40.0).map_or(80.0, |r| r.height());
     let zoom = (px / 80.0).clamp(0.9, 1.6);
-    let (panel, xs, hs) = mlp_stack_layout(c, &m.sizes, zoom);
+    let (panel, xs, hs) = mlp_stack_layout(c, &sizes, zoom);
     if !panel.intersects(rect) {
         return None;
     }
@@ -1508,17 +1510,22 @@ fn draw_mlp_stacks(
         let fs = (10.5 * zoom).clamp(9.0, 14.0);
         let name = &g.readouts.get(k).map_or("", |r| r.0.as_str());
         let stale = m.stale();
+        let planned = m.planned();
         painter.text(
             egui::pos2(panel.center().x, panel.min.y + 3.0 * zoom),
             egui::Align2::CENTER_TOP,
             if stale {
                 format!("{name} — needs retraining")
+            } else if planned {
+                format!("{name} — MLP (untrained)")
             } else {
                 format!("{name} — MLP")
             },
             FontId::proportional(fs),
             if stale {
                 Color32::from_rgb(240, 170, 60)
+            } else if planned {
+                Color32::from_rgb(160, 168, 182)
             } else {
                 Color32::from_rgb(210, 220, 235)
             },
@@ -1527,7 +1534,26 @@ fn draw_mlp_stacks(
         let label_h = 31.0 * zoom;
         let base_y = panel.max.y - label_h - 4.0 * zoom;
         let bw = 12.0 * zoom;
-        let labels = crate::app::readout_layer_labels(m);
+        // Untrained: label the planned stack (in, hidden…, head "?").
+        let labels: Vec<(String, String)> = if planned {
+            let n_in = g.readouts.get(k).map_or(0, |r| r.1.len());
+            let sizes = m.shown_sizes(n_in);
+            let last = sizes.len() - 1;
+            sizes
+                .iter()
+                .enumerate()
+                .map(|(i, s)| match i {
+                    0 => (s.to_string(), "in".to_string()),
+                    i if i == last => ("?".to_string(), "out".to_string()),
+                    _ => (s.to_string(), "hidden".to_string()),
+                })
+                .collect()
+        } else {
+            crate::app::readout_layer_labels(m)
+                .into_iter()
+                .map(|(s, t)| (s.to_string(), t))
+                .collect()
+        };
         let bars: Vec<egui::Rect> = xs
             .iter()
             .zip(&hs)
@@ -1559,6 +1585,8 @@ fn draw_mlp_stacks(
             } else {
                 Color32::from_rgb(110, 200, 170) // hidden
             };
+            // Untrained: same layout, washed out — no weights yet.
+            let col = if planned { col.gamma_multiply(0.45) } else { col };
             painter.rect_filled(*r, 2.0, col);
             painter.text(
                 egui::pos2(r.center().x, base_y + 3.0 * zoom),
