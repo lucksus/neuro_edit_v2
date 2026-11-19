@@ -881,6 +881,9 @@ impl crate::Backend for CudaSim {
     fn external(&self) -> Vec<f32> {
         self.external()
     }
+    fn loop_input(&mut self, input: usize, series: Vec<f32>) {
+        self.stimulus.play_looped(input, self.t, series);
+    }
     fn play_input(&mut self, input: usize, series: Vec<f32>) {
         self.play_input(input, series)
     }

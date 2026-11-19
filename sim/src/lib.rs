@@ -159,6 +159,8 @@ pub trait Backend {
     fn external(&self) -> Vec<f32>;
     /// Play a per-step series on `input` starting at the current step.
     fn play_input(&mut self, input: usize, series: Vec<f32>);
+    /// Like `play_input`, but the series repeats forever (survives Reset).
+    fn loop_input(&mut self, input: usize, series: Vec<f32>);
     /// Set watched-neuron ids whose per-step state is recorded (editor
     /// plots). No-op when unchanged; safe to call every publish.
     fn set_v_watch(&mut self, ids: &[u32]);

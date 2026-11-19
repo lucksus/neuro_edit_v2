@@ -14,6 +14,10 @@ pub struct Stimulus {
     /// input index -> step at which that input's series playback starts.
     /// Per-input: playing input B must not move input A's playhead.
     pub play_start: Vec<u64>,
+    /// input index -> the series repeats forever (`loop_input`) instead
+    /// of falling back to 0 after its last step (Stage 27: demo drive
+    /// that keeps the liquid busy for as long as Run is on).
+    pub looped: Vec<bool>,
 }
 
 /// Per-neuron stimulus routing, flattened for the simulators:
@@ -59,6 +63,7 @@ impl Stimulus {
             constants: vec![0.0; net.inputs.len()],
             series: vec![Vec::new(); net.inputs.len()],
             play_start: vec![0; net.inputs.len()],
+            looped: vec![false; net.inputs.len()],
         }
     }
 
@@ -73,6 +78,24 @@ impl Stimulus {
         }
         self.series[k] = series;
         self.play_start[k] = t;
+        if k < self.looped.len() {
+            self.looped[k] = false;
+        }
+    }
+
+    /// Like `play`, but the series repeats forever. The phase is
+    /// `(t − start) mod len` (Euclidean), so a sim reset to t = 0 keeps
+    /// looping instead of going silent.
+    pub fn play_looped(&mut self, k: usize, t: u64, series: Vec<f32>) {
+        self.play(k, t, series);
+        if k >= self.looped.len() {
+            self.looped.resize(k + 1, false);
+        }
+        self.looped[k] = true;
+    }
+
+    fn is_looped(&self, k: usize) -> bool {
+        self.looped.get(k).copied().unwrap_or(false)
     }
 
     /// Value of input `k` at step `t` (0 outside a played series' range).
@@ -80,6 +103,10 @@ impl Stimulus {
         if let Some(series) = self.series.get(k) {
             if !series.is_empty() {
                 let start = self.play_start.get(k).copied().unwrap_or(0);
+                if self.is_looped(k) {
+                    let idx = (t as i64 - start as i64).rem_euclid(series.len() as i64);
+                    return series[idx as usize];
+                }
                 let idx = t.wrapping_sub(start) as usize;
                 return if idx < series.len() { series[idx] } else { 0.0 };
             }
@@ -114,6 +141,9 @@ pub struct DriveState {
     /// step 0. A fully-consumed series is kept as `[0.0]` so the shadowed
     /// constant does not resurrect after the rebuild.
     pub series: Vec<(String, Vec<f32>)>,
+    /// input name -> looping series, rotated so index 0 is the step the
+    /// old sim was about to play (the loop continues seamlessly).
+    pub loops: Vec<(String, Vec<f32>)>,
     /// neuron index -> external current (nonzero entries only).
     pub ext: Vec<(u32, f32)>,
 }
@@ -128,6 +158,13 @@ impl DriveState {
         let mut d = DriveState::default();
         for (i, inp) in net.inputs.iter().enumerate() {
             match stim.series.get(i) {
+                Some(ser) if !ser.is_empty() && stim.is_looped(i) => {
+                    let start = stim.play_start.get(i).copied().unwrap_or(0) as i64;
+                    let ph = (t as i64 - start).rem_euclid(ser.len() as i64) as usize;
+                    let mut rot = ser[ph..].to_vec();
+                    rot.extend_from_slice(&ser[..ph]);
+                    d.loops.push((inp.name.clone(), rot));
+                }
                 Some(ser) if !ser.is_empty() => {
                     let start = stim.play_start.get(i).copied().unwrap_or(0);
                     let tail = if t > start {
@@ -171,6 +208,11 @@ impl DriveState {
                 sim.play_input(i, tail.clone());
             }
         }
+        for (name, ser) in &self.loops {
+            if let Some(i) = net.input_index(name) {
+                sim.loop_input(i, ser.clone());
+            }
+        }
         if !self.ext.is_empty() {
             let mut ext = vec![0.0f32; net.neurons.len()];
             for &(nid, a) in &self.ext {
@@ -200,6 +242,36 @@ mod tests {
         s.play_input(1, vec![5.0; 10]); // plays from t=0
         s.set_external(1, 3.0);
         (net, s)
+    }
+
+    /// Stage 27: a looped series repeats forever, survives a reset to
+    /// t = 0 and a capture/apply rebuild with its phase intact.
+    #[test]
+    fn looped_series_repeats_and_survives_reset_and_rebuild() {
+        let (net, mut s) = driven_sim();
+        s.loop_input(1, vec![1.0, 2.0, 3.0]);
+        let st = s.stimulus();
+        let t0 = s.step_count();
+        let v: Vec<f32> = (0..7).map(|i| st.value(1, t0 + i)).collect();
+        assert_eq!(v, vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0]);
+        s.run_steps(1000).unwrap();
+        assert_eq!(s.stimulus().value(1, s.step_count()), 2.0); // 1000 % 3 == 1
+                                                                // capture mid-loop → the rebuilt sim continues at the same phase
+        let d = DriveState::capture(&s, &net);
+        assert_eq!(d.loops, vec![("b".to_string(), vec![2.0, 3.0, 1.0])]);
+        let mut s2 =
+            crate::Sim::new(&net, crate::SimConfig::default(), crate::BackendKind::Cpu).unwrap();
+        d.apply(&mut s2, &net);
+        assert_eq!(s2.stimulus().value(1, 0), 2.0);
+        assert_eq!(s2.stimulus().value(1, 300), 2.0);
+        // reset to t = 0 (editor Reset): still looping, never silent
+        s.reset_state();
+        let st = s.stimulus();
+        assert!((0..50).all(|t| st.value(1, t) > 0.0));
+        // a plain play_input clears the loop flag
+        s.play_input(1, vec![5.0]);
+        let t = s.step_count();
+        assert_eq!(s.stimulus().value(1, t + 1), 0.0);
     }
 
     #[test]

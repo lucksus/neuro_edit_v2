@@ -372,8 +372,8 @@ fn help_text(topic: &str) -> String {
         ),
         (
             "input",
-            "input: add_input(name,[[n,w],..])  input_count()\n  \
-             sim.set_input(name,x)  sim.play_input(name,arr)  sim.set_external(id,amps)",
+            "input: add_input(name,[[n,w],..][,[x,y,z]])  input_count()\n  \
+             sim.set_input(name,x)  sim.play_input(name,arr)  sim.loop_input(name,arr)  sim.set_external(id,amps)",
         ),
         (
             "sim",
@@ -1563,6 +1563,33 @@ pub fn register_api(
         );
     }
     {
+        let (s, v, dr) = (sim.clone(), net_version.clone(), drive.clone());
+        engine.register_fn(
+            "add_input",
+            move |n: &mut NetHandle,
+                  name: &str,
+                  targets: rhai::Array,
+                  pos: rhai::Array|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                let len = n.borrow().neurons.len();
+                let mut tw = Vec::new();
+                for t in targets {
+                    if let Some(arr) = t.try_cast::<rhai::Array>() {
+                        if arr.len() >= 2 {
+                            tw.push((nid(d_i64(&arr[0]), len)?, d_f64(&arr[1]) as f32));
+                        }
+                    }
+                }
+                invalidate(&s, n, &dr, &v);
+                // Stage 27: an explicit position (the editor draws the input
+                // there instead of auto-placing it over its targets).
+                let p = |i: usize| pos.get(i).map(d_f64).unwrap_or(0.0) as f32;
+                n.borrow_mut().add_input(name, tw, [p(0), p(1), p(2)]);
+                Ok(())
+            },
+        );
+    }
+    {
         let v = net_version.clone();
         engine.register_fn(
             "add_readout",
@@ -1913,6 +1940,35 @@ pub fn register_api(
                 let series: Vec<f32> = arr.iter().map(|d| d_f64(d) as f32).collect();
                 let h = ensure_sim(&s, &n, &c, &b, &lim, &dr)?;
                 h.borrow_mut().play_input(idx, series);
+                Ok(())
+            },
+        );
+    }
+    {
+        let (s, n, c, lim, dr) = (
+            sim.clone(),
+            net.clone(),
+            cfg.clone(),
+            sim_limits.clone(),
+            drive.clone(),
+        );
+        let b = backend.clone();
+        engine.register_fn(
+            "loop_input",
+            move |_: &mut SimSlot,
+                  name: &str,
+                  arr: rhai::Array|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                let idx = match n.borrow().input_index(name) {
+                    Some(i) => i,
+                    None => return Err(s_err(format!("unknown input \"{name}\""))),
+                };
+                let series: Vec<f32> = arr.iter().map(|d| d_f64(d) as f32).collect();
+                let h = ensure_sim(&s, &n, &c, &b, &lim, &dr)?;
+                if series.is_empty() {
+                    return Err(s_err("loop_input: empty series"));
+                }
+                h.borrow_mut().loop_input(idx, series);
                 Ok(())
             },
         );

@@ -567,6 +567,9 @@ impl crate::Backend for CpuSim {
     fn external(&self) -> Vec<f32> {
         self.ext.clone()
     }
+    fn loop_input(&mut self, input: usize, series: Vec<f32>) {
+        self.stimulus.play_looped(input, self.t, series);
+    }
     fn play_input(&mut self, input: usize, series: Vec<f32>) {
         self.stimulus.play(input, self.t, series);
     }
