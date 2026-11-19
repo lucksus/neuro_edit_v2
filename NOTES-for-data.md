@@ -3552,3 +3552,252 @@ the sweep was split one-process-per-setting onto the same GPU
 - `examples/lsm.ne2` stays the 216-neuron/855-synapse fixture (the
   experiment's 512-neuron save was reverted — fixtures don't move with
   experiment runs).
+
+## Stage 26 — deep MLP readout with settable layers, big local LSM, grid render check
+
+Branch `stage26-deep-readout` from `2ad4b83`. Commit only — not pushed, not
+deployed.
+
+### What changed
+
+- **Deep MLP in the sim** (`sim/src/mlp.rs`). Any number of hidden layers
+  (`layers: [128, 64, 32]`; `hidden: N` still works as `layers: [N]`; both
+  at once is an error). `classes: K` gives a softmax head trained with
+  cross-entropy (labels 0..K-1); without it the output is today's single
+  score. `act: "tanh" | "relu"` (init: Glorot-uniform for tanh, He-uniform
+  for relu hidden layers). `opt: "sgd" | "adam"`, `batch`.
+- **Default stays SGD.** Why: lsm_big/lsm_adex/lsm_readout/lsm_big_off pass
+  `hidden: N` with no optimizer, and their numbers had to stay identical.
+  The exact pre-26 configuration (one tanh layer, score head, per-row SGD)
+  keeps its own trainer, `fit_legacy`, with the old code unchanged.
+  Everything else goes through `fit_batched`: flat per-layer buffers,
+  minibatches, AVX2/FMA dot/axpy kernels with runtime detection, and SGD or
+  Adam. Adam's lr defaults to 1e-3. No new crates.
+- **Format**: `MlpDef` gains `act` and `head`, and `Readout` gains
+  `mlp_layers`. `.ne2` is now **v7**. v6 files lift to tanh/score with an
+  empty config (load test with a hand-written v6 stream); old JSON loads
+  via serde defaults (tested). **Proto v5**: `Geo.readout_mlps` (parallel
+  to `readouts`, also in deltas) and `NetEdit::SetReadoutLayers`.
+- **Layers live on the readout.** The inspector for a selected readout
+  shows input width, each hidden layer (size drag, activation, ✖), `+ layer`
+  and the output head. **Apply** sends the undoable `SetReadoutLayers`
+  (added to the undo/redo byte round-trip test) and **Script default**
+  clears it. The trained line reads "matches config" or "⚠ needs
+  retraining". **Train: re-run <script>** re-sends the script that built the
+  net: a script-window Run or `--script` sets it, New/Load clear it.
+- **Every MLP example** (lsm_big, lsm_big_off, lsm_adex, lsm_readout,
+  lsm_deep) reads `net.readout_layers("ro")` *before* `net.clear()`. When it
+  is set, the example trains those layers (Adam), re-stores the config on
+  the rebuilt readout, and prints `mlp hidden layers: [..] (from the
+  readout, adam)`.
+- **Scene**: a readout with a trained MLP is drawn as a layered stack, one
+  bar per layer (height ~ log2 size), with labels like "8000 in", "128 tanh",
+  "4 softmax", 3×3 fan lines between consecutive layers, and the name on top
+  (orange "needs retraining" when stale). It is painted with egui in screen
+  space, so native and web share the code. It scales with the camera
+  (clamped 0.9–1.6) and is kept on screen. A readout without an MLP is
+  unchanged.
+- **New example `lsm_deep.rhai`** (Examples menu, help text, README,
+  getting-started, in-app manual page "Readouts").
+- **Grid/render fixes**: see the defect list below.
+
+### API added
+
+`fit_mlp(x,T,F,y,#{layers,hidden,classes,act,opt,batch,epochs,lr,wd,seed,val_frac,patience})`,
+`mlp_scores(m,x)`, `mlp_predict(m,x)`, `mlp_act(m)`, `mlp_classes(m)`
+(`mlp_sizes` now returns ints), `class_accuracy(pred,labels)`,
+`fit_ridge_multi(x,T,F,labels,K,lambda)` + `ridge_predict(ws,x)` (dual-form
+one-vs-rest ridge, needed because primal ridge on 8000 features is an
+8000² Cholesky), `net.set_readout_layers(name,[..])` (undoable; `[]`
+clears), `net.readout_layers(name)` (`()` if there is no readout or no
+config), and `net.train_readout_mlp(name,X,T,F,y,opts)` (layers from the
+readout unless opts name `layers`/`hidden`; trains, attaches, returns).
+Rust: `MlpAct`, `MlpHead`, `MlpDef::hidden()`,
+`Network::{set_readout_layers, readout_layers}`, `MAX_MLP_LAYER` (4096),
+`MAX_MLP_DEPTH` (8), `proto::ReadoutMlp`.
+
+### Regression: hidden:N gives the same numbers as main
+
+lsm_big run with main's binary (`2ad4b83`) and with this branch, then the
+logs diffed. The output is **byte-identical**:
+
+| lsm_big | main | branch |
+|---|---|---|
+| quick CPU: ridge / raw / cooc | 0.772 (acc 0.666) / 0.475 / 1.0 | same |
+| quick CPU: mlp auc / acc | 0.901 / 0.833 | same |
+| full CUDA: ridge / raw / cooc | 0.806 (acc 0.739) / 0.484 / 1.0 | same |
+| full CUDA: mlp auc / acc | 0.833 / 0.739 | same |
+
+lsm_readout, lsm_big_off and lsm_adex (quick, CPU, main's own example files
+vs the branch's) are also identical except for the one new "mlp hidden
+layers" line.
+
+### Backprop is right at depth ≥ 3
+
+- `gradient_check_depth3`: net [2, 5, 4, 3, K], heads score (K=1) and
+  softmax (K=3), activations tanh and relu. Every weight and bias is checked
+  against central differences (eps 1e-3, f32, tolerance 2e-3 + 2% rel; relu
+  may skip weights whose ±eps crosses a kink, but at least 90% must be
+  checked).
+- **Sabotage**: I removed the activation derivative of one middle layer
+  (`l == 3`) in `backward`, and the test failed at once ("Score/Tanh layer 0
+  w[2]: analytic −0.00904 vs numeric −0.00364"). After restoring it the test
+  passed.
+- `depth_beats_linear_on_held_out`: a 4-class target (XOR of signs × radius
+  ring) that no 0-hidden net can represent. On held-out rows the 0-hidden
+  softmax stays < 0.45, while the 2-hidden net ([16,16], tanh and relu)
+  scores > 0.85.
+- Speed: 1000 × 8000 features, [128,64], Adam, 40 epochs: **6.2 s** on one
+  core in release (`mlp_speed_1000x8000`, `#[ignore]`d).
+- `examples_train_the_readouts_layers` sabotage: removing lsm_big's
+  re-store of the config after `net.clear()` failed the test (`None` vs
+  `[32,16,8]`); restored.
+
+### lsm_deep
+
+20³ = 8000 izh neurons, 60-unit lattice, `create_connections(0.35, λ=90,
+3.0)`, so only nearest neighbours; 43 724 synapses, **mean fan-in 5.4**.
+Dale 0.2, block view. 8 sources and 4 pairs, with the same input pools as
+lsm_big (48 shared per pair + 24 private per source, W_IN 12).
+
+**Task**: in each 40 ms window exactly one pair carries a hidden copy
+(stream b = stream a with 2 random 1↔0 swaps), and the readout must say
+which (4 classes, chance 0.25). Every stream is **balanced** (exactly 20 of
+40 bits are 1). My first version used `rng_stream`'s shared-bit events, and
+there a deep MLP on the 8 per-stream *rates* reached **0.46**: copied bits
+make two counts suspiciously similar, which an MLP picks up. Balancing
+removes that shortcut, so rates now carry exactly nothing. I changed the
+task only to remove that leak, not to make depth win.
+
+Training: 960 train / 400 test windows, readouts on per-neuron rates. Deep
+= [128, 64] (or the readout's layers) and 1-hidden = [128], both Adam
+lr 1e-3, wd 1e-3, batch 32, early stopping (patience 20), seed = SEED.
+
+Held-out accuracy, full scale, CUDA, 3 seeds (logs in `review/stage26_runs/`):
+
+| seed | deep [128,64] | 1-hidden [128] | ridge | raw rates (no liquid) | raw bits (no liquid) | cooc side channel | wall |
+|---|---|---|---|---|---|---|---|
+| 11 | 0.577 | 0.602 | 0.605 | 0.250 | 0.262 | 1.0 | 45 s* |
+| 12 | 0.587 | 0.595 | 0.567 | 0.250 | 0.250 | 1.0 | 58 s* |
+| 13 | 0.582 | 0.595 | 0.535 | 0.250 | 0.267 | 1.0 | 33.5 s |
+| mean ± sd | **0.582 ± 0.005** | **0.597 ± 0.004** | 0.569 ± 0.035 | 0.250 | 0.260 | 1.0 | |
+
+(*) the GPU was shared with the screenshot batch; the run alone takes
+33 s. Probe rate is 3.1–3.5 Hz (liquid alive) and the tail is 4.0 Hz on noise.
+
+**Honest reading**: the liquid clearly beats both no-liquid baselines
+(raw rates and the raw 8×40 input bits, both at chance). **Depth does not
+help**: deep ≈ 1-hidden ≈ ridge, within noise, and the console says so
+("depth: …" line). The 28-d pairwise side channel solves the task (1.0),
+the same caveat as every hidden-correlation example. At quick scale (512
+neurons) deep scored 0.70 vs 1-hidden 0.675 and ridge 0.66, which is
+noise-level too.
+
+Run time: about 33 s wall on CUDA through `sim --script`. The server runs
+the same `Env`; I did not time it through a browser.
+
+### Grid rendering check (item 4)
+
+78 sweep shots of grid_wave, lsm_big full (expanded + block), and a fresh
+10³ grid with connections. Each has 4 orbits + top-down + 2 zooms, at
+1440×900, headless and GUI (Xvfb, real right-drag/wheel input), plus one at
+DPR 2. They are listed in `review/stage26_shots/DEFECTS.md`. A helper agent
+took them and reviewed every shot; I re-checked the key ones (grid10
+GUI/headless, the block veil, near interior) and all the after-fix and
+lsm_deep shots myself.
+
+| # | defect | shots | status |
+|---|---|---|---|
+| 1 | **GUI gamma-darkened**: the scene was sampled from an sRGB texture (linear values) into egui's non-sRGB surface, so bg was 8/255 vs 48/255 headless, minor floor lines nearly vanished and synapses were dark red. Probably *the* "grid looks broken". | `grid10_gui_default` vs `after_grid10_gui_default` | **fixed** (`fs_blit_encode`, 2c7aaf2). This changes the GUI look everywhere: please eyeball it; the commit reverts cleanly |
+| 2 | Block glyph is a flat 2D card; zoomed in it becomes a dim full-viewport veil with the outline + label off-screen | `lsmbig_full_gui_block_rel000_near/_inside` | **stop-gap**: no fill when a corner is behind the camera or the rect covers > 80% of the view; label clamped. Real 3D block (depth-tested box edges) ~1 h, not done |
+| 3 | Framing crops every net's bottom (dist 0.9 × diagonal < the 1.0 the 60° FOV needs) | `*_default` | **fixed**: 1.1 ×; bounds include readouts + stack headroom |
+| 4 | Input/readout glyphs buried inside big liquids ("ro" never visible in lsm_big) | `lsmbig_full_*_near` | **readouts fixed** (marker above the units' bbox). **Inputs not**: all 8 lsm inputs target the whole cube, so any bbox anchor stacks them on one point |
+| 5 | Floor fades out under a zoomed-out net | `gridwave_gui_autorun_veryfar_floorvoid`, `grid10_gui_rel000_veryfar` | **fixed**: quad/fade extent = max(3000, 8 × eye height) (`after_grid10_headless_veryfar`) |
+| 6 | No MSAA: jaggy edges, 1-px lines break into dashes (occlusion, not z-fighting) | any `*_near` | open (~1 h: 4× MSAA scene pass) |
+| 7 | LOD cubes→plane is a hard palette jump; plane alpha 0.92 lets floor lines through | `gridwave_gui_autorun_zoomstep1/2`, `gridwave_headless_planes_yaw090` | alpha → 1.0 fixed; the palette jump stays (it is data) |
+| 8 | `--window-size` ignored after a persisted size (eframe restores a saved size whenever storage has one) | — | **fixed**: the size is sent as a first-frame `ViewportCommand::InnerSize` |
+
+No z-fighting, wrong depth order or near-plane clipping in any shot. DPR 2
+is fine (lines are 1 physical px, so thinner).
+
+After-fix shots: `after_grid10_gui_default`, `after_gridwave_gui_default`,
+`after_lsmbig_block_1440900` (block + readout stack visible), and
+`after_lsmbig_inside_1440900`. lsm_deep block view: `lsmdeep_block_rel{000,090,180,270}_far`,
+`_top_far`, `_rel000_near`, `_rel000_inside`. Readout stack + inspector:
+`readout_lsm_deep_{1440900,800700}` (default layers, "matches config"),
+`readout_lsm_deep_stale_1440900` (config [128,64,32] set after training,
+"needs retraining"), and `readout_lsm_deep_3layers_{1440900,800700}`
+(re-run with [128,64,32]: four bars + head).
+
+### Gates
+
+- `cargo fmt --all -- --check`: clean.
+- `cargo clippy --workspace --release`: the warning set (kinds and counts) is
+  identical to main's.
+- `cargo test --workspace --release --no-fail-fast`: **343 passed, 0
+  failed, 1 ignored** (the ignored one is the `mlp_speed_1000x8000` timing
+  test, run by hand: 6.2 s).
+- `cargo check --workspace --all-targets` passes on every branch commit
+  (checked in place, in order).
+- `editor/web/build.sh`: OK, **but only with wasm-bindgen CLI 0.2.118**.
+  `~/.cargo/bin/wasm-bindgen` was replaced on Nov 14 14:32 (after Stage
+  25) with 0.2.127, which refuses the 0.2.118 crate schema, so the web build
+  has been failing on miguel since then, independent of this branch. I
+  built with a matching CLI installed under `/tmp/ne26_wbg` and left
+  `~/.cargo/bin` alone. Either reinstall 0.2.118 there or bump the crate.
+- Shots: `review/stage26_shots/` (`review/` is gitignored; like Stage
+  24/25, the shots stay on miguel and are not committed). The defect list is
+  `review/stage26_shots/DEFECTS.md`, and the lsm_deep 3-seed logs are in
+  `review/stage26_runs/`.
+- The sweep's GUI runs changed `~/.local/share/neuro_editv2/app.ron`: the
+  recent list now holds `/tmp/ne26shots/lsm_big_full.ne2`.
+
+### Found on the way: the worker example audit was failing on main
+
+`editor/tests/example_audit.rs` failed on `2ad4b83` too ("first_spikes: no
+new spikes in the last second"). This is a test race, not a product bug:
+the post-eval snapshot reads t = 0 while the script has already run the
+sim for 2 s, so the first publish after `RunMs(4000)` was already past
+`t0+4900` and the "last second" compared one publish with itself.
+first_spikes really runs at 26 Hz after Run. Fix: wait for the run to land
+and settle, measure the last second from there, and match the
+`AUDIT_DONE` marker on the printed line instead of the console's echo of
+the code. Sabotage (`sim.set_input("stim", 0.0)` at the end of
+first_spikes) fails it.
+
+### Commits
+
+- `652d57c` sim: deep MLP readout — any depth, softmax head, relu, Adam; format v7
+- `e4daf4a` proto v5: readout MLP config + trained shape on Geo; SetReadoutLayers edit
+- `de889bb` sim: fit_ridge_multi + ridge_predict — dual-form multi-class ridge
+- `8ef21bc` editor: readout inspector edits MLP layers, Train re-runs; MLP stack drawing
+- `1be7fab` examples: train the readout's layers; new lsm_deep (8000-neuron local liquid)
+- `2c7aaf2` editor: blit sRGB-encodes into non-sRGB surfaces — GUI was gamma-darkened
+- `55f340d` editor: readout inspector — '·' shape text (no → glyph in the UI font); 'Apply first' only when the draft differs from what Train would use
+- `3dc6fa5` editor: framing fits the net and its readouts; readout marker above its units; block veil stop-gap
+- `1952806` editor: '~' not '∝' in a view.rs doc line (font-coverage test scans quoted lines)
+- `d761cf3` docs: MLP readout + readout layers (scripting.md), in-app Readouts manual page, lsm_deep in README/getting-started
+- `ea9fa3f` editor: floor grid grows with eye height; activity plane opaque
+- `67cc0ff` editor: MLP stack — labels fit inside the panel, readable minimum zoom
+- `26bf2c1` editor: --window-size applied as a first-frame viewport command
+- `1332f11` editor tests: example audit waits for the run to settle — it failed on main too
+- `cef1862` editor: explicit f32 stroke widths in the MLP stack (float_literal_f32_fallback)
+
+### Open questions
+
+- Depth doesn't beat 1-hidden on lsm_deep (nor on the binary tasks). Is a
+  task where depth should matter worth hunting (e.g. XOR of two pairs'
+  events, or a temporal-order task), or is "depth isn't the bottleneck,
+  the liquid's representation is" the honest message for the demo?
+- The sRGB fix makes the GUI noticeably brighter (it now matches the
+  headless shots and the docs screenshots). Keep it?
+- Inputs in big liquids still sit at their targets' centroid (inside the
+  cube). Should inputs get a side rail (e.g. along −x of the bbox)?
+- Top-down, the MLP stack sits on top of the block glyph (the readout's
+  anchor projects inside the box): `lsmdeep_block_top_far.png`. It is
+  harmless, but a side placement would read better.
+- The block glyph is still a screen-space card; a depth-tested 3D box is
+  the real fix (~1 h).
+- The web build compiles (`editor/web/build.sh` OK), but I did not check
+  the stack drawing in a browser. It is the same egui painter code as
+  native.
