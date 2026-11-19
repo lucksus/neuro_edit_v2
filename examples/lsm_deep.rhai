@@ -72,6 +72,13 @@ let n_liq = res.len();
 net.add_readout("ro", res);
 if type_of(RO_LAYERS) == "array" { net.set_readout_layers("ro", RO_LAYERS); }
 
+// Input markers stand in a column LEFT of the cube (display only — the
+// targets below are unchanged); grid corners are res[0] / res[last].
+let LO = net.pos(res[0]);
+let HI = net.pos(res[n_liq - 1]);
+let in_pos = |s| [LO[0] - 0.45 * (HI[0] - LO[0]),
+                  LO[1] + (HI[1] - LO[1]) * (s.to_float() + 0.5) / N_SRC,
+                  (LO[2] + HI[2]) * 0.5];
 for p in PAIRS {
     let pool = [];
     for k in 0..SHARED_PER_PAIR {
@@ -83,7 +90,7 @@ for p in PAIRS {
         for k in 0..PRIV_PER_SRC {
             tgts.push([res[rand(0.0, 1.0e9).to_int() % n_liq], W_IN]);
         }
-        net.add_input("src" + s, tgts);
+        net.add_input("src" + s, tgts, in_pos.call(s));
     }
 }
 
@@ -248,8 +255,25 @@ print(if a_deep > best_nl + 0.1 {
 // Stay visibly alive after the experiment.
 sim.reset();
 sim.set_noise(60.0, 10.0);
+// …and every stream keeps playing: a looping 8 s random spike train per
+// source (its own rate), so Run — and Reset + Run — shows the inputs
+// driving the liquid for as long as you watch (Stage 27).
+for s in 0..N_SRC {
+    let n = 8000 * SPB;
+    let a = [];
+    a.pad(n, 0.0);
+    let t = 0.0;
+    let rate = 10.0 + 3.0 * s;
+    loop {
+        t += -(rand(1.0e-9, 1.0).ln()) * 1000.0 / rate;
+        if t >= 8000.0 { break; }
+        let i = (t * SPB).to_int();
+        for d in 0..(2 * SPB) { if i + d < n { a[i + d] = 1.0; } }
+    }
+    sim.loop_input("src" + s, a);
+}
 let s0 = sim.spikes();
 sim.run(2000.0);
 let tail_hz = (sim.spikes() - s0) / n_liq / 2.0;
 print("done: tail rate=" + f3.call(tail_hz) + " Hz over " + n_liq +
-      " neurons on noise; press Run to keep it going");
+      " neurons on noise + looping input trains; press Run to keep it going");
