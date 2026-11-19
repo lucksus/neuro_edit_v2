@@ -1458,7 +1458,7 @@ fn draw_mlp_stacks(
             })
             .collect();
         // Thin fan lines between consecutive layers (3×3 per gap).
-        let wire = Stroke::new(0.7, Color32::from_rgba_unmultiplied(160, 180, 210, 90));
+        let wire = Stroke::new(0.7_f32, Color32::from_rgba_unmultiplied(160, 180, 210, 90));
         for w in bars.windows(2) {
             let (a, b) = (w[0], w[1]);
             for i in 0..3 {
@@ -1493,7 +1493,7 @@ fn draw_mlp_stacks(
                 egui::pos2(c.x.clamp(panel.min.x, panel.max.x), panel.max.y),
                 c,
             ],
-            Stroke::new(1.0, edge.gamma_multiply(0.7)),
+            Stroke::new(1.0_f32, edge.gamma_multiply(0.7)),
         );
     }
 }
