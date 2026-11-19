@@ -411,7 +411,7 @@ fn help_text(topic: &str) -> String {
         (
             "examples",
             "examples: first_spikes.rhai  grid_wave.rhai  lsm_readout.rhai  lsm_big.rhai\n  \
-             lsm_deep.rhai  lsm_adex.rhai  lsm_hidden.rhai  detector.rhai  memory_window.rhai —\n  \
+             lsm_deep.rhai  lsm_deep_setup.rhai  lsm_adex.rhai  lsm_hidden.rhai  detector.rhai  memory_window.rhai —\n  \
              runnable from the console's examples picker",
         ),
     ];

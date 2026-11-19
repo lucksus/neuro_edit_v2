@@ -32,5 +32,10 @@ Click the readout's marker (the cube under the stack) to inspect it:
   the net, trains exactly those layers, and prints the held-out numbers
   in the console.
 
+To show the liquid first and train later: Examples -> *Deep LSM —
+build + live inputs* builds the net with six looping input trains and no
+training; press Run and the spikes keep flowing. Then load *Deep
+readout* to train.
+
 Try it: Examples -> *Deep readout*, wait for the numbers, click the
 readout, add a layer (e.g. 128 · 64 · 32), Apply, Train.

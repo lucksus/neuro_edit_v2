@@ -78,6 +78,12 @@ the readout's own layers), a 1-hidden MLP, ridge, two no-liquid
 baselines and a hand-built side channel. ~35 s on CUDA. In the editor,
 select the readout, set its layers in the inspector, Apply, Train.
 
+`examples/lsm_deep_setup.rhai` builds the same layout **without training**:
+six input nodes stand in a column outside the cube, each looping its own
+random spike train into the near face, so pressing Run shows spikes
+entering and travelling through the liquid for as long as you watch
+(Reset restarts the trains). Train afterwards with `lsm_deep`.
+
 ## Editor
 
 ```sh
