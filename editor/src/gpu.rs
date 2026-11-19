@@ -740,6 +740,10 @@ impl Gpu {
             })
             .collect();
 
+        // Input/readout glyph half-size: 7 on dense nets, growing with the
+        // lattice spacing so a marker beside a 60-unit liquid stays
+        // visible (Stage 27: the outside input column read as dust).
+        let glyph = (avg_spacing * 0.3).clamp(7.0, 24.0);
         // instances: neurons, then inputs, then readouts
         let mut inst = Vec::with_capacity(n + geo.inputs.len() + geo.readouts.len());
         let mut inst_half = Vec::with_capacity(inst.capacity());
@@ -789,9 +793,9 @@ impl Gpu {
                     p = [c[0] / m, c[1] / m + 60.0, c[2] / m];
                 }
             }
-            inst_half.push(7.0);
+            inst_half.push(glyph);
             inst.push(Inst {
-                pos_scale: [p[0], p[1], p[2], 7.0],
+                pos_scale: [p[0], p[1], p[2], glyph],
                 aux: 2,
                 _pad: [0; 3],
             });
@@ -800,9 +804,9 @@ impl Gpu {
         for k in 0..geo.readouts.len() {
             // marker above its units' bounding box (shared with picking)
             let c = crate::view::readout_anchor(geo, k).unwrap_or([0.0; 3]);
-            inst_half.push(7.0);
+            inst_half.push(glyph);
             inst.push(Inst {
-                pos_scale: [c[0], c[1], c[2], 7.0],
+                pos_scale: [c[0], c[1], c[2], glyph],
                 aux: 3,
                 _pad: [0; 3],
             });
