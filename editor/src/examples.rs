@@ -57,6 +57,14 @@ pub const EXAMPLES: &[Example] = &[
         groups: &[("res", "block")],
     },
     Example {
+        name: "Deep LSM — build + live inputs (no training)",
+        purpose: "8000-neuron liquid, 6 input nodes outside the cube with looping spike trains — press Run and watch; train later with Deep readout",
+        file: "lsm_deep_setup.rhai",
+        src: include_str!("../../examples/lsm_deep_setup.rhai"),
+        watch: &[0, 1, 2],
+        groups: &[],
+    },
+    Example {
         name: "Deep readout — 8000-neuron local liquid",
         purpose: "4-way hidden-pair task; deep vs 1-hidden MLP vs ridge vs no-liquid — set the readout's layers, press Train",
         file: "lsm_deep.rhai",

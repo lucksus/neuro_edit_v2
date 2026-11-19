@@ -36,6 +36,10 @@ const EXAMPLES: &[(&str, &str)] = &[
         include_str!("../../examples/memory_window.rhai"),
     ),
     ("lsm_deep", include_str!("../../examples/lsm_deep.rhai")),
+    (
+        "lsm_deep_setup",
+        include_str!("../../examples/lsm_deep_setup.rhai"),
+    ),
 ];
 
 /// Every backend the scripts must hold up on — CPU always, CUDA when a
@@ -519,4 +523,43 @@ fn examples_train_the_readouts_layers() {
             EXAMPLES[i].0
         );
     }
+}
+
+/// lsm_deep_setup (Stage 27 demo): builds without training, places its
+/// six inputs OUTSIDE the liquid's bounding box, and its looping trains
+/// keep the liquid firing long after the script — including after a
+/// Reset to t = 0 (the old examples went quiet after one 40 ms burst).
+/// Sabotage: `sim.play_input` instead of `loop_input` → the 10 s check
+/// sees no spikes; dropping the input position → inputs inside the box.
+#[test]
+fn lsm_deep_setup_keeps_spiking_with_inputs_outside() {
+    let run = eval_env(EXAMPLES[10].1, BackendKind::Cpu, 2048);
+    assert!(run.res.is_ok(), "{:?}", run.res.err());
+    let net = run.env.net.borrow().clone();
+    assert!(net.readout_mlp("ro").is_none(), "setup must not train");
+    let res = &net.group("res").unwrap().members;
+    let xmin = res
+        .iter()
+        .map(|&i| net.neurons[i as usize].pos[0])
+        .fold(f32::MAX, f32::min);
+    assert_eq!(net.inputs.len(), 6);
+    for inp in &net.inputs {
+        assert!(
+            inp.pos[0] < xmin - 50.0,
+            "{} at {:?} not outside",
+            inp.name,
+            inp.pos
+        );
+    }
+    let h = run.env.sim_handle().unwrap();
+    let mut s = h.borrow_mut();
+    // long after the script: 8 more seconds, last second still busy
+    s.run_steps(70_000).unwrap();
+    let a = s.spikes_total();
+    s.run_steps(10_000).unwrap();
+    assert!(s.spikes_total() > a + 100, "quiet after 10 s");
+    // Reset to t = 0 (editor Reset) → the trains keep going
+    s.reset_state();
+    s.run_steps(20_000).unwrap();
+    assert!(s.spikes_total() > 100, "quiet after Reset");
 }

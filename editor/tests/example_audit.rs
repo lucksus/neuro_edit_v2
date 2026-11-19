@@ -135,6 +135,11 @@ fn every_example_shows_activity_through_the_worker() {
             "test deep",
         ),
         (
+            "lsm_deep_setup",
+            include_str!("../../examples/lsm_deep_setup.rhai"),
+            "alive: liquid rate",
+        ),
+        (
             "lsm_adex",
             include_str!("../../examples/lsm_adex.rhai"),
             "test mlp",
