@@ -3801,3 +3801,150 @@ first_spikes) fails it.
 - The web build compiles (`editor/web/build.sh` OK), but I did not check
   the stack drawing in a browser. It is the same egui painter code as
   native.
+
+## Stage 27 — demo fixes: readout focus, live long-running inputs, load-without-training
+
+Branch `stage27-demo` from `3bf7f1b`. Commit only: not pushed, not merged, not
+deployed.
+
+### 1. "Centering on a readout moves the camera somewhere else" (fixed)
+
+Cause: double-click focus (`view.rs`) ray-tested only neurons (`g.pos`).
+The readout marker was never a candidate, and the MLP stack is painted
+in screen space, so nothing could hit it. A double-click on either fell
+through to the block centre (block view) or to a floor-plane point under
+the cursor, which is "somewhere else". Fixes:
+- `StackGeom`/`mlp_stack_geom`: one function now computes the stack's
+  screen rect for both painting and hit-testing, so they cannot drift
+  apart.
+- `focus_point()` checks the drawn stack first and returns the readout
+  marker. Otherwise it ray-tests every instance: neurons, inputs and
+  readout markers (the old 4000-unit ray cap is gone).
+- A single click on the stack now selects the readout (before, only the
+  small marker cube was pickable).
+- Test `focus_on_readout_stack_and_marker_hits_the_readout`: the stack
+  centre and the marker both focus the readout anchor, and a neuron
+  still focuses the neuron. Sabotage: disabling the stack branch fails
+  it (`None`).
+- Shots: `deep_before_focus.png` → `deep_after_focus_on_stack.png`
+  (lsm_deep full; double-click on the stack puts the readout marker at
+  the viewport centre with the readout selected).
+
+### 2. Inputs: why activity stopped, and the fix
+
+What the inputs actually were: each lsm example drives src0..7 with
+`play_input` 40 ms windows *during the experiment*. After it, the only
+drive was `set_noise(60 Hz, 10 mV)`, about 4 Hz on 8000 neurons, which is
+invisible in block view. On editor **Reset**, `reset_state` sets t = 0
+but leaves the play heads alone, so the last 40 ms window replayed once
+when t caught up (the "short burst") and then nothing.
+
+- **Engine**: `sim.loop_input(name, series)` makes a series repeat
+  forever, with phase `(t − start) mod len`. So a Reset to t = 0 keeps
+  looping, and sim rebuilds (backend/dt switch, edits) keep the loop and
+  its phase (`DriveState.loops`). `play_input` clears it. Also
+  `net.add_input(name, targets, [x,y,z])` places the input marker.
+  Tested (repeat, phase after 1000 steps, capture/apply, Reset).
+- **New example `lsm_deep_setup`** ("Deep LSM — build + live inputs (no
+  training)"): the same 20³ layout as lsm_deep with six inputs in a
+  column 45% of the cube width to its LEFT. Each input has its own
+  Poisson train (12/18/25/9/30/15 Hz, 2 ms pulses) looping every 8 s
+  into its own y-band of the near face. Recurrent weight 12 (lsm_deep
+  trains at 3, where spikes stay local). Measured with the W_REC sweep
+  on CUDA:
+
+  | W_REC | 3 | 6 | 9 | 10.5 | **12** | 16 |
+  |---|---|---|---|---|---|---|
+  | liquid Hz while driven | 0.4 | 0.5 | 0.7 | 0.8 | **7.0–7.7** | ~20 |
+  | inputs off (next 0.5 s / 0.5 s) | — | — | — | 0 / 0 | **2.4 / 0** | — |
+
+  At 12 activity flows while driven and dies within ~1 s once the inputs
+  stop, so it is input-driven with no runaway. It loads in whole mode so
+  the neurons are visible. GUI: still 7.2 Hz at t = 65 s of autorun.
+- **lsm_deep / lsm_big**: src0..7 markers stand in the same left column
+  (display only: targets and RNG draws are unchanged). After the held-out
+  numbers, every source loops its own 8 s train (10–31 Hz) on top of the
+  noise tail. Quick numbers diffed: **lsm_big identical** except the tail
+  line (5.0 → 10.0 Hz); **lsm_deep identical to Stage 26**.
+- Input/readout glyphs scale with the lattice spacing (half-size 7..24).
+  The outside column was dust-sized at 7.
+
+### 3. Load without training: fallback shipped, buttons not
+
+The named-action button feature was **not built**. It needs a new proto
+message, editor UI and a training action validated on the setup liquid,
+and that was not going to be solid inside the window. Fallback, which
+works the same in native and web because it is just an example script:
+- Examples → **Deep LSM — build + live inputs (no training)** builds
+  the net and inputs only.
+- Examples → **Deep readout — 8000-neuron local liquid** (lsm_deep) does
+  the training run (~35 s on CUDA), then the inspector's Train /
+  layer editing as in Stage 26.
+
+### How to demo (exact clicks)
+
+1. Help/Examples menu (or Script editor → Examples) → **Deep LSM — build
+   + live inputs (no training)** → **Run** (script editor). It takes
+   ~3 s; the console says `alive: liquid rate ≈7.5 Hz`.
+2. Talk about the net: 8000 neurons, local random wiring, six inputs on
+   the left (orbit with right-drag to show the column outside the
+   cube). Toggle **synapses** off in the left panel so the spikes stand
+   out.
+3. Press **RUN** (left panel). Spikes enter from the left face and spread;
+   it keeps going (the trains loop every 8 s). **reset** restarts them,
+   so it never goes quiet.
+4. Training: Examples → **Deep readout** → Run (~35 s). The held-out
+   numbers print in the console and the readout appears as the MLP stack
+   above the cube.
+5. Double-click the stack: the camera centres on the readout and the
+   inspector shows its layers. Edit the layers → Apply → **Train: re-run
+   lsm_deep**.
+
+### Shots (`review/stage27_shots/`, GUI under Xvfb, 1440×900)
+
+- `deep_before_focus.png`, `deep_after_focus_on_stack.png`: bug 1 fixed
+  (readout marker centred, readout selected).
+- `setup_headless_inputs_outside.png`: six inputs in a column left of
+  the cube; the readout marker is above it.
+- `setup_running_40s_later.png`: autorun, t = 65.5 s, rate 7.2 Hz, with
+  synapses on.
+- `setup_running_nosyn_a.png` (t = 19.3 s) and
+  `setup_running_nosyn_b_10s_later.png` (t = 29.0 s): synapses off,
+  spikes visible, 7.2 Hz steady.
+- `setup_after_reset_8s.png`: Reset pressed, t = 8.0 s later, still
+  7.2 Hz.
+- `lsmbig_block_inputs_outside.png`: lsm_big full in block view, inputs
+  outside, MLP stack, same headline 0.833 / 0.739.
+
+### Gates
+
+- `cargo test --workspace --release --no-fail-fast`: **346 passed, 0
+  failed, 1 ignored** (Stage 26: 343; +3 = focus test, loop test,
+  lsm_deep_setup test). The worker audit includes lsm_deep_setup.
+- fmt clean; clippy's warning set is identical to main's.
+- `editor/web/build.sh` OK, still only with wasm-bindgen CLI 0.2.118
+  (`/tmp/ne26_wbg/bin`). `~/.cargo/bin/wasm-bindgen` is still 0.2.127
+  (see Stage 26), so Data's deploy path needs the matching CLI.
+- `cargo check --workspace --all-targets` passes on every branch commit (in place).
+
+### Commits
+
+- `4b0b2e3` editor: double-click focus on a readout lands on the readout
+- `49dd9b0` sim: looping input series (sim.loop_input) + add_input with a position
+- `cb4d4ec` examples: lsm_deep_setup — build + six looping input trains outside the cube, no training
+- `889d9a1` examples: lsm_deep/lsm_big — inputs drawn outside the cube, looping input trains after the experiment
+- `cb73c99` docs: lsm_deep_setup in README, help examples list and the Readouts manual page
+- `c962fb0` editor: input/readout glyphs scale with lattice spacing (7..24) — the outside input column was dust-sized
+- (this NOTES commit)
+
+### Still open
+
+- Action buttons from scripts (not built; fallback above).
+- lsm_deep_setup's liquid (W_REC 12) is not the one lsm_deep trains on
+  (W_REC 3, where spikes don't travel). Training on the travelling
+  liquid would need its own task check.
+- The looping drive is stored per sim. A *net edit* keeps it (DriveState
+  rebuild), but **New/Load or an example's `net.clear()` drops it, by
+  design** (Stage 25 document reset).
+- Unchanged from Stage 26: the block glyph is still a flat screen card,
+  there is no MSAA, and from top-down the stack overlaps the block.
