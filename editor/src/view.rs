@@ -1586,7 +1586,11 @@ fn draw_mlp_stacks(
                 Color32::from_rgb(110, 200, 170) // hidden
             };
             // Untrained: same layout, washed out — no weights yet.
-            let col = if planned { col.gamma_multiply(0.45) } else { col };
+            let col = if planned {
+                col.gamma_multiply(0.45)
+            } else {
+                col
+            };
             painter.rect_filled(*r, 2.0, col);
             painter.text(
                 egui::pos2(r.center().x, base_y + 3.0 * zoom),
